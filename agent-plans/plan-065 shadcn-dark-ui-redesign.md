@@ -41,10 +41,10 @@ The original visual reference image and prototype commit are missing. Build real
 
 ## Non-Destructive Scan Excludes
 
-1. [ ] Add scan-owned pattern persistence, normalization/deduplication, matcher helpers, and explicit physical-versus-visible record types without deleting `files` rows.
-2. [ ] Change scan/update ingestion so every discovered row remains indexed while per-scan patterns are copied and applied only at query/action visibility boundaries.
+1. [x] Add scan-owned pattern persistence, normalization/deduplication, matcher helpers, and explicit physical-versus-visible record types without deleting `files` rows.
+2. [x] Change scan/update ingestion so every discovered row remains indexed while per-scan patterns are copied and applied only at query/action visibility boundaries.
 3. [ ] Apply one shared visibility rule to scan tree/files, search/occurrences/details, duplicates, delete check, thumbnails, reuse, and guarded path actions.
-4. [ ] Add identical browser and native RPC handlers for get/set/append plus `scan_excludes_updated`; retain active-scan semantics explicitly rather than silently changing scan contents.
+4. [x] Add identical browser and native RPC handlers for get/set/append plus `scan_excludes_updated`; retain active-scan semantics explicitly rather than silently changing scan contents.
 5. [ ] Keep Exclude in the main workspace action menu, correct destructive modal copy, and prove sidebar/tree navigation remains directory-only.
 6. [ ] Add migration, DB, scanner, CLI, RPC, and UI regression evidence that patterns persist and rows remain physically indexed.
 
@@ -67,7 +67,7 @@ The original visual reference image and prototype commit are missing. Build real
 - Exact replay still stops at historical formatting/state transitions in `scanner.rs`, `ui/src/App.jsx`, and `cli.rs`. Their promoted versions are the latest verified snapshot or exact pre-conflict prefix, never fuzzy merges. Native bundle PNG/ICNS icons remain unrecovered.
 - A source-horizon recovery of `ui/src/style.css` reached a clean latest direct event on 2026-07-12 (`call_TXYQr7ri2wPK6Ttq04uMA7mx`), replayed three success-gated later changes without conflict, and exactly restored the compact neutral-dark global tokens. Its promoted SHA-256 is `306a72f5f6a78b52741d72ffc2e7c7229cbc90fc925e33dc49ce19d7c23d8800`.
 - The React source graph is closed (46 reachable local files, no missing relative imports), but it cannot be run or built in this environment yet: Node/npm, `ui/node_modules`, lockfiles, Tailwind/PostCSS configuration, and `ui/dist` are absent. The Vite configuration also has no backend proxy, so a standalone Vite page would not prove real behavior.
-- Backend compilation is intentionally blocked until a UI build exists because `src/backend/src/web.rs` embeds `../../ui/dist`; native/Tauri is independently blocked by that missing artifact and all configured PNG/ICNS bundle icons. The recovered SVG icon candidates must not be silently substituted for those assets.
+- Backend compilation is intentionally blocked until a UI build exists because `src/backend/src/web.rs` embeds `../../ui/dist`; native/Tauri is independently blocked by that missing artifact. The recovered SVG icon candidates must not be silently substituted for bundle assets.
 - A strict archive replay recovered 41 historical `agent-plans/plan-*.md` files (394 direct-success calls, 407 changes, no replay conflicts) into `agent-plans/recovered/historical/`; every promoted archival file matches the manifest SHA-256. No direct-success historical project `.agent-plans/` path exists. Twenty-five `agent-plans/` paths remain absent because the logs lack a successful Add baseline or strict replay reaches a context conflict.
 - The latest known source for `cli.rs` had 1,812 lines, while the recovered 1,778-line file is a mismatching pre-conflict forensic prefix. Direct tail reads cannot be safely appended. The simplified CLI scan shape and Ratatui progress interface were only a source-contract request before deletion, not recovered implementation evidence.
 - The complete-read recovery tool now accepts only declared `sed` ranges with exact multi-line overlap and validates range coverage; optional per-segment source logs retain backwards compatibility with existing root-level seed logs. Its full-seed validation passed after adding the June 14 `App.jsx` seed.
@@ -77,6 +77,8 @@ The original visual reference image and prototype commit are missing. Build real
 - Exact direct evidence restored root `flake.nix` (53 lines, SHA-256 `67e971487a4c253bdd71bf1a5b390fff0f09ab8eefb9e3b47783a0668a9b7752`) and root `.gitignore` (11 lines, SHA-256 `4e8ceb4b4ae47e01a6e8c1da7e6f81cd61e14b1580ae41bceb8a81aa3774ba55`). `flake.lock` is only known to have been generated/staged, so it remains absent; no nested ignore or alternate shell file is claimed without further evidence.
 - Strict `db.rs` horizon replay reached a nonpromotable 2,950-line prefix containing both scanner exclusion helpers, then stopped at the first missing SQL hunk context (`call_2j26Fjedn29G65Du27p2pQDI`, 2026-06-14 02:40). The prefix is evidence only; no fuzzy patch or helper extraction may be applied to the promoted database snapshot.
 - The exact helper fragment compiles gitignore-style patterns rooted at `/` and prunes matched directories. Its adjacent historical persistence code deletes matching indexed file rows, which conflicts with the explicit product invariant that excludes are non-destructive per-scan filters for every operation. Rebuild the matcher, persistence, and query predicates intentionally; do not transplant that cleanup behavior.
+- The user authorized reuse of the installed `/Applications/file-census.app` bundle icon. Its `icon.icns` was copied byte-for-byte into `src/native_app/icons/icon.icns`; macOS `iconutil` produced the four configured PNG sizes (32, 128, 256 @2x, and 512 px). The ICNS SHA-256 is `32d3f29f5a3e39595149ff50172db18a53e866ab8d6a83be480be4e5514fdd6e`; this resolves the macOS native icon-input blocker without modifying the installed app.
+- The first rebuilt exclusion foundation is intentionally partial: schema/API/matcher, non-pruning scanner ingestion, matching browser/native RPC methods, events, and truthful modal text are present. No shared visibility predicate has yet been wired into scan tree/files, search, details, duplicates, delete checks, thumbnails, reuse, or guarded path actions; these surfaces must not be claimed compliant before that work and regression proof.
 
 # Work Log
 
@@ -99,6 +101,8 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-15 01:20 - Recovered and byte-verified exact root `flake.nix` and `.gitignore` blobs from direct successful evidence; left unrecoverable `flake.lock` and unproven nested artifacts absent.
 - [x] 2026-07-15 01:25 - Ran a temp-only strict `db.rs` horizon replay: it found both exclusion helpers in a 2,950-line partial prefix but stopped at the first exact SQL-context mismatch, so no database source was promoted.
 - [x] 2026-07-15 01:27 - Extracted the exact matcher contract and rejected the historical destructive cleanup semantics; retained the user-required non-destructive per-scan filter model.
+- [x] 2026-07-15 01:38 - Recovered the configured macOS native icon assets from the installed File Census bundle, byte-verified the ICNS copy, and validated all configured PNG dimensions.
+- [x] 2026-07-15 01:41 - Integrated and statically audited the partial non-destructive exclusion foundation: scan-owned persistence/matcher, physical-row scanner ingestion, dual transport RPC/event handlers, and truthful modal copy. The audit explicitly retained visibility/action filtering and regression coverage as unfinished.
 - [ ] 2026-07-15 00:22 - Resolve the remaining `cli.rs` source horizon, compatible database exclusion helpers, native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
@@ -108,8 +112,9 @@ The original visual reference image and prototype commit are missing. Build real
 - [ ] Use the verified snapshot index and complete-read seeds to finish strict later-patch recovery for the promoted backend/native closure; do not fuzzy-merge conflicted histories.
 - [ ] Finish the post-promotion recovery closure: resolve exact conflicted path horizons, missing native bundle assets, and source/runtime mismatches before implementing new behavior.
 - [ ] Rebuild the scanner/database exclusion boundary coherently from the verified domain contract if no later complete `db.rs` source horizon appears; preserve the non-destructive per-scan semantics.
+- [ ] Wire one scan-scoped visibility/action predicate through every listed result, aggregate, and path-action boundary before treating the rebuilt exclusion foundation as complete.
 - [ ] Keep the 25 unrecoverable historical plan paths absent rather than fabricating them; use the archival manifest as provenance if a later recovery source appears.
 - [ ] Recover or deliberately re-establish reproducible Node/Rust dependency inputs before the first bounded UI/backend build; keep `ui/dist`, build caches, and generated assets out of source recovery evidence.
-- [ ] Recover or obtain approval for the missing native PNG/ICNS bundle assets; do not substitute the recovered SVG candidates automatically.
+- [ ] Run the first native bundle validation using the recovered, installed-app-derived PNG/ICNS assets after reproducible toolchain/UI-dist inputs are restored.
 - [ ] Keep `flake.lock`, alternate Nix shell files, and nested `.gitignore` paths absent until direct historical evidence proves their full content; keep externally created package-manager artifacts unmodified until provenance is known.
 - [ ] Complete every implementation and verification step above.

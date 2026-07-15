@@ -69,7 +69,7 @@ export default function AppModals(props) {
                 placeholder={'*.tmp\ncache/\n/Photos/private/'}
               />
             </label>
-            <ModalHelp>One pattern per line. Saving applies the list to this scan and removes matching indexed rows from the scan only.</ModalHelp>
+            <ModalHelp>One pattern per line. Saving applies persistent visibility filters to this scan; matching indexed rows and source files stay unchanged.</ModalHelp>
             <Toolbar className={actionToolbarClassName}>
               <Button type="submit" disabled={props.busy} icon={<Icon name="save" />}>Save excludes</Button>
               <Button type="button" variant="secondary" onClick={() => props.setShowScanExcludes(false)} icon={<Icon name="back" />}>Cancel</Button>

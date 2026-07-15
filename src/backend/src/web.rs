@@ -281,6 +281,32 @@ async fn handle_rpc_result(
             state.events.emit("scan_notes_updated", &scan);
             Ok(serde_json::to_value(scan)?)
         }
+        "scans.excludes.get" => {
+            let params: ScanIdParams = decode_params(params)?;
+            Ok(serde_json::to_value(state.db.scan_excludes(&params.scan_id)?)?)
+        }
+        "scans.excludes.set" => {
+            let params: SetScanExcludesParams = decode_params(params)?;
+            let excludes = state
+                .db
+                .set_scan_excludes(&params.scan_id, params.patterns)?;
+            state.events.emit(
+                "scan_excludes_updated",
+                serde_json::json!({ "scan_id": params.scan_id }),
+            );
+            Ok(serde_json::to_value(excludes)?)
+        }
+        "scans.excludes.append_exact_path" => {
+            let params: AppendExactScanExcludeParams = decode_params(params)?;
+            let excludes = state
+                .db
+                .append_exact_scan_exclude(&params.scan_id, &params.path, &params.kind)?;
+            state.events.emit(
+                "scan_excludes_updated",
+                serde_json::json!({ "scan_id": params.scan_id }),
+            );
+            Ok(serde_json::to_value(excludes)?)
+        }
         "scans.delete_check" => {
             let params: DeleteCheckParams = decode_params(params)?;
             let result =
@@ -546,6 +572,19 @@ struct ScanIdParams {
 struct UpdateScanNotesRequest {
     scan_id: String,
     notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SetScanExcludesParams {
+    scan_id: String,
+    patterns: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AppendExactScanExcludeParams {
+    scan_id: String,
+    path: String,
+    kind: String,
 }
 
 #[derive(Deserialize)]

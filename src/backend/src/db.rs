@@ -1,8 +1,10 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -89,6 +91,14 @@ pub struct Scan {
     pub status: String,
     pub is_representative: bool,
     pub notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScanExclude {
+    pub id: i64,
+    pub scan_id: String,
+    pub pattern: String,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -309,11 +319,20 @@ impl Database {
                 PRIMARY KEY (blake3, size)
             );
 
+            CREATE TABLE IF NOT EXISTS scan_excludes (
+                id INTEGER PRIMARY KEY,
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                pattern TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(scan_id, pattern)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_locations_slug ON locations(slug);
             CREATE INDEX IF NOT EXISTS idx_scans_location ON scans(location_id);
             CREATE INDEX IF NOT EXISTS idx_files_scan_path ON files(scan_id, path);
             CREATE INDEX IF NOT EXISTS idx_files_name ON files(name);
             CREATE INDEX IF NOT EXISTS idx_files_blake3_size ON files(blake3, size);
+            CREATE INDEX IF NOT EXISTS idx_scan_excludes_scan ON scan_excludes(scan_id);
             "#,
         )?;
         if !column_exists(conn, "locations", "representative_scan_id")? {
@@ -673,6 +692,85 @@ impl Database {
         refresh_scan_file_counts(&tx, scan_id)?;
         tx.commit()?;
         Ok(deleted)
+    }
+
+    pub fn scan_excludes(&self, scan_id: &str) -> Result<Vec<ScanExclude>> {
+        let conn = self.connect()?;
+        ensure_scan_exists(&conn, scan_id)?;
+        scan_excludes_from_conn(&conn, scan_id)
+    }
+
+    pub fn scan_exclude_patterns(&self, scan_id: &str) -> Result<Vec<String>> {
+        let conn = self.connect()?;
+        ensure_scan_exists(&conn, scan_id)?;
+        scan_exclude_patterns_from_conn(&conn, scan_id)
+    }
+
+    pub fn set_scan_excludes(
+        &self,
+        scan_id: &str,
+        patterns: Vec<String>,
+    ) -> Result<Vec<ScanExclude>> {
+        let patterns = normalize_scan_exclude_patterns(patterns);
+        build_scan_exclude_matcher(&patterns)?;
+
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        ensure_scan_exists(&tx, scan_id)?;
+        tx.execute("DELETE FROM scan_excludes WHERE scan_id = ?1", [scan_id])?;
+
+        let created_at = Utc::now().to_rfc3339();
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO scan_excludes (scan_id, pattern, created_at) VALUES (?1, ?2, ?3)",
+            )?;
+            for pattern in patterns {
+                stmt.execute(params![scan_id, pattern, created_at])?;
+            }
+        }
+
+        tx.commit()?;
+        self.scan_excludes(scan_id)
+    }
+
+    pub fn append_exact_scan_exclude(
+        &self,
+        scan_id: &str,
+        path: &str,
+        kind: &str,
+    ) -> Result<Vec<ScanExclude>> {
+        let pattern = exact_scan_exclude_pattern(path, kind)?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        ensure_scan_exists(&tx, scan_id)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO scan_excludes (scan_id, pattern, created_at) VALUES (?1, ?2, ?3)",
+            params![scan_id, pattern, Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        self.scan_excludes(scan_id)
+    }
+
+    pub fn copy_scan_excludes(&self, source_scan_id: &str, target_scan_id: &str) -> Result<()> {
+        let patterns = normalize_scan_exclude_patterns(self.scan_exclude_patterns(source_scan_id)?);
+        build_scan_exclude_matcher(&patterns)?;
+
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        ensure_scan_exists(&tx, target_scan_id)?;
+
+        let created_at = Utc::now().to_rfc3339();
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO scan_excludes (scan_id, pattern, created_at) VALUES (?1, ?2, ?3)",
+            )?;
+            for pattern in patterns {
+                stmt.execute(params![target_scan_id, pattern, created_at])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn scans(&self) -> Result<Vec<Scan>> {
@@ -1248,6 +1346,118 @@ fn normalize_file_path(path: &str) -> String {
         .filter(|part| !part.is_empty() && *part != "." && *part != "..")
         .collect::<Vec<_>>()
         .join("/")
+}
+
+pub fn exact_scan_exclude_pattern(path: &str, kind: &str) -> Result<String> {
+    let normalized = normalize_file_path(path);
+    if normalized.is_empty() {
+        anyhow::bail!("refusing to exclude the scan root; delete the scan instead");
+    }
+
+    let escaped = escape_gitignore_literal(&normalized);
+    match kind {
+        "dir" => Ok(format!("/{escaped}/")),
+        "file" => Ok(format!("/{escaped}")),
+        other => anyhow::bail!("unknown scan exclude kind: {other}"),
+    }
+}
+
+pub fn build_scan_exclude_matcher(patterns: &[String]) -> Result<Option<Gitignore>> {
+    if patterns.iter().all(|pattern| pattern.trim().is_empty()) {
+        return Ok(None);
+    }
+
+    let mut builder = GitignoreBuilder::new("/");
+    for pattern in patterns {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        builder
+            .add_line(None, pattern)
+            .with_context(|| format!("invalid scan exclude pattern: {pattern}"))?;
+    }
+    builder
+        .build()
+        .map(Some)
+        .context("building scan exclude matcher")
+}
+
+pub fn scan_path_is_excluded(matcher: &Option<Gitignore>, path: &str, is_dir: bool) -> bool {
+    let Some(matcher) = matcher else {
+        return false;
+    };
+
+    let normalized = normalize_file_path(path);
+    if normalized.is_empty() {
+        return false;
+    }
+    matcher
+        .matched_path_or_any_parents(Path::new(&normalized), is_dir)
+        .is_ignore()
+}
+
+fn escape_gitignore_literal(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for ch in path.chars() {
+        match ch {
+            '\\' | '*' | '?' | '[' | ']' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn normalize_scan_exclude_patterns(patterns: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for pattern in patterns {
+        let pattern = pattern.trim().to_string();
+        if pattern.is_empty() || !seen.insert(pattern.clone()) {
+            continue;
+        }
+        normalized.push(pattern);
+    }
+    normalized
+}
+
+fn ensure_scan_exists(conn: &Connection, scan_id: &str) -> Result<()> {
+    let exists: Option<i64> = conn
+        .query_row("SELECT 1 FROM scans WHERE id = ?1", [scan_id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    if exists.is_none() {
+        anyhow::bail!("scan not found: {scan_id}");
+    }
+    Ok(())
+}
+
+fn scan_excludes_from_conn(conn: &Connection, scan_id: &str) -> Result<Vec<ScanExclude>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, scan_id, pattern, created_at FROM scan_excludes WHERE scan_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([scan_id], |row| {
+        Ok(ScanExclude {
+            id: row.get(0)?,
+            scan_id: row.get(1)?,
+            pattern: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn scan_exclude_patterns_from_conn(conn: &Connection, scan_id: &str) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT pattern FROM scan_excludes WHERE scan_id = ?1 ORDER BY id")?;
+    let rows = stmt.query_map([scan_id], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn refresh_scan_file_counts(conn: &Connection, scan_id: &str) -> Result<()> {

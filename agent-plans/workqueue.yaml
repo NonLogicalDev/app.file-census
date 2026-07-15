@@ -4,7 +4,7 @@ queue:
   subject: file-census production rebuild and acceptance
   coordinator: root
   created_at: 2026-07-15T05:45:00Z
-  updated_at: 2026-07-15T08:25:00Z
+  updated_at: 2026-07-15T08:41:00Z
 tasks:
   - id: rebuild-requirements-ledger
     work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
@@ -30,23 +30,40 @@ tasks:
 
   - id: structured-source-recovery
     work: Extract the pre-deletion historical patch ledger, deduplicate copied calls, replay only exact context matches into a temporary tree, and promote only validated source into this checkout.
-    status: in-progress
+    status: succeeded
     prerequisites:
       - rebuild-requirements-ledger
     priority: 100
     created_at: 2026-07-15T05:55:00Z
     resources:
       - session-logs
-    outcome: Direct-event manifest plus a hash-verified source index are complete. Path-scoped recovery gates every patch on direct success output; complete-read seeds now validate strict multi-line overlaps. A final-architecture baseline is promoted with static import/module checks, a latest clean dark global-style horizon through 2026-07-12, a June 14 App source whose 47-file import closure resolves, a 1,385-line scanner horizon, and exact root flake/ignore blobs. The scanner exposes two missing database exclusion helpers; strict db horizon replay reaches them only in a nonpromotable partial prefix and stops at an SQL-context conflict, so coherent database recovery/reimplementation remains prerequisite to static backend closure. The historical plan archive contains 41 exact-replayed, hash-verified files and records 25 non-fabricated omissions. Static UI imports close, but missing toolchains/lockfiles, UI dist, and native bundle assets keep runtime validation blocked.
+    outcome: Direct-event manifest plus a hash-verified source index are complete. Path-scoped recovery gates every patch on direct success output; complete-read seeds now validate strict multi-line overlaps. A final-architecture baseline is promoted with static import/module checks, a latest clean dark global-style horizon through 2026-07-12, a June 14 App source whose 47-file import closure resolves, a 1,385-line scanner horizon, and exact root flake/ignore blobs. The strict replay boundary documented incompatible database/CLI horizons rather than fabricating them; their intentional reconstruction belongs to downstream domain work. The historical plan archive contains 41 exact-replayed, hash-verified files and records 25 non-fabricated omissions. Static UI imports close, but missing toolchains/lockfiles and UI dist keep runtime validation blocked.
+
+  - id: native-bundle-icon-assets
+    work: Recover the configured macOS native bundle icon assets from an approved installed File Census bundle, without changing that installed application.
+    status: succeeded
+    prerequisites:
+      - rebuild-requirements-ledger
+    priority: 97
+    created_at: 2026-07-15T08:38:00Z
+    outcome: Exact ICNS and configured PNG sizes are present under src/native_app/icons; no installed-app files were modified.
+    evidence:
+      - source: /Applications/file-census.app/Contents/Resources/icon.icns
+      - sha256: 32d3f29f5a3e39595149ff50172db18a53e866ab8d6a83be480be4e5514fdd6e
+      - config: src/native_app/tauri.conf.json
 
   - id: backend-domain-foundation
     work: Build the Rust/SQLite domain and JSON-RPC/browser-server foundation for locations, scans, files, scan visibility, and live progress.
-    status: open
+    status: claimed
     prerequisites:
       - rebuild-requirements-ledger
       - structured-source-recovery
     priority: 99
     created_at: 2026-07-15T05:45:00Z
+    claim:
+      owner: root
+      started_at: 2026-07-15T08:41:00Z
+    outcome: Rebuilding the missing database exclusion contract intentionally; initial persistence, ingestion, and RPC/event foundation is integrated, while shared visibility/action predicates and validation remain.
 
   - id: production-shell-and-routing
     work: Build the real dark application shell, routing, persisted collapsible sidebar, and main-top-bar Cmd-K foundation.
@@ -102,6 +119,7 @@ tasks:
     prerequisites:
       - scan-exclude-filter-contract
       - duplicates-tasks-search-options
+      - native-bundle-icon-assets
     priority: 80
     created_at: 2026-07-15T05:45:00Z
 

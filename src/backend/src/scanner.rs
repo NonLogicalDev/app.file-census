@@ -10,13 +10,12 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use ignore::gitignore::Gitignore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::db::{
-    build_scan_exclude_matcher, scan_path_is_excluded, Database, Location, NewFile, ReusableFile,
+    build_scan_exclude_matcher, Database, Location, NewFile, ReusableFile,
 };
 use crate::events::EventHub;
 
@@ -412,7 +411,9 @@ pub fn run_prepared_scan(
     let mut error_count = 0;
     let mut total_bytes = 0;
     let exclude_patterns = db.scan_exclude_patterns(&prepared.scan_id)?;
-    let exclude_matcher = build_scan_exclude_matcher(&exclude_patterns)?;
+    // Excludes remain scan-scoped policy, but they must not suppress physical
+    // indexing. Validate them here; query surfaces apply visibility later.
+    let _ = build_scan_exclude_matcher(&exclude_patterns)?;
     let metadata_workers = 2;
     let hash_workers = hash_worker_count();
     let (work_tx, work_rx) = sync_channel::<WorkItem>(512);
@@ -465,7 +466,6 @@ pub fn run_prepared_scan(
         scope.spawn(move || {
             discovery_worker(
                 scan_root,
-                &exclude_matcher,
                 work_tx,
                 discovery_result_tx,
                 discovery_progress,
@@ -595,7 +595,6 @@ pub fn run_prepared_scan(
 
 fn discovery_worker(
     scan_root: &Path,
-    exclude_matcher: &Option<Gitignore>,
     work_tx: SyncSender<WorkItem>,
     result_tx: SyncSender<PipelineResult>,
     progress: Option<ScanProgressStore>,
@@ -606,15 +605,6 @@ fn discovery_worker(
     for entry in WalkDir::new(scan_root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| {
-            let relative_path = entry
-                .path()
-                .strip_prefix(scan_root)
-                .unwrap_or(entry.path())
-                .to_string_lossy()
-                .to_string();
-            !scan_path_is_excluded(exclude_matcher, &relative_path, entry.file_type().is_dir())
-        })
     {
         if progress
             .as_ref()
@@ -1179,6 +1169,19 @@ mod tests {
     use super::*;
     use crate::db::{LocationInput, LocationType};
 
+    fn physical_file_paths(db: &Database, scan_id: &str) -> Vec<String> {
+        let conn = db.connect().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT path FROM files WHERE scan_id = ?1 AND kind = 'file' ORDER BY path",
+            )
+            .unwrap();
+        stmt.query_map([scan_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
     #[test]
     fn update_scan_repopulates_rows_deleted_from_source_scan() {
         let root = test_root("update-repopulates");
@@ -1252,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_skips_files_and_prunes_folders_matching_excludes() {
+    fn scan_indexes_files_matching_excludes() {
         let root = test_root("scan-excludes");
         let location_root = root.join("location");
         std::fs::create_dir_all(location_root.join("skip-dir")).unwrap();
@@ -1278,23 +1281,13 @@ mod tests {
         .unwrap();
         let summary = run_prepared_scan(&db, prepared, None).unwrap();
 
-        assert_eq!(summary.file_count, 1);
-        let paths = db
-            .scan_files(&summary.scan_id, 10)
-            .unwrap()
-            .into_iter()
-            .map(|file| file.path)
-            .collect::<Vec<_>>();
-        assert_eq!(paths, vec!["keep.txt"]);
-        assert!(db
-            .scan_tree(&summary.scan_id, "")
-            .unwrap()
-            .iter()
-            .all(|entry| entry.path != "skip-dir"));
+        assert_eq!(summary.file_count, 3);
+        let paths = physical_file_paths(&db, &summary.scan_id);
+        assert_eq!(paths, vec!["keep.txt", "skip-dir/hidden.txt", "skip.tmp"]);
     }
 
     #[test]
-    fn update_scan_copies_excludes_and_does_not_restore_excluded_paths() {
+    fn update_scan_copies_excludes_and_indexes_matching_paths() {
         let root = test_root("update-respects-excludes");
         let location_root = root.join("location");
         std::fs::create_dir_all(location_root.join("sub")).unwrap();
@@ -1326,14 +1319,9 @@ mod tests {
         );
         let updated = run_prepared_scan(&db, prepared, None).unwrap();
 
-        assert_eq!(updated.file_count, 1);
-        let paths = db
-            .scan_files(&updated.scan_id, 10)
-            .unwrap()
-            .into_iter()
-            .map(|file| file.path)
-            .collect::<Vec<_>>();
-        assert_eq!(paths, vec!["keep.txt"]);
+        assert_eq!(updated.file_count, 2);
+        let paths = physical_file_paths(&db, &updated.scan_id);
+        assert_eq!(paths, vec!["keep.txt", "sub/restore.txt"]);
     }
 
     #[test]
