@@ -66,6 +66,7 @@ The original visual reference image and prototype commit are missing. Build real
 - `src/backend/src/scanner.rs` is now promoted from a later June 13 complete-read seed (1,385 lines, 44,905 bytes, SHA-256 `c4f329308c5cf95cbfef88c335289cc1cc6d313842a1de48af793ea0dd674579`). Static module resolution found its new `ignore` dependency declared, but confirmed that `db::build_scan_exclude_matcher` and `db::scan_path_is_excluded` are absent from the currently recovered `db.rs`; recover a compatible later database horizon before any compile claim.
 - The checkout currently has no `flake.nix`, `flake.lock`, `shell.nix`, or historical `.gitignore` hierarchy, even though the historical `Justfile` expects `nix develop -c cargo`. The user raised these as likely deleted source artifacts; recovery is now searching only direct pre-deletion evidence before any replacement is considered.
 - Exact direct evidence restored root `flake.nix` (53 lines, SHA-256 `67e971487a4c253bdd71bf1a5b390fff0f09ab8eefb9e3b47783a0668a9b7752`) and root `.gitignore` (11 lines, SHA-256 `4e8ceb4b4ae47e01a6e8c1da7e6f81cd61e14b1580ae41bceb8a81aa3774ba55`). `flake.lock` is only known to have been generated/staged, so it remains absent; no nested ignore or alternate shell file is claimed without further evidence.
+- Strict `db.rs` horizon replay reached a nonpromotable 2,950-line prefix containing both scanner exclusion helpers, then stopped at the first missing SQL hunk context (`call_2j26Fjedn29G65Du27p2pQDI`, 2026-06-14 02:40). The prefix is evidence only; no fuzzy patch or helper extraction may be applied to the promoted database snapshot.
 
 # Work Log
 
@@ -86,6 +87,7 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-15 00:59 - Extended the complete-read verifier with strict declared-range multi-line overlap support, materialized the later June 14 `App.jsx` seed, promoted it byte-for-byte, and rechecked the 47-file React import closure.
 - [x] 2026-07-15 01:11 - Materialized and promoted the later exact 1,385-line `scanner.rs` seed, byte-verified it, and identified the two missing exclusion helpers required from a compatible `db.rs` horizon.
 - [x] 2026-07-15 01:20 - Recovered and byte-verified exact root `flake.nix` and `.gitignore` blobs from direct successful evidence; left unrecoverable `flake.lock` and unproven nested artifacts absent.
+- [x] 2026-07-15 01:25 - Ran a temp-only strict `db.rs` horizon replay: it found both exclusion helpers in a 2,950-line partial prefix but stopped at the first exact SQL-context mismatch, so no database source was promoted.
 - [ ] 2026-07-15 00:22 - Resolve the remaining `cli.rs` source horizon, compatible database exclusion helpers, native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
@@ -94,6 +96,7 @@ The original visual reference image and prototype commit are missing. Build real
 - [ ] Recover the deleted visual reference/prototype evidence from the user.
 - [ ] Use the verified snapshot index and complete-read seeds to finish strict later-patch recovery for the promoted backend/native closure; do not fuzzy-merge conflicted histories.
 - [ ] Finish the post-promotion recovery closure: resolve exact conflicted path horizons, missing native bundle assets, and source/runtime mismatches before implementing new behavior.
+- [ ] Rebuild the scanner/database exclusion boundary coherently from the verified domain contract if no later complete `db.rs` source horizon appears; preserve the non-destructive per-scan semantics.
 - [ ] Keep the 25 unrecoverable historical plan paths absent rather than fabricating them; use the archival manifest as provenance if a later recovery source appears.
 - [ ] Recover or deliberately re-establish reproducible Node/Rust dependency inputs before the first bounded UI/backend build; keep `ui/dist`, build caches, and generated assets out of source recovery evidence.
 - [ ] Recover or obtain approval for the missing native PNG/ICNS bundle assets; do not substitute the recovered SVG candidates automatically.
