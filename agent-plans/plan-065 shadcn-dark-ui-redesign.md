@@ -59,6 +59,8 @@ The original visual reference image and prototype commit are missing. Build real
 - A source-horizon recovery of `ui/src/style.css` reached a clean latest direct event on 2026-07-12 (`call_TXYQr7ri2wPK6Ttq04uMA7mx`), replayed three success-gated later changes without conflict, and exactly restored the compact neutral-dark global tokens. Its promoted SHA-256 is `306a72f5f6a78b52741d72ffc2e7c7229cbc90fc925e33dc49ce19d7c23d8800`.
 - The React source graph is closed (46 reachable local files, no missing relative imports), but it cannot be run or built in this environment yet: Node/npm, `ui/node_modules`, lockfiles, Tailwind/PostCSS configuration, and `ui/dist` are absent. The Vite configuration also has no backend proxy, so a standalone Vite page would not prove real behavior.
 - Backend compilation is intentionally blocked until a UI build exists because `src/backend/src/web.rs` embeds `../../ui/dist`; native/Tauri is independently blocked by that missing artifact and all configured PNG/ICNS bundle icons. The recovered SVG icon candidates must not be silently substituted for those assets.
+- A strict archive replay recovered 41 historical `agent-plans/plan-*.md` files (394 direct-success calls, 407 changes, no replay conflicts) into `agent-plans/recovered/historical/`; every promoted archival file matches the manifest SHA-256. No direct-success historical project `.agent-plans/` path exists. Twenty-five `agent-plans/` paths remain absent because the logs lack a successful Add baseline or strict replay reaches a context conflict.
+- The latest known source for `cli.rs` had 1,812 lines, while the recovered 1,778-line file is a mismatching pre-conflict forensic prefix. Direct tail reads cannot be safely appended. The simplified CLI scan shape and Ratatui progress interface were only a source-contract request before deletion, not recovered implementation evidence.
 
 # Work Log
 
@@ -75,6 +77,7 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-15 00:22 - Promoted 118 final-architecture source files into the otherwise empty checkout from verified snapshots, exact direct patch chains, and mapped native move provenance; static React import closure and Rust module declarations pass.
 - [x] 2026-07-15 00:28 - Promoted the latest clean, success-gated `ui/src/style.css` horizon (through 2026-07-12) and byte-verified it against the temporary recovery tree; `git diff --check` passes.
 - [x] 2026-07-15 00:35 - Completed a read-only runtime-closure audit: static React imports close, while missing pinned toolchains, UI build artifact, lockfiles/config, and native bundle assets block every build/runtime claim; no dependencies were installed.
+- [x] 2026-07-15 00:47 - Promoted 41 exact-replayed historical plan files plus provenance/report into `agent-plans/recovered/historical/`; verified all 41 manifest hashes and recorded the 25 deliberate omissions.
 - [ ] 2026-07-15 00:22 - Resolve the three formatter/state-conflicted path horizons (`App.jsx`, `scanner.rs`, `cli.rs`), native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
@@ -83,7 +86,7 @@ The original visual reference image and prototype commit are missing. Build real
 - [ ] Recover the deleted visual reference/prototype evidence from the user.
 - [ ] Use the verified snapshot index and complete-read seeds to finish strict later-patch recovery for the promoted final workspace backbone and frontend boot closure; do not fuzzy-merge conflicted histories.
 - [ ] Finish the post-promotion recovery closure: resolve exact conflicted path horizons, missing native bundle assets, and source/runtime mismatches before implementing new behavior.
-- [ ] Recover all success-gated `agent-plans/` entries that have direct Add/snapshot baselines; retain unresolved plan files as evidence rather than fabricating them.
+- [ ] Keep the 25 unrecoverable historical plan paths absent rather than fabricating them; use the archival manifest as provenance if a later recovery source appears.
 - [ ] Recover or deliberately re-establish reproducible Node/Rust dependency inputs before the first bounded UI/backend build; keep `ui/dist`, build caches, and generated assets out of source recovery evidence.
 - [ ] Recover or obtain approval for the missing native PNG/ICNS bundle assets; do not substitute the recovered SVG candidates automatically.
 - [ ] Complete every implementation and verification step above.

@@ -35,10 +35,13 @@ The deleted implementation had an explicit terminal product direction. The short
 # Learning Log
 
 - The original source audit established that aggregate pool counts exist but queued paths have no truthful timestamps. The terminal UI must not invent that data.
+- The promoted `src/backend/src/cli.rs` is a 1,778-line pre-conflict forensic prefix, not a valid canonical source: direct untruncated pre-deletion tail reads prove a 1,812-line file and disagree with the promoted file across checked overlap ranges. Do not append the 34 missing lines or merge them by hand.
+- Existing `ScanCliProgressPrinter`, `ScanCliPool`, and `scan_cli_elapsed` are directly evidenced in historical source. No successful pre-deletion implementation patch for the requested simplified scan grammar, Ratatui dependency, renderer, or terminal acceptance result was recovered; all five implementation steps remain new work after source closure.
 
 # Work Log
 
 - [x] 2026-07-14 22:45 - Recreated the CLI/TUI plan from durable requirements after the prior implementation was deleted.
+- [x] 2026-07-15 00:47 - Audited direct pre-deletion CLI reads and preserved the source-recovery boundary: the latest 1,812-line tail cannot be safely merged into the 1,778-line recovered prefix, and the requested CLI/TUI work has no recovered implementation evidence.
 
 # Unfinished Work
 

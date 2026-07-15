@@ -1,0 +1,101 @@
+{
+  "historical_root": "/Users/nonlogical/Projects/local/file-census",
+  "cutoff": "2026-07-15T05:35:46.541Z",
+  "scanned_files": 963,
+  "scanned_lines": 1442418,
+  "recovered_calls": 394,
+  "historical_snapshots": 0,
+  "recovered_changes": 407,
+  "unique_paths": 41,
+  "first_event": {
+    "timestamp": "2026-06-12T21:12:51.416Z",
+    "call_id": "call_c0LPZIjG0k4mroyTxoVAdaxo",
+    "source_file": "/Users/nonlogical/.codex/sessions/2026/05/29/rollout-2026-05-29T20-01-18-019e76d4-3180-7473-b7b1-366ac8014fbd.jsonl",
+    "source_line": 6593
+  },
+  "last_event": {
+    "timestamp": "2026-07-15T05:26:47.885Z",
+    "call_id": "call_8gIwQJhVvJczrE8jS43Zz7pn",
+    "source_file": "/Users/nonlogical/.codex/sessions/2026/07/11/rollout-2026-07-11T20-12-22-019f544f-c9b4-7723-bfe1-0ff4bf2a1048.jsonl",
+    "source_line": 28621
+  },
+  "ignored_patch_records": 5080,
+  "path_scope": [
+    "agent-plans/plan-001 codex-layout.md",
+    "agent-plans/plan-002 icon-system.md",
+    "agent-plans/plan-003 sidebar-scan-tree.md",
+    "agent-plans/plan-004 tanstack-browser-components.md",
+    "agent-plans/plan-005 page-action-menu.md",
+    "agent-plans/plan-006 styling-framework.md",
+    "agent-plans/plan-007 table-polish.md",
+    "agent-plans/plan-011 tab-rail-style.md",
+    "agent-plans/plan-012 integrated-tabs.md",
+    "agent-plans/plan-013 prominent-scan-now.md",
+    "agent-plans/plan-014 tauri-live-updates.md",
+    "agent-plans/plan-015 scan-pause-repair.md",
+    "agent-plans/plan-016 tauri-runtime-detection.md",
+    "agent-plans/plan-017 progress-bar-stability.md",
+    "agent-plans/plan-018 location-path-autofill.md",
+    "agent-plans/plan-019 tailwind-full-migration.md",
+    "agent-plans/plan-020 cli-file-processing.md",
+    "agent-plans/plan-021 notion-style-search-filters.md",
+    "agent-plans/plan-024 dashboard-shell-cleanup.md",
+    "agent-plans/plan-025 ui-progress-activity-breadcrumb-polish.md",
+    "agent-plans/plan-026 filter-inline-creation.md",
+    "agent-plans/plan-027 advanced-filters-collapsed.md",
+    "agent-plans/plan-028 abrupt-exit-scan-recovery.md",
+    "agent-plans/plan-030 delete-check-active-filter.md",
+    "agent-plans/plan-031 chunked-progress-events.md",
+    "agent-plans/plan-032 websocket-stop-wedge.md",
+    "agent-plans/plan-034 explicit-filter-search-tree.md",
+    "agent-plans/plan-035 high-cardinality-file-occurrences.md",
+    "agent-plans/plan-036 discovery-speed-parity.md",
+    "agent-plans/plan-037 architecture-decisions.md",
+    "agent-plans/plan-038 p0-architecture-implementation.md",
+    "agent-plans/plan-039 duplicate-cache-task.md",
+    "agent-plans/plan-040 file-extra-info-scan.md",
+    "agent-plans/plan-041 hash-queue-backpressure.md",
+    "agent-plans/plan-054 duplicate-kind-grouping.md",
+    "agent-plans/plan-061 product-coherence.md",
+    "agent-plans/plan-062 schema-migration-order.md",
+    "agent-plans/plan-063 live-progress-events.md",
+    "agent-plans/plan-064 light-hash-scan-policy.md",
+    "agent-plans/plan-065 shadcn-dark-ui-redesign.md",
+    "agent-plans/plan-066 scanner-cli-operations.md"
+  ],
+  "applied_calls": 394,
+  "recovered_files": 41,
+  "conflict": null,
+  "ignored_samples": [
+    {
+      "file": "/Users/nonlogical/.codex/sessions/2026/05/27/rollout-2026-05-27T21-52-41-019e6ced-7553-7931-ae0e-ad3f6a25823e.jsonl",
+      "line": 218,
+      "call_id": "call_yKs6Rl3Gcuj5QPO6L2LG5FkT",
+      "reason": "unsafe add path"
+    },
+    {
+      "file": "/Users/nonlogical/.codex/sessions/2026/05/27/rollout-2026-05-27T21-52-41-019e6ced-7553-7931-ae0e-ad3f6a25823e.jsonl",
+      "line": 265,
+      "call_id": "call_Le7jZTEgYt7vrtpXewRL93yQ",
+      "reason": "unsafe update path"
+    },
+    {
+      "file": "/Users/nonlogical/.codex/sessions/2026/05/27/rollout-2026-05-27T21-52-41-019e6ced-7553-7931-ae0e-ad3f6a25823e.jsonl",
+      "line": 288,
+      "call_id": "call_lk0aa0BSyL22FZgUEFWTkIHF",
+      "reason": "unsafe update path"
+    },
+    {
+      "file": "/Users/nonlogical/.codex/sessions/2026/05/29/rollout-2026-05-29T13-34-33-019e7572-1dcd-7c53-9527-6681be4a0abd.jsonl",
+      "line": 108,
+      "call_id": "call_LwI28igWfpiMQx96el3ZLo7Y",
+      "reason": "unsafe add path"
+    },
+    {
+      "file": "/Users/nonlogical/.codex/sessions/2026/05/29/rollout-2026-05-29T13-34-33-019e7572-1dcd-7c53-9527-6681be4a0abd.jsonl",
+      "line": 122,
+      "call_id": "call_TFr19dKZq4dXBKXnyW135lRa",
+      "reason": "unsafe update path"
+    }
+  ]
+}
