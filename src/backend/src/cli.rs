@@ -906,7 +906,12 @@ fn run_scans(
                 args.depth,
                 None,
             )?;
-            emit(&tree, json, |tree| {
+            // JSON consumers get the entries array (a list-shaped command, like
+            // `scans list`/`files find`); pagination metadata is reported to
+            // stderr in the human-readable form.
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tree.entries)?);
+            } else {
                 for entry in &tree.entries {
                     println!(
                         "{}\t{}\t{}\t{}",
@@ -921,8 +926,8 @@ fn run_scans(
                         tree.next_offset.unwrap_or(tree.offset)
                     );
                 }
-                Ok(())
-            })
+            }
+            Ok(())
         }
         ScanSubcommand::DeleteCheck(args) => {
             let db = Database::open(db_path)?;

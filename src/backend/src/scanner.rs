@@ -373,7 +373,7 @@ fn push_log(progress: &mut ScanProgress, line: String) {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PreparedScan {
     pub scan_id: String,
     pub location: Location,
@@ -1308,7 +1308,7 @@ fn pool_start(
         }
         state.current_path = Some(path.clone());
         state.start_active_operation(kind, path)
-    });
+    })
 }
 
 fn pool_activate(
@@ -1329,7 +1329,7 @@ fn pool_activate(
         }
         state.current_path = Some(path.clone());
         state.start_active_operation(kind, path)
-    });
+    })
 }
 
 fn pool_deactivate(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind) {

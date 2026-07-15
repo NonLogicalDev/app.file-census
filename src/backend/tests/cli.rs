@@ -14,7 +14,13 @@ fn temp_root(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("file-census-cli-{name}-{id}"))
+    // Canonicalize the temp base so fixture paths match the canonical form the
+    // bootstrap-scan mismatch check compares against. Without this, platforms
+    // where the temp dir is a symlink (e.g. macOS `/tmp` -> `/private/tmp`)
+    // make raw and canonicalized root-path assertions disagree.
+    let base = std::env::temp_dir();
+    let base = base.canonicalize().unwrap_or(base);
+    base.join(format!("file-census-cli-{name}-{id}"))
 }
 
 fn run_json(args: &[&str]) -> Value {

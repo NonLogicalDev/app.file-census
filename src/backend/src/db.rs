@@ -1653,8 +1653,9 @@ impl Database {
                 LIMIT ?2
                 "#,
             )?;
-            stmt.query_map(params![scan_id, limit], file_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            let x = stmt.query_map(params![scan_id, limit], file_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
         tx.commit()?;
         Ok(files)
@@ -1731,7 +1732,7 @@ impl Database {
                 ORDER BY path
                 "#,
             )?;
-            stmt.query_map(params![scan_id, like], |row| {
+            let x = stmt.query_map(params![scan_id, like], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1745,7 +1746,8 @@ impl Database {
                     row.get::<_, u64>(9)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
 
         let mut dirs: std::collections::BTreeMap<String, TreeEntry> =
@@ -1953,8 +1955,9 @@ impl Database {
                 LIMIT ?2
                 "#,
             )?;
-            stmt.query_map(params![like, limit], file_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            let x = stmt.query_map(params![like, limit], file_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
         tx.commit()?;
         Ok(files)
@@ -1988,8 +1991,9 @@ impl Database {
                 ORDER BY s.started_at DESC, f.path
                 "#,
             )?;
-            stmt.query_map([], file_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            let x = stmt.query_map([], file_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
         let mut matches = Vec::new();
         for file in rows {
@@ -2029,8 +2033,9 @@ impl Database {
                 ORDER BY l.slug, s.started_at DESC, f.path
                 "#,
             )?;
-            stmt.query_map(params![blake3, size], occurrence_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            let x = stmt.query_map(params![blake3, size], occurrence_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
         tx.commit()?;
         Ok(occurrences)
@@ -2108,8 +2113,9 @@ impl Database {
                 ORDER BY l.slug, s.started_at DESC, f.path
                 "#,
             )?;
-            stmt.query_map(params![blake3, size], occurrence_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            let x = stmt.query_map(params![blake3, size], occurrence_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
         let total = occurrences.len();
         let limit = requested_limit.max(1);
@@ -2218,14 +2224,15 @@ impl Database {
                 ORDER BY f.path
                 "#,
             )?;
-            stmt.query_map(params![scan_id, like, recursive, normalized], |row| {
+            let x = stmt.query_map(params![scan_id, like, recursive, normalized], |row| {
                 Ok(ThumbnailCandidate {
                     blake3: row.get(0)?,
                     size: row.get(1)?,
                     path: row.get(2)?,
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
         tx.commit()?;
         Ok(candidates)
@@ -2275,14 +2282,15 @@ impl Database {
                 ORDER BY f.path
                 "#,
             )?;
-            stmt.query_map(params![scan_id, recursive], |row| {
+            let x = stmt.query_map(params![scan_id, recursive], |row| {
                 Ok(ThumbnailCandidate {
                     blake3: row.get(0)?,
                     size: row.get(1)?,
                     path: row.get(2)?,
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
         tx.commit()?;
         Ok(candidates)
@@ -2320,14 +2328,15 @@ impl Database {
                 LIMIT ?1
                 "#,
             )?;
-            stmt.query_map([limit], |row| {
+            let x = stmt.query_map([limit], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, u64>(1)?,
                     row.get::<_, u64>(2)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+            x
         };
 
         let mut out = Vec::new();
@@ -2355,9 +2364,10 @@ impl Database {
                     ORDER BY l.slug, f.path
                     "#,
                 )?;
-                files_stmt
+                let x = files_stmt
                     .query_map(params![blake3, size], file_from_row)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                x
             };
             let file_kind =
                 duplicate_group_file_kind(files.iter().map(|file| file.file_kind.as_str()));
@@ -2750,9 +2760,9 @@ where
         conn.prepare("INSERT OR IGNORE INTO excluded_file_ids (id) VALUES (?1)")?;
 
     for (scan_id, matcher) in &visibility.matchers {
-        let Some(matcher) = matcher else {
+        if matcher.is_none() {
             continue;
-        };
+        }
         let rows = files_stmt.query_map([scan_id], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -2838,7 +2848,7 @@ fn scan_tree_source_rows(
         WHERE excluded_f.id IS NULL
           AND f.scan_id = ?1
           AND f.error IS NULL
-          AND f.path LIKE ?2 ESCAPE '\\'
+          AND f.path LIKE ?2 ESCAPE '\'
         ORDER BY f.path
         "#,
     )?;
@@ -3304,7 +3314,7 @@ fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> 
 
     let mut locations = Vec::with_capacity(location_rows.len());
     let mut scans = Vec::with_capacity(scan_ids.len());
-    let mut total_visible_files = 0;
+    let mut total_visible_files: u64 = 0;
     for row in location_rows {
         let effective_scan = if let Some(scan_id) = row.scan_id {
             let (visible_file_count, visible_total_bytes) = visible_scan_file_totals(conn, &scan_id)?;
@@ -4121,7 +4131,7 @@ fn semantic_file_kind(name: &str) -> &'static str {
         "c" | "cc" | "cfg" | "conf" | "cpp" | "css" | "csv" | "go" | "h" | "hpp"
         | "htm" | "html" | "ini" | "java" | "js" | "json" | "jsx" | "kt" | "kts"
         | "log" | "markdown" | "md" | "mjs" | "php" | "py" | "r" | "rb" | "rs" | "rst"
-        | "rtf" | "sh" | "sql" | "swift" | "tex" | "toml" | "ts" | "tsx" | "txt"
+        | "rtf" | "sh" | "sql" | "swift" | "tex" | "toml" | "tsx" | "txt"
         | "xml" | "yaml" | "yml" | "zsh" => "text",
         _ => "other",
     }

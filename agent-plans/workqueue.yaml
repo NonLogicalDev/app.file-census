@@ -4,7 +4,7 @@ queue:
   subject: file-census production rebuild and acceptance
   coordinator: root
   created_at: 2026-07-15T05:45:00Z
-  updated_at: 2026-07-15T12:59:00Z
+  updated_at: 2026-07-15T13:12:18Z
 tasks:
   - id: rebuild-requirements-ledger
     work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
@@ -37,7 +37,7 @@ tasks:
     created_at: 2026-07-15T05:55:00Z
     resources:
       - session-logs
-    outcome: Direct-event manifest plus a hash-verified source index are complete. Path-scoped recovery gates every patch on direct success output; complete-read seeds now validate strict multi-line overlaps. A final-architecture baseline is promoted with static import/module checks, a latest clean dark global-style horizon through 2026-07-12, a June 14 App source whose 47-file import closure resolves, a 1,385-line scanner horizon, and exact root flake/ignore blobs. The strict replay boundary documented incompatible database/CLI horizons rather than fabricating them; their intentional reconstruction belongs to downstream domain work. The historical plan archive contains 41 exact-replayed, hash-verified files and records 25 non-fabricated omissions. Static UI imports close, but missing toolchains/lockfiles and UI dist keep runtime validation blocked.
+    outcome: Direct-event manifest plus a hash-verified source index are complete. Path-scoped recovery gates every patch on direct success output; complete-read seeds now validate strict multi-line overlaps. A final-architecture baseline is promoted with static import/module checks, a latest clean dark global-style horizon through 2026-07-12, a June 14 App source whose 47-file import closure resolves, a 1,385-line scanner horizon, and exact root flake/ignore blobs. The strict replay boundary documented incompatible database/CLI horizons rather than fabricating them; their intentional reconstruction belongs to downstream domain work. The historical plan archive contains 41 exact-replayed, hash-verified files and records 25 non-fabricated omissions. A final index audit found no remaining canonical source/config/test artifact that is both absent and deterministically recoverable; keep the conflicting cli.rs horizons unmerged. Static UI imports close, but missing toolchains/lockfiles and UI dist keep runtime validation blocked.
 
   - id: native-bundle-icon-assets
     work: Recover the configured macOS native bundle icon assets from an approved installed File Census bundle, without changing that installed application.
@@ -75,7 +75,7 @@ tasks:
     claim:
       owner: root
       started_at: 2026-07-15T08:41:00Z
-    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, a legacy-safe Unknown location-kind migration, scan-aware folder authorization, and one DB-level visible action resolver for open/reveal. Thumbnail batches reauthorize each candidate and browser/native source tests now assert equivalent visible-offset and excluded-path behavior. Browser/native details use visible media sources and WebSocket lag is recoverable. Scanner source now has independently reviewed ordinary-error finalization, failed-summary terminal-event parity, transactional progress-count/cache updates, cache-delete-only terminal fallback, directory rechecks, and bounded file replacement checks. Compilation and runtime proof remain pending.
+    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, a legacy-safe Unknown location-kind migration, scan-aware folder authorization, and one DB-level visible action resolver for open/reveal. Thumbnail batches reauthorize each candidate and browser/native source tests now assert equivalent visible-offset and excluded-path behavior. Browser/native details use visible media sources and WebSocket lag is recoverable. Scanner source now has independently reviewed ordinary-error finalization, failed-summary terminal-event parity, transactional progress-count/cache updates, cache-delete-only terminal fallback, directory rechecks, and bounded file replacement checks. A static backend/native/CLI audit closed the remaining manifest P0s by enabling Tokio net/time and declaring runtime walkdir; independent review found no remaining static P0/P1 in that slice. Compilation and runtime proof remain pending.
 
   - id: production-shell-and-routing
     work: Build the real dark application shell, routing, persisted collapsible sidebar, and main-top-bar Cmd-K foundation.

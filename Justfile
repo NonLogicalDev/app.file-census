@@ -57,7 +57,7 @@ desktop-check:
 
 # Run explicit ignored performance gates for scan/tree/delete hot paths.
 perf-gates:
-    {{dev}} cargo test -p file-census-backend --test perf_gates --release -- --ignored --nocapture
+    {{dev}} cargo test -p file-census-backend --features perf-gates --test perf_gates --release -- --ignored --nocapture
 
 # Benchmark metadata-aware filesystem discovery on a real path.
 bench-discovery path threads="3":
