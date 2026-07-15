@@ -56,6 +56,7 @@ The original visual reference image and prototype commit are missing. Build real
 - Historical project plans use `agent-plans/`; no project `.agent-plans/` entries were found in the canonical source logs. `plan-061` and `plan-066` have direct successful baselines; `plan-065` has a successful Add baseline but needs success-gated replay for its later state.
 - The empty checkout now contains the recovered final-architecture source baseline: Rust workspace/backend/native shell, React UI, component preview entry, and direct closure modules. Static relative-import and Rust module-declaration checks pass without installing/building dependencies.
 - Exact replay still stops at historical formatting/state transitions in `scanner.rs`, `ui/src/App.jsx`, and `cli.rs`. Their promoted versions are the latest verified snapshot or exact pre-conflict prefix, never fuzzy merges. Native bundle PNG/ICNS icons remain unrecovered.
+- A source-horizon recovery of `ui/src/style.css` reached a clean latest direct event on 2026-07-12 (`call_TXYQr7ri2wPK6Ttq04uMA7mx`), replayed three success-gated later changes without conflict, and exactly restored the compact neutral-dark global tokens. Its promoted SHA-256 is `306a72f5f6a78b52741d72ffc2e7c7229cbc90fc925e33dc49ce19d7c23d8800`.
 
 # Work Log
 
@@ -70,6 +71,7 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-15 00:08 - Added path-scoped, output-success-gated recovery plus seven hash-verified complete-read seeds for the missing final workspace closure; verified failed historical plan patches are excluded.
 - [x] 2026-07-15 00:08 - Restored historic `plan-061` at its original path and retained success-gated pre-deletion copies of plans 065/066 under `agent-plans/recovered/`; no historic project `.agent-plans/` entries exist in canonical logs.
 - [x] 2026-07-15 00:22 - Promoted 118 final-architecture source files into the otherwise empty checkout from verified snapshots, exact direct patch chains, and mapped native move provenance; static React import closure and Rust module declarations pass.
+- [x] 2026-07-15 00:28 - Promoted the latest clean, success-gated `ui/src/style.css` horizon (through 2026-07-12) and byte-verified it against the temporary recovery tree; `git diff --check` passes.
 - [ ] 2026-07-15 00:22 - Resolve the three formatter/state-conflicted path horizons (`App.jsx`, `scanner.rs`, `cli.rs`), native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 

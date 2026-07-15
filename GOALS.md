@@ -2,7 +2,7 @@
 
 ## Recovery status
 
-On 2026-07-14 the prior repository, Git history, plans, source, and generated assets were deleted during disk cleanup. Structured historical session logs survive and are being replayed only when their context can be validated exactly. A 109-event provenance index plus seven composite direct-read seeds now produces 113 hash-verified source paths; a 118-file final-architecture baseline has been promoted into this checkout after static React import and Rust module checks. Every patch is gated by matching direct success output, so failed historical calls are excluded. Formatter-conflicted later revisions and native bundle assets remain unresolved, so the checkout is not yet accepted as runnable and every historic implementation/verification claim remains reset.
+On 2026-07-14 the prior repository, Git history, plans, source, and generated assets were deleted during disk cleanup. Structured historical session logs survive and are being replayed only when their context can be validated exactly. A 109-event provenance index plus seven composite direct-read seeds now produces 113 hash-verified source paths; a 118-file final-architecture baseline has been promoted into this checkout after static React import and Rust module checks. The global stylesheet has additionally been recovered through a clean 2026-07-12 source horizon and byte-verified after promotion. Every patch is gated by matching direct success output, so failed historical calls are excluded. Formatter-conflicted later revisions and native bundle assets remain unresolved, so the checkout is not yet accepted as runnable and every historic implementation/verification claim remains reset.
 
 ## Completion contract
 
