@@ -32,3 +32,15 @@ export function statusLabel(status) {
 export function isActiveStatus(status) {
   return status === 'running' || status === 'repairing' || status === 'paused' || status === 'stopping';
 }
+
+export function scanLabel(scan) {
+  return scan?.nickname || (scan?.started_at ? when(scan.started_at) : scan?.id || 'Scan');
+}
+
+export function scanDetail(scan) {
+  const parts = [];
+  if (scan?.status) parts.push(statusLabel(scan.status));
+  if (typeof scan?.file_count === 'number') parts.push(`${scan.file_count} indexed`);
+  if (scan?.started_at) parts.push(when(scan.started_at));
+  return parts.join(' - ');
+}

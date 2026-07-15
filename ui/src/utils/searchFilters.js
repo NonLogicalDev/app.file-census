@@ -178,11 +178,20 @@ export function buildFileSearchQuery(query, filters, options = {}) {
   for (const filter of (filters || []).map(normalizeSearchFilter).filter(Boolean)) {
     expression.push(filter);
   }
-  return {
+  const searchQuery = {
     filter: expression.length ? { term: 'filter', operator: 'and', expression } : null,
     limit: options.limit || 200,
     offset: options.offset || 0
   };
+
+  const scanIds = [...new Set((options.scanIds || []).filter(Boolean))];
+  if (scanIds.length) {
+    searchQuery.scan_ids = scanIds;
+  } else if (typeof options.allScans === 'boolean') {
+    searchQuery.representative_only = !options.allScans;
+  }
+
+  return searchQuery;
 }
 
 export function fileMatchesSearch(file, query = '', filters = []) {

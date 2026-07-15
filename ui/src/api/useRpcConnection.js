@@ -141,17 +141,9 @@ export function useRpcConnection({ onEvent, onOpen }) {
     let abortHandler = null;
     if (signal) {
       abortHandler = () => {
-        const error = abortError();
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-          const cancelId = nextIdRef.current++;
-          socketRef.current.send(JSON.stringify({
-            jsonrpc: '2.0',
-            id: cancelId,
-            method: 'rpc.cancel',
-            params: { id }
-          }));
-        }
-        cancelPendingRpc(pendingRef.current, id, error);
+        // The backend has no remote-cancellation RPC. Settle locally so a
+        // later response has no pending entry to update.
+        cancelPendingRpc(pendingRef.current, id, abortError());
       };
       signal.addEventListener('abort', abortHandler, { once: true });
     }

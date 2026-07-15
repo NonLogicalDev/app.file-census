@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { invokeNativeRpc } from './nativeRpc.js';
 
-test('native rpc abort cancels backend work and rejects locally', async () => {
+test('native rpc abort rejects locally without sending an unregistered cancel command', async () => {
   const calls = [];
   let resolveRpc = null;
   const controller = new AbortController();
@@ -15,7 +15,7 @@ test('native rpc abort cancels backend work and rejects locally', async () => {
           resolveRpc = resolve;
         });
       }
-      return Promise.resolve({ cancelled: true, requestId: payload.requestId });
+      throw new Error(`unexpected native command: ${command}`);
     },
     {
       requestId: 'native-7',
@@ -39,10 +39,6 @@ test('native rpc abort cancels backend work and rejects locally', async () => {
         method: 'scans.tree',
         params: { scan_id: 'scan-1', path: '' }
       }
-    },
-    {
-      command: 'rpc_cancel',
-      payload: { requestId: 'native-7' }
     }
   ]);
 

@@ -1,6 +1,6 @@
 import { cn } from './cn.js';
 
-export const fileGridClassName = 'h-[min(70vh,800px)] min-h-[600px] w-full overflow-auto rounded-ui bg-surface';
+export const fileGridClassName = 'max-h-[min(70vh,800px)] min-h-[360px] w-full overflow-auto rounded-ui bg-surface';
 
 export const fileGridTableClassName = 'w-max min-w-full table-fixed border-separate border-spacing-0 text-[12.5px] text-text';
 
@@ -14,18 +14,26 @@ export const fileGridResizableHeaderClassName = 'relative';
 
 export function fileGridHeaderCellClassName({ sortable = false, className } = {}) {
   return cn(
-    'sticky top-0 z-[2] border-b border-border bg-[#f0f2ee] px-[9px] py-1.5 text-left text-[0.76rem] font-[760] text-muted-strong whitespace-nowrap',
+    'sticky top-0 z-[2] border-b border-border bg-surface-muted px-[9px] py-1.5 text-left text-[0.72rem] font-semibold text-muted whitespace-nowrap',
     fileGridResizableHeaderClassName,
     sortable && 'cursor-pointer select-none',
     className
   );
 }
 
-export const fileGridHeaderButtonClassName = cn(
-  'inline-flex min-h-0 w-full items-center justify-between gap-1 rounded-[4px] border-0 bg-transparent p-0 text-left font-[inherit] text-inherit shadow-none',
-  'hover:!border-transparent hover:!bg-transparent hover:!text-accent hover:!shadow-none',
-  'disabled:cursor-default disabled:opacity-100'
-);
+export function fileGridHeaderButtonClassName({ align = 'left', className } = {}) {
+  return cn(
+    'inline-flex min-h-0 w-full items-center gap-1 rounded-[4px] border-0 bg-transparent p-0 font-[inherit] text-inherit shadow-none',
+    align === 'right'
+      ? 'justify-end text-right'
+      : align === 'center'
+        ? 'justify-center text-center'
+        : 'justify-between text-left',
+    'hover:!border-transparent hover:!bg-transparent hover:!text-accent hover:!shadow-none',
+    'disabled:cursor-default disabled:opacity-100',
+    className
+  );
+}
 
 export const fileGridSortClassName = 'text-[0.72rem] text-muted';
 
@@ -40,8 +48,8 @@ export function fileGridResizerClassName({ resizing = false } = {}) {
 
 export function fileGridRowClassName({ index = 0, kind, actionable = false, selected = false } = {}) {
   return cn(
-    'transition-[background-color] duration-100 ease-out hover:bg-[#eef7f4]',
-    index % 2 === 1 ? 'bg-[#fafbf8]' : 'bg-surface',
+    'transition-[background-color] duration-100 ease-out hover:bg-surface-muted',
+    index % 2 === 1 ? 'bg-surface-subtle' : 'bg-surface',
     actionable ? 'cursor-pointer' : 'cursor-default',
     (kind === 'dir' || kind === 'parent') && 'font-[650]',
     selected && '!bg-[color:color-mix(in_srgb,var(--accent-soft)_74%,var(--surface))]'
@@ -50,7 +58,7 @@ export function fileGridRowClassName({ index = 0, kind, actionable = false, sele
 
 export function fileGridCellClassName({ className } = {}) {
   return cn(
-    'border-b border-[#eef0ec] px-[9px] py-1 align-middle whitespace-nowrap',
+    'border-b border-border px-[9px] py-1 align-middle whitespace-nowrap',
     className
   );
 }
@@ -72,7 +80,18 @@ export function fileNameCellClassName({ kind } = {}) {
   );
 }
 
+export const fileNameLabelClassName = 'min-w-0 truncate';
+
 export const fileKindIconClassName = 'h-[15px] w-[15px] shrink-0 text-muted';
+
+export function fileGridDeleteCheckBadgeClassName({ state } = {}) {
+  return cn(
+    'ml-1 inline-flex shrink-0 items-center rounded-full border px-1.5 py-[1px] text-[10px] font-bold uppercase leading-4',
+    state === 'exclude'
+      ? 'border-warning text-warning bg-warning-soft'
+      : 'border-accent-line text-accent bg-accent-soft'
+  );
+}
 
 export const fileGridRowActionMenuClassName = 'group/file-row-action justify-center';
 

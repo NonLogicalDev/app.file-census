@@ -1,9 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CommandPalette } from './command-palette/index.js';
 import { Icon } from './Icon.jsx';
 import ScanProgressPools from './ScanProgressPools.jsx';
 import {
   appMainClassName,
+  appShellClassName,
+  appSidebarClassName,
   Button,
+  cn,
   connectionLedClassName,
   eventStripClassName,
   eventStripStatusClassName,
@@ -32,6 +36,35 @@ import {
   pageActionsPanelTitleClassName,
   pageActionsTriggerClassName,
   shellMessageClassName,
+  sidebarActivityClassName,
+  sidebarBrandClassName,
+  sidebarBrandSubtitleClassName,
+  sidebarConnectionPillClassName,
+  sidebarDisclosureClassName,
+  sidebarEmptyClassName,
+  sidebarFooterClassName,
+  sidebarHoverZoneClassName,
+  sidebarIconButtonClassName,
+  sidebarLocationBodyClassName,
+  sidebarLocationClassName,
+  sidebarLocationGroupClassName,
+  sidebarLocationListClassName,
+  sidebarLocationMetaClassName,
+  sidebarLocationRowClassName,
+  sidebarNavButtonClassName,
+  sidebarNavClassName,
+  sidebarOverlayCloseClassName,
+  sidebarProgressClassName,
+  sidebarProgressPathClassName,
+  sidebarScanBodyClassName,
+  sidebarScanClassName,
+  sidebarScanListClassName,
+  sidebarScanStatusClassName,
+  sidebarResizeHandleClassName,
+  sidebarSectionClassName,
+  sidebarSectionTitleClassName,
+  sidebarSpacerClassName,
+  sidebarWindowControlsClassName,
   StatusPill,
   topbarDescriptionClassName,
   topbarSidebarToggleClassName,
@@ -50,27 +83,75 @@ import {
   Toolbar,
   workspaceHeaderClassName
 } from './ui/index.jsx';
+import {
+  clampSidebarWidth,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH
+} from './ui/shellClasses.js';
 import { bytes, isActiveStatus, statusLabel, when } from '../utils/format.js';
 
 const tabs = [
+  ['dashboard', 'Dashboard', 'Current database and activity'],
   ['locations', 'Locations', 'Sources and scans'],
   ['duplicates', 'Duplicates', 'Content seen elsewhere'],
-  ['search', 'Search', 'Find by path or name']
+  ['search', 'Search', 'Find by path or name'],
+  ['tasks', 'Tasks', 'Running scanner work'],
+  ['options', 'Options', 'Database and app settings']
 ];
 
 const tabIcons = {
+  dashboard: 'dashboard',
   duplicates: 'duplicates',
   locations: 'locations',
-  search: 'searchFiles'
+  options: 'options',
+  search: 'searchFiles',
+  tasks: 'tasks'
 };
+
+const SIDEBAR_HIDDEN_STORAGE_KEY = 'file-census.sidebar.hidden';
+const SIDEBAR_WIDTH_STORAGE_KEY = 'file-census.sidebar.width';
+const SIDEBAR_KEYBOARD_STEP = 16;
+const SIDEBAR_KEYBOARD_LARGE_STEP = 48;
+
+function readSidebarPreference(key) {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeSidebarPreference(key, value) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser contexts.
+  }
+}
+
+function readStoredSidebarHidden() {
+  return readSidebarPreference(SIDEBAR_HIDDEN_STORAGE_KEY) === 'true';
+}
+
+function readStoredSidebarWidth() {
+  return clampSidebarWidth(readSidebarPreference(SIDEBAR_WIDTH_STORAGE_KEY));
+}
+
+function isCompactViewport() {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(max-width: 960px)').matches;
+}
 
 export default function Shell({
   overview,
   message,
   wsStatus,
   statusDetail,
-  eventLog,
-  runningProgress,
+  eventLog = [],
+  runningProgress = [],
   activeTab,
   setTab,
   refresh,
@@ -84,26 +165,59 @@ export default function Shell({
   onChooseLocation,
   onSelectScan,
   onShowAddLocation,
+  commandGroups = [],
   topBarActions,
   children
 }) {
-  const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(readStoredSidebarHidden);
   const [sidebarPeeking, setSidebarPeeking] = useState(false);
-  const [compactSidebar, setCompactSidebar] = useState(() => window.matchMedia('(max-width: 960px)').matches);
+  const [compactSidebar, setCompactSidebar] = useState(isCompactViewport);
+  const [sidebarWidth, setSidebarWidth] = useState(readStoredSidebarWidth);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
   const [pageActionsOpen, setPageActionsOpen] = useState(false);
   const [expandedLocations, setExpandedLocations] = useState({});
   const sidebarRef = useRef(null);
+  const sidebarResizeSession = useRef(null);
   const activeTabMeta = tabs.find(([id]) => id === activeTab) || tabs[0];
   const selectedLocation = locationList.find((location) => location.slug === selectedLocationSlug);
   const sidebarVisuallyOpen = compactSidebar ? sidebarPeeking : !sidebarHidden;
+  const sidebarResizeDisabled = compactSidebar || sidebarHidden;
+
+  const finishSidebarResize = useCallback((event) => {
+    const session = sidebarResizeSession.current;
+    if (!session || (event && session.pointerId !== event.pointerId)) return;
+    const control = event?.currentTarget;
+    sidebarResizeSession.current = null;
+    if (control?.hasPointerCapture?.(session.pointerId)) {
+      control.releasePointerCapture(session.pointerId);
+    }
+    setSidebarResizing(false);
+  }, []);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
     const query = window.matchMedia('(max-width: 960px)');
     const update = () => setCompactSidebar(query.matches);
     update();
     query.addEventListener('change', update);
     return () => query.removeEventListener('change', update);
   }, []);
+
+  useEffect(() => {
+    writeSidebarPreference(SIDEBAR_HIDDEN_STORAGE_KEY, String(sidebarHidden));
+  }, [sidebarHidden]);
+
+  useEffect(() => {
+    writeSidebarPreference(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => () => {
+    sidebarResizeSession.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (sidebarResizeDisabled) finishSidebarResize();
+  }, [finishSidebarResize, sidebarResizeDisabled]);
 
   useEffect(() => {
     setPageActionsOpen(false);
@@ -154,24 +268,92 @@ export default function Shell({
     setSidebarPeeking(false);
   }
 
+  function startSidebarResize(event) {
+    if (sidebarResizeDisabled || event.button !== 0) return;
+    event.preventDefault();
+    const control = event.currentTarget;
+    try {
+      control.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is optional in older embedded webviews.
+    }
+    sidebarResizeSession.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sidebarWidth
+    };
+    setSidebarResizing(true);
+  }
+
+  function moveSidebarResize(event) {
+    const session = sidebarResizeSession.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    setSidebarWidth(clampSidebarWidth(session.startWidth + event.clientX - session.startX));
+  }
+
+  function handleSidebarResizeKeyDown(event) {
+    if (sidebarResizeDisabled) return;
+    const step = event.shiftKey ? SIDEBAR_KEYBOARD_LARGE_STEP : SIDEBAR_KEYBOARD_STEP;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      setSidebarWidth((current) => clampSidebarWidth(current + direction * step));
+      return;
+    }
+    if (event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    setSidebarWidth(event.key === 'Home' ? SIDEBAR_MIN_WIDTH : SIDEBAR_MAX_WIDTH);
+  }
+
   return (
-    <div className={`app-shell${sidebarHidden ? ' sidebar-hidden' : ''}${sidebarPeeking ? ' sidebar-peeking' : ''}${compactSidebar ? ' sidebar-compact' : ''}`}>
+    <div
+      className={appShellClassName({ sidebarHidden, compactSidebar })}
+      style={{ '--sidebar-width': `${sidebarWidth}px` }}
+    >
       <button
         type="button"
-        className="sidebar-hover-zone"
+        className={sidebarHoverZoneClassName({
+          visible: sidebarHidden || compactSidebar,
+          peeking: sidebarPeeking
+        })}
         aria-label="Show sidebar"
         onMouseEnter={() => setSidebarPeeking(true)}
         onFocus={() => setSidebarPeeking(true)}
         onClick={() => setSidebarPeeking(true)}
       />
       <aside
+        id="app-sidebar"
         ref={sidebarRef}
-        className="app-sidebar"
+        className={appSidebarClassName({ sidebarHidden, sidebarPeeking, compactSidebar })}
         aria-label="Application navigation"
         onMouseEnter={() => setSidebarPeeking(true)}
         onMouseLeave={() => setSidebarPeeking(false)}
       >
-        <div className="sidebar-window-controls" aria-hidden="true">
+        <div
+          aria-controls="app-sidebar"
+          aria-disabled={sidebarResizeDisabled}
+          aria-label="Resize sidebar"
+          aria-orientation="vertical"
+          aria-valuemax={SIDEBAR_MAX_WIDTH}
+          aria-valuemin={SIDEBAR_MIN_WIDTH}
+          aria-valuenow={sidebarWidth}
+          aria-valuetext={`${sidebarWidth} pixels`}
+          className={sidebarResizeHandleClassName({
+            disabled: sidebarResizeDisabled,
+            resizing: sidebarResizing
+          })}
+          onKeyDown={handleSidebarResizeKeyDown}
+          onLostPointerCapture={finishSidebarResize}
+          onPointerCancel={finishSidebarResize}
+          onPointerDown={startSidebarResize}
+          onPointerMove={moveSidebarResize}
+          onPointerUp={finishSidebarResize}
+          role="separator"
+          tabIndex={sidebarResizeDisabled ? -1 : 0}
+          title="Resize sidebar"
+        />
+        <div className={sidebarWindowControlsClassName({ compactSidebar })} aria-hidden="true">
           <span className={trafficDotClassName('red')} />
           <span className={trafficDotClassName('yellow')} />
           <span className={trafficDotClassName('green')} />
@@ -181,21 +363,17 @@ export default function Shell({
           label="Close sidebar"
           title="Close sidebar"
           icon={<Icon name="sidebarClose" />}
-          className={[
-            'sidebar-overlay-close !h-[30px] !w-[30px] !border-[var(--sidebar-border)] !bg-[var(--sidebar-surface)] !p-0 !text-[color:var(--sidebar-muted)] !shadow-none',
-            'hover:!border-[#5b6058] hover:!bg-[var(--sidebar-surface-hover)] hover:!text-[color:var(--sidebar-text)] hover:!shadow-none',
-            compactSidebar && sidebarPeeking ? '!inline-flex' : '!hidden'
-          ].join(' ')}
+          className={sidebarOverlayCloseClassName({ visible: compactSidebar && sidebarPeeking })}
         />
 
-        <div className="sidebar-brand">
+        <div className={sidebarBrandClassName}>
           <strong>file-census</strong>
-          <span>Local file memory</span>
+          <span className={sidebarBrandSubtitleClassName}>Local file memory</span>
         </div>
 
-        <nav className="sidebar-nav" aria-label="Primary">
+        <nav className={sidebarNavClassName} aria-label="Primary">
           {tabs.map(([id, label, description]) => (
-            <button key={id} className={activeTab === id ? 'active' : ''} onClick={() => setTab(id)}>
+            <button key={id} className={sidebarNavButtonClassName({ active: activeTab === id })} onClick={() => setTab(id)}>
               <span className={navIconClassName}><Icon name={tabIcons[id]} className={navIconSvgClassName} /></span>
               <span>
                 <strong>{label}</strong>
@@ -205,11 +383,11 @@ export default function Shell({
           ))}
         </nav>
 
-        <section className="sidebar-section">
-          <div className="sidebar-section-title">
+        <section className={sidebarSectionClassName}>
+          <div className={sidebarSectionTitleClassName}>
             <span>Locations</span>
             <IconButton
-              className="sidebar-icon-button !h-[25px] !w-[25px] !border-[var(--sidebar-border)] !bg-[var(--sidebar-surface)] !p-0 !text-[color:var(--sidebar-text)] hover:!border-[#5b6058] hover:!bg-[var(--sidebar-surface-hover)] hover:!text-[color:var(--sidebar-text)] hover:!shadow-none"
+              className={sidebarIconButtonClassName}
               onClick={onShowAddLocation}
               title="Add location"
               label="Add location"
@@ -217,7 +395,7 @@ export default function Shell({
               icon={<Icon name="add" />}
             />
           </div>
-          <div className="sidebar-location-list">
+          <div className={sidebarLocationListClassName} data-sidebar-location-list>
             {locationList.map((location) => (
               <SidebarLocationGroup
                 key={location.slug}
@@ -230,34 +408,34 @@ export default function Shell({
                 onSelectScan={(scanId) => onSelectScan(scanId, location.slug)}
               />
             ))}
-            {!locationList.length && <p className="sidebar-empty">No locations yet.</p>}
+            {!locationList.length && <p className={sidebarEmptyClassName}>No locations yet.</p>}
           </div>
         </section>
 
         {runningProgress.length > 0 && (
-          <section className="sidebar-section sidebar-activity">
-            <div className="sidebar-section-title">
+          <section className={cn(sidebarSectionClassName, sidebarActivityClassName)}>
+            <div className={sidebarSectionTitleClassName}>
               <span>Activity</span>
               <small>{runningProgress.length} running</small>
             </div>
             {runningProgress.slice(0, 3).map((progress) => (
-              <article className="sidebar-progress" key={progress.scan_id}>
+              <article className={sidebarProgressClassName} key={progress.scan_id}>
                 <strong>{progress.location_slug}</strong>
                 <span>{progress.file_count} files - {bytes(progress.total_bytes)}</span>
                 <ScanProgressPools progress={progress} compact />
-                {progress.current_path && <code className="progress-path" title={progress.current_path}>{progress.current_path}</code>}
+                {progress.current_path && <code className={sidebarProgressPathClassName} title={progress.current_path}>{progress.current_path}</code>}
               </article>
             ))}
-            {runningProgress.length > 3 && <p className="sidebar-empty">+{runningProgress.length - 3} more scans</p>}
+            {runningProgress.length > 3 && <p className={sidebarEmptyClassName}>+{runningProgress.length - 3} more scans</p>}
           </section>
         )}
 
-        <div className="sidebar-spacer" />
+        <div className={sidebarSpacerClassName} />
 
-        <section className="sidebar-footer">
+        <section className={sidebarFooterClassName}>
           <StatusPill
             variant="ghost"
-            className="connection-pill !inline-flex !min-h-0 !items-center !gap-[7px] !rounded-none !border-0 !bg-transparent !p-0 !text-[0.84rem] !font-[650] !leading-normal !text-[color:var(--sidebar-muted)]"
+            className={sidebarConnectionPillClassName}
             icon={<span className={connectionLedClassName({ live: wsStatus === 'live' })} />}
           >
             {connectionLabel(wsStatus, statusDetail)}
@@ -294,6 +472,13 @@ export default function Shell({
             </div>
           </div>
           <Toolbar className={headerActionsClassName}>
+            <CommandPalette
+              groups={commandGroups}
+              title="Command menu"
+              placeholder="Search locations, scans, and actions…"
+              triggerLabel="Command"
+              shortcutLabel="⌘K"
+            />
             <Button variant="secondary" onClick={refresh} disabled={busy} icon={<Icon name="refresh" />}>Refresh</Button>
             {topBarActions && (
               <Menu
@@ -380,11 +565,11 @@ function SidebarLocationGroup({ location, expanded, selectedLocation, selectedSc
   const hasScans = location.scans.length > 0;
 
   return (
-    <div className={`sidebar-location-group${location.disabled ? ' disabled-location' : ''}`}>
-      <div className="sidebar-location-row">
+    <div className={sidebarLocationGroupClassName({ disabled: location.disabled })}>
+      <div className={sidebarLocationRowClassName}>
         <button
           type="button"
-          className="sidebar-disclosure"
+          className={sidebarDisclosureClassName}
           onClick={onToggle}
           aria-label={`${expanded ? 'Collapse' : 'Expand'} ${location.slug}`}
           aria-expanded={expanded}
@@ -396,7 +581,7 @@ function SidebarLocationGroup({ location, expanded, selectedLocation, selectedSc
         <SidebarLocationItem location={location} selected={selectedLocation} hasSelectedScan={location.scans.some((scan) => scan.id === selectedScanId)} onSelect={onSelectLocation} />
       </div>
       {expanded && hasScans && (
-        <div className="sidebar-scan-list">
+        <div className={sidebarScanListClassName}>
           {location.scans.map((scan) => (
             <SidebarScanItem
               key={scan.id}
@@ -415,17 +600,17 @@ function SidebarLocationItem({ location, selected, hasSelectedScan, onSelect }) 
   return (
     <button
       type="button"
-      className={`sidebar-location${selected ? ' selected' : ''}${hasSelectedScan ? ' contains-selected-scan' : ''}${location.disabled ? ' disabled-location' : ''}`}
+      className={sidebarLocationClassName({ selected, hasSelectedScan, disabled: location.disabled })}
       onClick={onSelect}
       title={`${location.slug} - ${location.root_path}`}
       aria-label={`${location.name || location.slug}, ${location.root_path}`}
     >
       <span className={locationLedClassName({ connected: location.connected, compact: true })} title={livenessTitle(location)} />
-      <span className="sidebar-location-body">
+      <span className={sidebarLocationBodyClassName}>
         <strong>{location.name || location.slug}</strong>
         <small>{location.root_path}</small>
       </span>
-      <span className="sidebar-location-meta">
+      <span className={sidebarLocationMetaClassName}>
         <strong>{location.scanCount}</strong>
         <small>{location.activeScan ? statusLabel(location.activeScan.status) : 'idle'}</small>
       </span>
@@ -437,14 +622,14 @@ function SidebarScanItem({ scan, selected, onSelect }) {
   return (
     <button
       type="button"
-      className={`sidebar-scan${selected ? ' selected' : ''}${isActiveStatus(scan.status) ? ' active-scan' : ''}`}
+      className={sidebarScanClassName({ selected, active: isActiveStatus(scan.status) })}
       onClick={onSelect}
       title={scan.id}
     >
-      <span className="sidebar-scan-status">
+      <span className={sidebarScanStatusClassName({ selected, active: isActiveStatus(scan.status) })}>
         {scan.is_representative ? 'Rep' : statusLabel(scan.status)}
       </span>
-      <span className="sidebar-scan-body">
+      <span className={sidebarScanBodyClassName}>
         <strong>{statusLabel(scan.status)} - {scan.file_count} files</strong>
         <small>{when(scan.started_at)} - {bytes(scan.total_bytes)}</small>
       </span>
@@ -453,8 +638,11 @@ function SidebarScanItem({ scan, selected, onSelect }) {
 }
 
 function headerDescription(activeTab, location) {
+  if (activeTab === 'dashboard') return 'Current database activity and recent app-session events.';
   if (activeTab === 'duplicates') return 'Review exact-content matches across representative scans.';
   if (activeTab === 'search') return 'Find files by name, extension, or path fragment.';
+  if (activeTab === 'tasks') return 'Monitor running scanner work and recent events.';
+  if (activeTab === 'options') return 'Choose the active database and manage local app settings.';
   if (location) return `${location.slug} - ${location.root_path}`;
   return 'Choose a source location from the sidebar or add a new one.';
 }
@@ -466,7 +654,7 @@ function headerTitle(activeTab, location, activeTabMeta) {
 
 function findSidebarScrollable(target, sidebar) {
   if (!(target instanceof Element)) return null;
-  const scrollable = target.closest('.sidebar-location-list');
+  const scrollable = target.closest('[data-sidebar-location-list]');
   if (scrollable && sidebar.contains(scrollable)) return scrollable;
   return null;
 }

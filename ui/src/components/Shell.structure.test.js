@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url';
 const componentsDir = dirname(fileURLToPath(import.meta.url));
 const shellSource = readFileSync(join(componentsDir, 'Shell.jsx'), 'utf8');
 
+test('shell owns the visible top-bar command trigger while preserving the sidebar toggle', () => {
+  assert.match(shellSource, /import \{ CommandPalette \} from '\.\/command-palette\/index\.js';/);
+  assert.match(shellSource, /commandGroups = \[\]/);
+  assert.match(shellSource, /<CommandPalette[\s\S]*?groups=\{commandGroups\}/);
+  assert.match(shellSource, /shortcutLabel="⌘K"/);
+  assert.match(shellSource, /onClick=\{toggleSidebar\}/);
+});
+
 test('shell keeps the route title stable while rendering compact active location context', () => {
   assert.match(shellSource, /topbarDescriptionClassName/);
   assert.match(shellSource, /function headerContext\(activeTab, location, selectedScanId\)/);

@@ -29,6 +29,17 @@ pub struct ScanSummary {
     pub total_bytes: u64,
 }
 
+/// One currently in-flight scanner worker operation. The operation ID is
+/// monotonic within its scan, so snapshots can retain a stable oldest-first
+/// order even when wall-clock timestamps share the same precision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ScanActiveOperation {
+    pub operation_id: u64,
+    pub pool: String,
+    pub path: String,
+    pub started_at: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ScanProgress {
     pub scan_id: String,
@@ -43,9 +54,13 @@ pub struct ScanProgress {
     pub current_path: Option<String>,
     pub message: Option<String>,
     pub pools: ScanPools,
+    /// Bounded in-flight work only; queued paths are never retained here.
+    pub active_operations: Vec<ScanActiveOperation>,
     pub log: Vec<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+    #[serde(skip)]
+    next_active_operation_id: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -98,6 +113,7 @@ impl ScanProgressStore {
             current_path: None,
             message: None,
             pools: ScanPools::default(),
+            active_operations: Vec::new(),
             log: vec![match &scan.reuse_from_scan_id {
                 Some(source_scan_id) => format!(
                     "Started update scan of {} ({}) from {} at {}",
@@ -115,6 +131,7 @@ impl ScanProgressStore {
             }],
             started_at: Utc::now().to_rfc3339(),
             finished_at: None,
+            next_active_operation_id: 1,
         };
         self.inner
             .lock()
@@ -124,18 +141,26 @@ impl ScanProgressStore {
     }
 
     pub fn update(&self, scan_id: &str, update: impl FnOnce(&mut ScanProgress)) {
-        let (progress, log_lines) = if let Some(progress) = self
+        let _ = self.update_with_result(scan_id, |progress| update(progress));
+    }
+
+    fn update_with_result<T>(
+        &self,
+        scan_id: &str,
+        update: impl FnOnce(&mut ScanProgress) -> T,
+    ) -> Option<T> {
+        let (progress, log_lines, result) = if let Some(progress) = self
             .inner
             .lock()
             .expect("scan progress lock poisoned")
             .get_mut(scan_id)
         {
             let old_len = progress.log.len();
-            update(progress);
+            let result = update(progress);
             let log_lines = progress.log[old_len..].to_vec();
-            (Some(progress.clone()), log_lines)
+            (Some(progress.clone()), log_lines, Some(result))
         } else {
-            (None, Vec::new())
+            (None, Vec::new(), None)
         };
         if let Some(progress) = progress {
             for line in log_lines {
@@ -150,6 +175,7 @@ impl ScanProgressStore {
             }
             self.emit("scan_progress", &progress);
         }
+        result
     }
 
     pub fn finish(&self, summary: &ScanSummary) {
@@ -160,6 +186,7 @@ impl ScanProgressStore {
             progress.error_count = summary.error_count;
             progress.total_bytes = summary.total_bytes;
             progress.current_path = None;
+            progress.active_operations.clear();
             progress.finished_at = Some(Utc::now().to_rfc3339());
             push_log(
                 progress,
@@ -182,6 +209,7 @@ impl ScanProgressStore {
         self.update(scan_id, |progress| {
             progress.status = "failed".to_string();
             progress.message = Some(message);
+            progress.active_operations.clear();
             if let Some(message) = progress.message.clone() {
                 push_log(progress, format!("Failed: {message}"));
             }
@@ -231,6 +259,7 @@ impl ScanProgressStore {
         self.update(scan_id, |progress| {
             progress.status = "stopped".to_string();
             progress.current_path = None;
+            progress.active_operations.clear();
             progress.finished_at = Some(Utc::now().to_rfc3339());
             push_log(
                 progress,
@@ -270,6 +299,21 @@ impl ScanProgressStore {
             .expect("scan progress lock poisoned")
             .get(scan_id)
             .cloned()
+    }
+
+    /// Returns only currently in-flight operations, sorted by their monotonic
+    /// start identity. This is intentionally a bounded projection rather than
+    /// a history of queued or completed paths.
+    pub fn active_operations_oldest_first(&self, scan_id: &str) -> Vec<ScanActiveOperation> {
+        let mut operations = self
+            .inner
+            .lock()
+            .expect("scan progress lock poisoned")
+            .get(scan_id)
+            .map(|progress| progress.active_operations.clone())
+            .unwrap_or_default();
+        operations.sort_by_key(|operation| operation.operation_id);
+        operations
     }
 
     pub fn running(&self) -> Vec<ScanProgress> {
@@ -314,6 +358,46 @@ enum PoolKind {
     Discovery,
     Metadata,
     Hashing,
+}
+
+impl PoolKind {
+    fn name(self) -> &'static str {
+        match self {
+            PoolKind::Discovery => "discovery",
+            PoolKind::Metadata => "metadata",
+            PoolKind::Hashing => "hashing",
+        }
+    }
+}
+
+impl ScanProgress {
+    fn start_active_operation(&mut self, kind: PoolKind, path: String) -> u64 {
+        let operation_id = self.next_active_operation_id;
+        self.next_active_operation_id = self
+            .next_active_operation_id
+            .checked_add(1)
+            .expect("active operation IDs exhausted");
+        self.active_operations.push(ScanActiveOperation {
+            operation_id,
+            pool: kind.name().to_string(),
+            path,
+            started_at: Utc::now().to_rfc3339(),
+        });
+        operation_id
+    }
+
+    fn remove_active_operation(&mut self, operation_id: Option<u64>) {
+        let Some(operation_id) = operation_id else {
+            return;
+        };
+        self.active_operations
+            .retain(|operation| operation.operation_id != operation_id);
+    }
+
+    fn remove_active_operations_for_pool(&mut self, kind: PoolKind) {
+        self.active_operations
+            .retain(|operation| operation.pool != kind.name());
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -361,12 +445,36 @@ pub fn scan_location(db: &Database, slug: &str, offset_path: &Path) -> Result<Sc
 }
 
 pub fn prepare_scan(db: &Database, slug: &str, offset_path: &Path) -> Result<PreparedScan> {
+    prepare_scan_with_start(db, slug, offset_path, |location| {
+        db.start_scan(location, offset_path)
+    })
+}
+
+/// Prepares a scan with a date-derived persisted identity. Supplying the UTC
+/// start time keeps the identity deterministic for callers and tests.
+pub fn prepare_scan_with_started_at(
+    db: &Database,
+    slug: &str,
+    offset_path: &Path,
+    started_at: DateTime<Utc>,
+) -> Result<PreparedScan> {
+    prepare_scan_with_start(db, slug, offset_path, |location| {
+        db.start_scan_with_started_at(location, offset_path, started_at)
+    })
+}
+
+fn prepare_scan_with_start(
+    db: &Database,
+    slug: &str,
+    offset_path: &Path,
+    start_scan: impl FnOnce(&Location) -> Result<String>,
+) -> Result<PreparedScan> {
     let location = db
         .location_by_slug(slug)?
         .with_context(|| format!("unknown location slug: {slug}"))?;
 
-    let scan_root = normalize_scan_root(&location.root_path, offset_path);
-    let scan_id = db.start_scan(&location, offset_path)?;
+    let scan_root = resolve_contained_scan_root(&location.root_path, offset_path)?;
+    let scan_id = start_scan(&location)?;
     Ok(PreparedScan {
         scan_id,
         location,
@@ -377,22 +485,15 @@ pub fn prepare_scan(db: &Database, slug: &str, offset_path: &Path) -> Result<Pre
 }
 
 pub fn prepare_update_scan(db: &Database, source_scan_id: &str) -> Result<PreparedScan> {
-    let source_scan = db
-        .scan_by_id(source_scan_id)?
-        .with_context(|| format!("unknown source scan: {source_scan_id}"))?;
-    let location = db
-        .location_by_slug(&source_scan.location_slug)?
-        .with_context(|| format!("unknown location slug: {}", source_scan.location_slug))?;
-    let offset_path = PathBuf::from(&source_scan.offset_path);
-    let scan_root = normalize_scan_root(&location.root_path, &offset_path);
-    let scan_id = db.start_scan(&location, &offset_path)?;
-    db.copy_scan_excludes(source_scan_id, &scan_id)?;
+    let seed = db.update_scan_seed(source_scan_id)?;
+    let scan_root = resolve_contained_scan_root(&seed.location.root_path, &seed.offset_path)?;
+    let scan_id = db.create_update_scan_from_seed(&seed)?;
     Ok(PreparedScan {
         scan_id,
-        location,
+        location: seed.location,
         scan_root,
-        reuse_from_scan_id: Some(source_scan_id.to_string()),
-        reusable_files: db.reusable_files_for_scan(source_scan_id)?,
+        reuse_from_scan_id: Some(seed.source_scan_id),
+        reusable_files: seed.reusable_files,
     })
 }
 
@@ -600,8 +701,6 @@ fn discovery_worker(
     progress: Option<ScanProgressStore>,
     scan_id: String,
 ) {
-    pool_activate(progress.as_ref(), &scan_id, PoolKind::Discovery, ".");
-
     for entry in WalkDir::new(scan_root)
         .follow_links(false)
         .into_iter()
@@ -616,7 +715,7 @@ fn discovery_worker(
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
-                pool_fail(progress.as_ref(), &scan_id, PoolKind::Discovery);
+                pool_fail(progress.as_ref(), &scan_id, PoolKind::Discovery, None);
                 let _ = result_tx.send(PipelineResult::WalkError(err.to_string()));
                 continue;
             }
@@ -626,12 +725,17 @@ fn discovery_worker(
             continue;
         };
         let path = progress_path(&work_item.relative_path);
+        let operation_id = pool_activate(progress.as_ref(), &scan_id, PoolKind::Discovery, &path);
         pool_queue(progress.as_ref(), &scan_id, PoolKind::Metadata, &path);
         if work_tx.send(work_item).is_err() {
             break;
         }
-        pool_complete(progress.as_ref(), &scan_id, PoolKind::Discovery);
-        pool_activate(progress.as_ref(), &scan_id, PoolKind::Discovery, &path);
+        pool_complete(
+            progress.as_ref(),
+            &scan_id,
+            PoolKind::Discovery,
+            operation_id,
+        );
     }
 
     pool_deactivate(progress.as_ref(), &scan_id, PoolKind::Discovery);
@@ -659,7 +763,7 @@ fn metadata_worker(
         };
 
         let path = progress_path(&item.relative_path);
-        pool_start(progress.as_ref(), &scan_id, PoolKind::Metadata, &path);
+        let operation_id = pool_start(progress.as_ref(), &scan_id, PoolKind::Metadata, &path);
 
         match item.kind {
             WorkKind::Dir => {
@@ -686,13 +790,29 @@ fn metadata_worker(
                     })
                 };
                 if result_tx.send(PipelineResult::Directory { row }).is_err() {
+                    pool_fail(
+                        progress.as_ref(),
+                        &scan_id,
+                        PoolKind::Metadata,
+                        operation_id,
+                    );
                     break;
                 }
-                pool_complete(progress.as_ref(), &scan_id, PoolKind::Metadata);
+                pool_complete(
+                    progress.as_ref(),
+                    &scan_id,
+                    PoolKind::Metadata,
+                    operation_id,
+                );
             }
             WorkKind::File => {
                 if is_database_sidecar(&item.absolute_path, db_path, db_wal_path, db_shm_path) {
-                    pool_complete(progress.as_ref(), &scan_id, PoolKind::Metadata);
+                    pool_complete(
+                        progress.as_ref(),
+                        &scan_id,
+                        PoolKind::Metadata,
+                        operation_id,
+                    );
                     continue;
                 }
 
@@ -711,6 +831,12 @@ fn metadata_worker(
                                 })
                                 .is_err()
                             {
+                                pool_fail(
+                                    progress.as_ref(),
+                                    &scan_id,
+                                    PoolKind::Metadata,
+                                    operation_id,
+                                );
                                 break;
                             }
                         } else {
@@ -730,13 +856,29 @@ fn metadata_worker(
                                 })
                                 .is_err()
                             {
+                                pool_fail(
+                                    progress.as_ref(),
+                                    &scan_id,
+                                    PoolKind::Metadata,
+                                    operation_id,
+                                );
                                 break;
                             }
                         }
-                        pool_complete(progress.as_ref(), &scan_id, PoolKind::Metadata);
+                        pool_complete(
+                            progress.as_ref(),
+                            &scan_id,
+                            PoolKind::Metadata,
+                            operation_id,
+                        );
                     }
                     Err(err) => {
-                        pool_fail(progress.as_ref(), &scan_id, PoolKind::Metadata);
+                        pool_fail(
+                            progress.as_ref(),
+                            &scan_id,
+                            PoolKind::Metadata,
+                            operation_id,
+                        );
                         let message = err.to_string();
                         let row = error_file_row(
                             &scan_id,
@@ -778,7 +920,7 @@ fn hash_worker(
         };
 
         let path = progress_path(&job.relative_path);
-        pool_start(progress.as_ref(), &scan_id, PoolKind::Hashing, &path);
+        let operation_id = pool_start(progress.as_ref(), &scan_id, PoolKind::Hashing, &path);
 
         match hash_file_with_metadata(&job.absolute_path, job.metadata) {
             Ok(hashed) => {
@@ -791,12 +933,28 @@ fn hash_worker(
                     })
                     .is_err()
                 {
+                    pool_fail(
+                        progress.as_ref(),
+                        &scan_id,
+                        PoolKind::Hashing,
+                        operation_id,
+                    );
                     break;
                 }
-                pool_complete(progress.as_ref(), &scan_id, PoolKind::Hashing);
+                pool_complete(
+                    progress.as_ref(),
+                    &scan_id,
+                    PoolKind::Hashing,
+                    operation_id,
+                );
             }
             Err(err) => {
-                pool_fail(progress.as_ref(), &scan_id, PoolKind::Hashing);
+                pool_fail(
+                    progress.as_ref(),
+                    &scan_id,
+                    PoolKind::Hashing,
+                    operation_id,
+                );
                 let message = err.to_string();
                 let row = error_file_row(&scan_id, &job.stored_path, &job.name, message.clone());
                 if result_tx
@@ -972,32 +1130,44 @@ fn pool_queue(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKin
     });
 }
 
-fn pool_start(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind, path: &str) {
-    let Some(progress) = progress else {
-        return;
-    };
+fn pool_start(
+    progress: Option<&ScanProgressStore>,
+    scan_id: &str,
+    kind: PoolKind,
+    path: &str,
+) -> Option<u64> {
+    let progress = progress?;
     let path = path.to_string();
-    progress.update(scan_id, move |state| {
-        let pool = scan_pool_mut(&mut state.pools, kind);
-        pool.queued = pool.queued.saturating_sub(1);
-        pool.active += 1;
-        pool.current_path = Some(path.clone());
-        state.current_path = Some(path);
+    progress.update_with_result(scan_id, move |state| {
+        {
+            let pool = scan_pool_mut(&mut state.pools, kind);
+            pool.queued = pool.queued.saturating_sub(1);
+            pool.active += 1;
+            pool.current_path = Some(path.clone());
+        }
+        state.current_path = Some(path.clone());
+        state.start_active_operation(kind, path)
     });
 }
 
-fn pool_activate(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind, path: &str) {
-    let Some(progress) = progress else {
-        return;
-    };
+fn pool_activate(
+    progress: Option<&ScanProgressStore>,
+    scan_id: &str,
+    kind: PoolKind,
+    path: &str,
+) -> Option<u64> {
+    let progress = progress?;
     let path = path.to_string();
-    progress.update(scan_id, move |state| {
-        let pool = scan_pool_mut(&mut state.pools, kind);
-        if pool.active == 0 {
-            pool.active = 1;
+    progress.update_with_result(scan_id, move |state| {
+        {
+            let pool = scan_pool_mut(&mut state.pools, kind);
+            if pool.active == 0 {
+                pool.active = 1;
+            }
+            pool.current_path = Some(path.clone());
         }
-        pool.current_path = Some(path.clone());
-        state.current_path = Some(path);
+        state.current_path = Some(path.clone());
+        state.start_active_operation(kind, path)
     });
 }
 
@@ -1006,36 +1176,55 @@ fn pool_deactivate(progress: Option<&ScanProgressStore>, scan_id: &str, kind: Po
         return;
     };
     progress.update(scan_id, move |state| {
-        let pool = scan_pool_mut(&mut state.pools, kind);
-        pool.active = 0;
-        pool.current_path = None;
+        {
+            let pool = scan_pool_mut(&mut state.pools, kind);
+            pool.active = 0;
+            pool.current_path = None;
+        }
+        state.remove_active_operations_for_pool(kind);
     });
 }
 
-fn pool_complete(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind) {
+fn pool_complete(
+    progress: Option<&ScanProgressStore>,
+    scan_id: &str,
+    kind: PoolKind,
+    operation_id: Option<u64>,
+) {
     let Some(progress) = progress else {
         return;
     };
     progress.update(scan_id, move |state| {
-        let pool = scan_pool_mut(&mut state.pools, kind);
-        pool.active = pool.active.saturating_sub(1);
-        pool.completed += 1;
-        if pool.active == 0 {
-            pool.current_path = None;
+        state.remove_active_operation(operation_id);
+        {
+            let pool = scan_pool_mut(&mut state.pools, kind);
+            pool.active = pool.active.saturating_sub(1);
+            pool.completed += 1;
+            if pool.active == 0 {
+                pool.current_path = None;
+            }
         }
     });
 }
 
-fn pool_fail(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind) {
+fn pool_fail(
+    progress: Option<&ScanProgressStore>,
+    scan_id: &str,
+    kind: PoolKind,
+    operation_id: Option<u64>,
+) {
     let Some(progress) = progress else {
         return;
     };
     progress.update(scan_id, move |state| {
-        let pool = scan_pool_mut(&mut state.pools, kind);
-        pool.active = pool.active.saturating_sub(1);
-        pool.failed += 1;
-        if pool.active == 0 {
-            pool.current_path = None;
+        state.remove_active_operation(operation_id);
+        {
+            let pool = scan_pool_mut(&mut state.pools, kind);
+            pool.active = pool.active.saturating_sub(1);
+            pool.failed += 1;
+            if pool.active == 0 {
+                pool.current_path = None;
+            }
         }
     });
 }
@@ -1060,15 +1249,38 @@ fn sidecar_path(path: &Path, suffix: &str) -> Option<PathBuf> {
     Some(PathBuf::from(format!("{}-{suffix}", path.to_str()?)))
 }
 
-fn normalize_scan_root(root: &Path, offset: &Path) -> PathBuf {
-    if offset == Path::new("/") || offset.as_os_str().is_empty() {
-        root.to_path_buf()
+fn resolve_contained_scan_root(location_root: &Path, offset: &Path) -> Result<PathBuf> {
+    let canonical_location_root = location_root
+        .canonicalize()
+        .with_context(|| format!("canonicalizing location root {}", location_root.display()))?;
+    let relative_offset = if offset == Path::new("/") || offset.as_os_str().is_empty() {
+        PathBuf::new()
     } else if offset.is_absolute() {
-        let stripped = offset.strip_prefix("/").unwrap_or(offset);
-        root.join(stripped)
+        offset.strip_prefix("/").unwrap_or(offset).to_path_buf()
     } else {
-        root.join(offset)
+        offset.to_path_buf()
+    };
+    let scan_root = canonical_location_root
+        .join(relative_offset)
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "resolving scan offset {} beneath location root {}",
+                offset.display(),
+                canonical_location_root.display()
+            )
+        })?;
+
+    if !scan_root.starts_with(&canonical_location_root) {
+        anyhow::bail!(
+            "scan offset {} resolves outside canonical location root {}: {}",
+            offset.display(),
+            canonical_location_root.display(),
+            scan_root.display()
+        );
     }
+
+    Ok(scan_root)
 }
 
 #[derive(Clone)]
@@ -1167,7 +1379,7 @@ fn mode(_metadata: &std::fs::Metadata) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{LocationInput, LocationType};
+    use crate::db::{Location, LocationInput, LocationType};
 
     fn physical_file_paths(db: &Database, scan_id: &str) -> Vec<String> {
         let conn = db.connect().unwrap();
@@ -1180,6 +1392,168 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
+    }
+
+    #[test]
+    fn prepare_scan_accepts_nested_offset_inside_location_root() {
+        let root = test_root("scan-root-contained");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(location_root.join("nested")).unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root.clone(),
+            notes: None,
+        })
+        .unwrap();
+
+        let prepared = prepare_scan(&db, "test", Path::new("/nested")).unwrap();
+
+        assert_eq!(
+            prepared.scan_root,
+            location_root.join("nested").canonicalize().unwrap()
+        );
+        let scans = db.scans().unwrap();
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].offset_path, "/nested");
+    }
+
+    #[test]
+    fn prepare_scan_with_started_at_persists_date_derived_identity() {
+        let root = test_root("scan-started-at");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(&location_root).unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Unknown,
+            name: "Archive".to_string(),
+            slug: "archive-volume".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+        let started_at = DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let prepared = prepare_scan_with_started_at(
+            &db,
+            "archive-volume",
+            Path::new("/"),
+            started_at.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.scan_id, "20260715T123456Z--archive-volume");
+        let scan = db.scan_by_id(&prepared.scan_id).unwrap().unwrap();
+        assert_eq!(scan.started_at, started_at.to_rfc3339());
+    }
+
+    #[test]
+    fn prepare_scan_rejects_outside_or_missing_offsets_before_starting() {
+        let root = test_root("scan-root-containment");
+        let location_root = root.join("container/location");
+        std::fs::create_dir_all(location_root.join("nested")).unwrap();
+        std::fs::create_dir_all(root.join("container/outside")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+
+        for (offset, message) in [
+            (Path::new("../outside"), "resolves outside canonical location root"),
+            (
+                Path::new("/../../outside"),
+                "resolves outside canonical location root",
+            ),
+            (
+                Path::new("/missing"),
+                "resolving scan offset /missing beneath location root",
+            ),
+        ] {
+            let error = prepare_scan(&db, "test", offset)
+                .err()
+                .expect("outside or missing offset should be rejected");
+            assert!(error.to_string().contains(message), "{error:#}");
+            assert!(db.scans().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_scan_rejects_symlink_offsets_outside_location_root_before_starting() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("scan-root-symlink-containment");
+        let location_root = root.join("location");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&location_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, location_root.join("outside-link")).unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+
+        let error = prepare_scan(&db, "test", Path::new("/outside-link"))
+            .err()
+            .expect("outside symlink should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("resolves outside canonical location root"),
+            "{error:#}"
+        );
+        assert!(db.scans().unwrap().is_empty());
+    }
+
+    #[test]
+    fn prepare_update_scan_validates_seed_before_creating_destination_scan() {
+        let root = test_root("update-scan-seed-containment");
+        let location_root = root.join("container/location");
+        std::fs::create_dir_all(&location_root).unwrap();
+        std::fs::create_dir_all(root.join("container/outside")).unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+        let location = db.location_by_slug("test").unwrap().unwrap();
+        let source_scan_id = db.start_scan(&location, Path::new("../outside")).unwrap();
+
+        let error = prepare_update_scan(&db, &source_scan_id)
+            .err()
+            .expect("escaped source offset should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("resolves outside canonical location root"),
+            "{error:#}"
+        );
+        assert_eq!(db.scans().unwrap().len(), 1);
     }
 
     #[test]
@@ -1325,6 +1699,84 @@ mod tests {
     }
 
     #[test]
+    fn active_operations_are_oldest_first_and_exclude_queued_paths() {
+        let (progress, scan_id) = progress_for_active_operation_test();
+
+        pool_queue(
+            Some(&progress),
+            &scan_id,
+            PoolKind::Metadata,
+            "queued-only.txt",
+        );
+        assert!(progress.active_operations_oldest_first(&scan_id).is_empty());
+
+        let metadata_operation = pool_start(
+            Some(&progress),
+            &scan_id,
+            PoolKind::Metadata,
+            "metadata.txt",
+        )
+        .expect("started metadata operation");
+        pool_queue(
+            Some(&progress),
+            &scan_id,
+            PoolKind::Hashing,
+            "hashing.txt",
+        );
+        let hashing_operation = pool_start(
+            Some(&progress),
+            &scan_id,
+            PoolKind::Hashing,
+            "hashing.txt",
+        )
+        .expect("started hashing operation");
+
+        let operations = progress.active_operations_oldest_first(&scan_id);
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0].operation_id, metadata_operation);
+        assert_eq!(operations[0].pool, "metadata");
+        assert_eq!(operations[0].path, "metadata.txt");
+        assert!(chrono::DateTime::parse_from_rfc3339(&operations[0].started_at).is_ok());
+        assert_eq!(operations[1].operation_id, hashing_operation);
+        assert_eq!(operations[1].pool, "hashing");
+        assert_eq!(operations[1].path, "hashing.txt");
+
+        pool_complete(
+            Some(&progress),
+            &scan_id,
+            PoolKind::Metadata,
+            Some(metadata_operation),
+        );
+        let operations = progress.active_operations_oldest_first(&scan_id);
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].operation_id, hashing_operation);
+
+        pool_fail(
+            Some(&progress),
+            &scan_id,
+            PoolKind::Hashing,
+            Some(hashing_operation),
+        );
+        assert!(progress.active_operations_oldest_first(&scan_id).is_empty());
+    }
+
+    #[test]
+    fn deactivating_a_pool_removes_its_active_operations() {
+        let (progress, scan_id) = progress_for_active_operation_test();
+        let operation = pool_activate(Some(&progress), &scan_id, PoolKind::Discovery, ".")
+            .expect("started discovery operation");
+
+        let operations = progress.active_operations_oldest_first(&scan_id);
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].operation_id, operation);
+        assert_eq!(operations[0].pool, "discovery");
+        assert_eq!(operations[0].path, ".");
+
+        pool_deactivate(Some(&progress), &scan_id, PoolKind::Discovery);
+        assert!(progress.active_operations_oldest_first(&scan_id).is_empty());
+    }
+
+    #[test]
     fn scan_progress_reports_worker_pool_counters() {
         let root = test_root("scan-progress-pools");
         let location_root = root.join("location");
@@ -1357,6 +1809,31 @@ mod tests {
         assert!(state.pools.metadata.completed >= 3);
         assert_eq!(state.pools.hashing.completed, 2);
         assert_eq!(state.pools.hashing.failed, 0);
+        assert!(state.active_operations.is_empty());
+        assert!(progress.active_operations_oldest_first(&scan_id).is_empty());
+    }
+
+    fn progress_for_active_operation_test() -> (ScanProgressStore, String) {
+        let scan_id = "active-operation-test".to_string();
+        let progress = ScanProgressStore::default();
+        progress.start(&PreparedScan {
+            scan_id: scan_id.clone(),
+            location: Location {
+                id: "location".to_string(),
+                slug: "test".to_string(),
+                name: "Test".to_string(),
+                kind: LocationType::Local,
+                root_path: PathBuf::from("/tmp"),
+                notes: None,
+                representative_scan_id: None,
+                disabled: false,
+                created_at: "2026-07-15T00:00:00Z".to_string(),
+            },
+            scan_root: PathBuf::from("/tmp"),
+            reuse_from_scan_id: None,
+            reusable_files: HashMap::new(),
+        });
+        (progress, scan_id)
     }
 
     fn test_root(name: &str) -> PathBuf {

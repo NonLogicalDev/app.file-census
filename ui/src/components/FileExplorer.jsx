@@ -1,4 +1,5 @@
 import FileGrid from './FileGrid.jsx';
+import DirectoryTree from './DirectoryTree.jsx';
 import { Icon } from './Icon.jsx';
 import SearchFilterControls from './search/SearchFilterControls.jsx';
 import ScanProgressPools from './ScanProgressPools.jsx';
@@ -9,6 +10,7 @@ import {
   columnPickerClassName,
   deleteCheckCalloutClassName,
   deleteCheckEmptyClassName,
+  emptyTextClassName,
   explorerClassName,
   explorerHeaderClassName,
   finderToolbarClassName,
@@ -40,15 +42,16 @@ export default function FileExplorer(props) {
     visibleColumns,
     gridVisibleColumns,
     visibleGridRows,
+    filesLoading = false,
+    directoryTreeNodes = {},
+    directoryTreeExpandedPaths = [],
+    directoryTreeLoadingPaths = [],
     query = '',
     setQuery,
     searchFilters = [],
     locations = [],
     onStopScan,
-    onPauseScan,
-    onResumeScan,
     onUpdateScan,
-    onRepairScan,
     onSetRepresentative,
     onClearRepresentative,
     onRunDeleteCheck,
@@ -77,6 +80,8 @@ export default function FileExplorer(props) {
     onClearGridSelection,
     onSetScanSubview,
     onLoadTree,
+    onToggleDirectoryTree,
+    onLoadMoreDirectoryTree,
     onOpenGridEntry,
     onInspectFile,
     onRequestExcludePath,
@@ -85,8 +90,51 @@ export default function FileExplorer(props) {
 
   if (!activeScan) return <p className={emptyTextClassName}>Select or run a scan to browse this location.</p>;
   const showingDeleteCheck = scanSubview === 'delete-check';
+  const showingFileTree = scanSubview === 'tree';
   const selectedCount = selectedGridEntries.length;
   const canBuildThumbnails = Boolean(location?.connected && activeScan);
+  const canStopScan = typeof onStopScan === 'function';
+  const hasUnavailableScanControlStatus = activeScan.status === 'paused' || activeScan.status === 'repairing';
+  const breadcrumbBar = (
+    <div className={breadcrumbsClassName}>
+      {breadcrumbs(selectedPath).map((crumb, index) => (
+        <span className="inline-flex items-center gap-1.5" key={crumb.path}>
+          {index > 0 && <span className="select-none text-muted" aria-hidden="true">-</span>}
+          <button type="button" onClick={() => onLoadTree(crumb.path)}>{crumb.label}</button>
+        </span>
+      ))}
+    </div>
+  );
+  const resultsTable = (
+    <div className={treeClassName}>
+      <FileGrid
+        rows={visibleGridRows}
+        visibleColumns={gridVisibleColumns}
+        fullPathName={showingDeleteCheck}
+        selectable={!showingDeleteCheck}
+        selectedPaths={selectedGridPaths}
+        canBuildThumbnails={canBuildThumbnails}
+        onOpen={onOpenGridEntry}
+        onInspect={onInspectFile}
+        onToggleSelection={onToggleGridSelection}
+        onSetSelection={onSetGridSelection}
+        onBuildThumbnails={showingDeleteCheck ? null : onRequestBuildThumbnailsForEntry}
+        onExclude={showingDeleteCheck ? null : onRequestExcludePath}
+        onDelete={showingDeleteCheck ? null : onRequestDeletePath}
+      />
+      {!visibleGridRows.length && (
+        <p className={treeEmptyClassName}>
+          {filesLoading
+            ? 'Loading files…'
+            : showingDeleteCheck
+              ? (deleteCheck ? 'No missing files.' : 'No Delete Check rows yet.')
+              : isActiveStatus(activeScan.status)
+                ? 'Waiting for the first flushed files...'
+                : 'No files discovered at this path yet.'}
+        </p>
+      )}
+    </div>
+  );
 
   return (
     <div className={explorerClassName}>
@@ -99,6 +147,15 @@ export default function FileExplorer(props) {
           onClick={() => onSetScanSubview('files')}
         >
           Files
+        </SegmentedTab>
+        <SegmentedTab
+          type="button"
+          role="tab"
+          aria-selected={showingFileTree}
+          active={showingFileTree}
+          onClick={() => onSetScanSubview('tree')}
+        >
+          File tree
         </SegmentedTab>
         <SegmentedTab
           type="button"
@@ -118,31 +175,15 @@ export default function FileExplorer(props) {
         </div>
         {showScanActions && (
           <Toolbar className={actionToolbarClassName}>
-            {isActiveStatus(activeScan.status) && (
-              <>
-                {activeScan.status === 'paused' ? (
-                  <Button variant="secondary" onClick={() => onResumeScan(activeScan.id)} disabled={busy} icon={<Icon name="resume" />}>
-                    Resume
-                  </Button>
-                ) : activeScan.status !== 'stopping' ? (
-                  <Button variant="secondary" onClick={() => onPauseScan(activeScan.id)} disabled={busy} icon={<Icon name="pause" />}>
-                    Pause
-                  </Button>
-                ) : null}
-                <Button variant="warning" onClick={() => onStopScan(activeScan.id)} disabled={busy} icon={<Icon name="stop" />}>
-                  Stop
-                </Button>
-              </>
+            {isActiveStatus(activeScan.status) && canStopScan && activeScan.status !== 'stopping' && (
+              <Button variant="warning" onClick={() => onStopScan(activeScan.id)} disabled={busy} icon={<Icon name="stop" />}>
+                Stop
+              </Button>
             )}
             {!isActiveStatus(activeScan.status) && (
-              <>
-                <Button variant="secondary" onClick={() => onUpdateScan(activeScan.id)} disabled={busy} icon={<Icon name="update" />}>
-                  Update scan
-                </Button>
-                <Button variant="secondary" onClick={() => onRepairScan(activeScan.id)} disabled={busy} icon={<Icon name="repair" />}>
-                  Repair scan
-                </Button>
-              </>
+              <Button variant="secondary" onClick={() => onUpdateScan(activeScan.id)} disabled={busy} icon={<Icon name="update" />}>
+                Update scan
+              </Button>
             )}
             {activeScan.is_representative ? (
               <Button
@@ -182,13 +223,19 @@ export default function FileExplorer(props) {
         <div className="my-2.5 flex flex-wrap items-center justify-between gap-3 rounded-panel border border-warning bg-warning-soft px-3 py-2.5 text-warning">
           <div className="min-w-0">
             <strong>Scan was interrupted</strong>
-            <span className="ml-2 text-muted-strong">Repair the scan to reuse completed work and fill in missing or incomplete entries.</span>
+            <span className="ml-2 text-muted-strong">Repair is unavailable in this build. Use a new scan to create a complete index.</span>
           </div>
-          {showScanActions && (
-            <Button variant="warning" onClick={() => onRepairScan(activeScan.id)} disabled={busy} icon={<Icon name="repair" />}>
-              Repair scan
-            </Button>
-          )}
+        </div>
+      )}
+
+      {hasUnavailableScanControlStatus && (
+        <div className="my-2.5 rounded-panel border border-warning bg-warning-soft px-3 py-2.5 text-warning">
+          <strong>{activeScan.status === 'paused' ? 'Pause and resume unavailable' : 'Repair unavailable'}</strong>
+          <span className="ml-2 text-muted-strong">
+            {activeScan.status === 'paused'
+              ? 'Pause and resume are unavailable in this build. Use a new scan to refresh this location.'
+              : 'Repair is unavailable in this build. Use a new scan to refresh this location.'}
+          </span>
         </div>
       )}
 
@@ -293,60 +340,54 @@ export default function FileExplorer(props) {
       )}
 
       {showingDeleteCheck ? (
-        deleteCheck ? (
-          <section className={deleteCheckCalloutClassName({ safe: deleteCheck.safe })}>
-            <div>
-              <strong>{deleteCheck.safe ? 'Safe to delete' : 'Unsafe to delete'}</strong>
-              <span>
-                {deleteCheck.safe
-                  ? `All ${deleteCheck.total_count} files in ${deleteCheckPath || 'root'} are present in at least one other location.`
-                  : `${deleteCheck.missing_count} of ${deleteCheck.total_count} files in ${deleteCheckPath || 'root'} are not present in another location.`}
-              </span>
-            </div>
-            <Button variant="secondary" onClick={() => onSetScanSubview('files')} icon={<Icon name="browseFiles" />}>
-              Back to files
-            </Button>
+        <>
+          {deleteCheck ? (
+            <section className={deleteCheckCalloutClassName({ safe: deleteCheck.safe })}>
+              <div>
+                <strong>{deleteCheck.safe ? 'Safe to delete' : 'Unsafe to delete'}</strong>
+                <span>
+                  {deleteCheck.safe
+                    ? `All ${deleteCheck.total_count} files in ${deleteCheckPath || 'root'} are present in at least one other location.`
+                    : `${deleteCheck.missing_count} of ${deleteCheck.total_count} files in ${deleteCheckPath || 'root'} are not present in another location.`}
+                </span>
+              </div>
+              <Button variant="secondary" onClick={() => onSetScanSubview('files')} icon={<Icon name="browseFiles" />}>
+                Back to files
+              </Button>
+            </section>
+          ) : (
+            <section className={deleteCheckEmptyClassName}>
+              <strong>No Delete Check result yet</strong>
+              <span>Run Delete Check from the Files tab to check the current folder or selected rows.</span>
+              <Button variant="warning" onClick={() => onRunDeleteCheck(activeScan.id, [])} disabled={busy} icon={<Icon name="deleteCheck" />}>
+                Check current folder
+              </Button>
+            </section>
+          )}
+          {resultsTable}
+        </>
+      ) : showingFileTree ? (
+        <div className="grid min-h-[620px] overflow-hidden rounded-panel border border-border bg-surface md:grid-cols-[minmax(190px,240px)_minmax(0,1fr)]">
+          <DirectoryTree
+            nodes={directoryTreeNodes}
+            expandedPaths={directoryTreeExpandedPaths}
+            loadingPaths={directoryTreeLoadingPaths}
+            selectedPath={selectedPath}
+            onToggle={onToggleDirectoryTree}
+            onSelect={onLoadTree}
+            onLoadMore={onLoadMoreDirectoryTree}
+          />
+          <section className="min-w-0 bg-bg p-[5px]">
+            {breadcrumbBar}
+            {resultsTable}
           </section>
-        ) : (
-          <section className={deleteCheckEmptyClassName}>
-            <strong>No Delete Check result yet</strong>
-            <span>Run Delete Check from the Files tab to check the current folder or selected rows.</span>
-            <Button variant="warning" onClick={() => onRunDeleteCheck(activeScan.id, [])} disabled={busy} icon={<Icon name="deleteCheck" />}>
-              Check current folder
-            </Button>
-          </section>
-        )
-      ) : (
-        <div className={breadcrumbsClassName}>
-          {breadcrumbs(selectedPath).map((crumb, index) => (
-            <span className="inline-flex items-center gap-1.5" key={crumb.path}>
-              {index > 0 && <span className="select-none text-muted" aria-hidden="true">-</span>}
-              <button type="button" onClick={() => onLoadTree(crumb.path)}>{crumb.label}</button>
-            </span>
-          ))}
         </div>
+      ) : (
+        <>
+          {breadcrumbBar}
+          {resultsTable}
+        </>
       )}
-
-      <div className={treeClassName}>
-        <FileGrid
-          rows={visibleGridRows}
-          visibleColumns={gridVisibleColumns}
-          fullPathName={showingDeleteCheck}
-          selectable={!showingDeleteCheck}
-          selectedPaths={selectedGridPaths}
-          canBuildThumbnails={canBuildThumbnails}
-          onOpen={onOpenGridEntry}
-          onInspect={onInspectFile}
-          onToggleSelection={onToggleGridSelection}
-          onSetSelection={onSetGridSelection}
-          onBuildThumbnails={showingDeleteCheck ? null : onRequestBuildThumbnailsForEntry}
-          onExclude={showingDeleteCheck ? null : onRequestExcludePath}
-          onDelete={showingDeleteCheck ? null : onRequestDeletePath}
-        />
-        {!visibleGridRows.length && (
-          <p className={treeEmptyClassName}>{showingDeleteCheck ? (deleteCheck ? 'No missing files.' : 'No Delete Check rows yet.') : isActiveStatus(activeScan.status) ? 'Waiting for the first flushed files...' : 'No files discovered at this path yet.'}</p>
-        )}
-      </div>
 
       <ScanProgressPools progress={activeScan} />
 

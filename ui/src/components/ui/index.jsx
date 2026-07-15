@@ -67,6 +67,12 @@ export {
   notificationLayerClassName,
   notificationTextClassName,
   notificationToastClassName,
+  optionsMenuClassName,
+  optionsPanelClassName,
+  optionsSectionClassName,
+  optionsSectionCodeClassName,
+  optionsSectionLabelClassName,
+  optionsSummaryClassName,
   pageActionsListClassName,
   pageActionsMenuClassName,
   pageActionsPanelClassName,
@@ -102,6 +108,7 @@ export {
   sidebarSectionTitleClassName,
   sidebarSpacerClassName,
   sidebarWindowControlsClassName,
+  shellMessageClassName,
   topbarDescriptionClassName,
   topbarSidebarToggleClassName,
   topbarTitleClassName,
@@ -139,8 +146,21 @@ export {
   fileGridSortClassName,
   fileGridTableClassName,
   fileKindIconClassName,
+  fileNameLabelClassName,
   fileNameCellClassName
 } from './fileGridClasses.js';
+export {
+  progressBarClassName,
+  progressElapsedClassName,
+  progressMetaClassName,
+  progressPoolClassName,
+  progressPoolCountClassName,
+  progressPoolHeaderClassName,
+  progressPoolsClassName,
+  progressPoolTitleClassName,
+  progressSegmentClassName,
+  progressStatusClassName
+} from './progressClasses.js';
 export {
   breadcrumbsClassName,
   columnPickerClassName,

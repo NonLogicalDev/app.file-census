@@ -3,27 +3,18 @@ import test from 'node:test';
 
 import {
   addSearchFilter,
-  addSearchFilterNode,
   buildFileSearchQuery,
   chipLabel,
-  convertSearchFilterTermToGroup,
   decodeSearchFilters,
   defaultOperatorForSearchTerm,
   encodeSearchFilters,
   exportSearchFilterState,
   fileMatchesSearch,
-  filtersFromSearchFilterRoot,
   groupSearchFilters,
   importSearchFilterState,
-  moveSearchFilterNode,
   normalizeSearchFilter,
   removeSearchFilter,
-  removeSearchFilterNode,
   searchFilterKey
-  , searchFilterRoot,
-  setSearchFilterGroupOperator,
-  simplifySearchFilterGroup,
-  toggleSearchFilterNegation
 } from './searchFilters.js';
 
 test('builds files.search payload from quick query and canonical filters', () => {
@@ -283,106 +274,29 @@ test('matches canonical search state against file-like rows', () => {
   ]), true);
 });
 
-test('wraps filters in a synthetic root all group and unwraps for persistence', () => {
-  const filters = [
-    { term: 'extension', operator: 'equal', expression: 'jpg' },
-    { term: 'location_slug', operator: 'equal', expression: 'photos' }
-  ];
-
-  assert.deepEqual(searchFilterRoot(filters), {
+test('flat filter operations preserve canonical composed filters and scan scope', () => {
+  const composed = {
     term: 'filter',
-    operator: 'and',
-    expression: filters
-  });
-  assert.deepEqual(filtersFromSearchFilterRoot(searchFilterRoot(filters)), filters);
-});
+    operator: 'not',
+    expression: { term: 'extension', operator: 'equal', expression: 'tmp' }
+  };
+  const filters = addSearchFilter([], composed);
 
-test('tree helpers add, remove, move, and update nested nodes by path', () => {
-  const initial = [
-    { term: 'extension', operator: 'equal', expression: 'jpg' }
-  ];
-  const withGroup = addSearchFilterNode(initial, [], {
+  assert.deepEqual(filters, [composed]);
+  assert.deepEqual(addSearchFilter(filters, {
     term: 'filter',
-    operator: 'or',
-    expression: [
-      { term: 'location_slug', operator: 'equal', expression: 'photos' }
-    ]
+    operator: 'not',
+    expression: { term: 'extension', operator: 'equal', expression: '.tmp' }
+  }), [composed]);
+  assert.deepEqual(removeSearchFilter(filters, composed), []);
+  assert.deepEqual(buildFileSearchQuery('', [], {
+    scanIds: ['scan-a', '', 'scan-a', 'scan-b'],
+    limit: 50,
+    offset: 10
+  }), {
+    filter: null,
+    limit: 50,
+    offset: 10,
+    scan_ids: ['scan-a', 'scan-b']
   });
-  assert.deepEqual(withGroup, [
-    { term: 'extension', operator: 'equal', expression: 'jpg' },
-    {
-      term: 'filter',
-      operator: 'or',
-      expression: [
-        { term: 'location_slug', operator: 'equal', expression: 'photos' }
-      ]
-    }
-  ]);
-
-  const withNested = addSearchFilterNode(withGroup, [1], { term: 'name', operator: 'substring', expression: 'beach' });
-  assert.deepEqual(withNested[1].expression, [
-    { term: 'location_slug', operator: 'equal', expression: 'photos' },
-    { term: 'name', operator: 'substring', expression: 'beach' }
-  ]);
-
-  const moved = moveSearchFilterNode(withNested, [0], [1], 1);
-  assert.deepEqual(moved, [
-    {
-      term: 'filter',
-      operator: 'or',
-      expression: [
-        { term: 'location_slug', operator: 'equal', expression: 'photos' },
-        { term: 'extension', operator: 'equal', expression: 'jpg' },
-        { term: 'name', operator: 'substring', expression: 'beach' }
-      ]
-    }
-  ]);
-
-  assert.deepEqual(removeSearchFilterNode(moved, [0, 1]), [
-    {
-      term: 'filter',
-      operator: 'or',
-      expression: [
-        { term: 'location_slug', operator: 'equal', expression: 'photos' },
-        { term: 'name', operator: 'substring', expression: 'beach' }
-      ]
-    }
-  ]);
-});
-
-test('tree helpers preserve semantics when negating and converting groups', () => {
-  const filters = [
-    { term: 'extension', operator: 'equal', expression: 'tmp' }
-  ];
-
-  const negated = toggleSearchFilterNegation(filters, [0]);
-  assert.deepEqual(negated, [
-    {
-      term: 'filter',
-      operator: 'not',
-      expression: { term: 'extension', operator: 'equal', expression: 'tmp' }
-    }
-  ]);
-
-  const grouped = convertSearchFilterTermToGroup(negated, [0]);
-  assert.deepEqual(grouped, [
-    {
-      term: 'filter',
-      operator: 'not',
-      expression: {
-        term: 'filter',
-        operator: 'and',
-        expression: [{ term: 'extension', operator: 'equal', expression: 'tmp' }]
-      }
-    }
-  ]);
-
-  const asAny = setSearchFilterGroupOperator(grouped, [0], 'or');
-  assert.deepEqual(asAny[0].expression.operator, 'or');
-
-  const simplified = simplifySearchFilterGroup(asAny, [0]);
-  assert.deepEqual(simplified, negated);
-
-  const matchedAgain = toggleSearchFilterNegation(simplified, [0]);
-  assert.deepEqual(matchedAgain, filters);
 });

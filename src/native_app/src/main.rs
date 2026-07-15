@@ -19,15 +19,7 @@ fn main() {
         .setup(|app| {
             let db_path = initial_db_path(app)?;
             let config_path = db_config_path(app)?;
-            let state = DesktopState::open(db_path, config_path)?;
-            let mut events = state.core()?.subscribe();
-            let app_handle = app.handle().clone();
-
-            tauri::async_runtime::spawn(async move {
-                while let Ok(event) = events.recv().await {
-                    let _ = app_handle.emit("app-event", event);
-                }
-            });
+            let state = DesktopState::open(db_path, config_path, app.handle().clone())?;
 
             app.manage(Mutex::new(state));
 
@@ -97,14 +89,7 @@ fn database_choose(
     let mut state = state
         .lock()
         .map_err(|_| "desktop state lock poisoned".to_string())?;
-    state.switch_to(path)?;
-    let mut events = state.core()?.subscribe();
-    let app_for_events = app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Ok(event) = events.recv().await {
-            let _ = app_for_events.emit("app-event", event);
-        }
-    });
+    state.switch_to(path, app.clone())?;
     let info = state.info()?;
     let _ = app.emit(
         "app-event",
@@ -134,20 +119,22 @@ struct DesktopState {
     core: AppCore,
     db_path: PathBuf,
     config_path: PathBuf,
-    event_poll_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    event_forward_task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 impl DesktopState {
-    fn open(db_path: PathBuf, config_path: PathBuf) -> anyhow::Result<Self> {
+    fn open(
+        db_path: PathBuf,
+        config_path: PathBuf,
+        app: tauri::AppHandle,
+    ) -> anyhow::Result<Self> {
         let core = AppCore::open(db_path.clone())?;
-        let event_poll_task = Some(tauri::async_runtime::spawn(
-            core.clone().poll_event_journal(),
-        ));
+        let event_forward_task = Some(spawn_app_event_forwarder(&core, app));
         Ok(Self {
             core,
             db_path,
             config_path,
-            event_poll_task,
+            event_forward_task,
         })
     }
 
@@ -161,23 +148,35 @@ impl DesktopState {
         })
     }
 
-    fn switch_to(&mut self, db_path: PathBuf) -> Result<(), String> {
-        if let Some(task) = self.event_poll_task.take() {
-            task.abort();
-        }
+    fn switch_to(&mut self, db_path: PathBuf, app: tauri::AppHandle) -> Result<(), String> {
         let core = AppCore::open(db_path.clone()).map_err(|error| error.to_string())?;
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         std::fs::write(&self.config_path, db_path.to_string_lossy().as_bytes())
             .map_err(|error| error.to_string())?;
-        self.event_poll_task = Some(tauri::async_runtime::spawn(
-            core.clone().poll_event_journal(),
-        ));
+        if let Some(task) = self.event_forward_task.take() {
+            task.abort();
+        }
         self.core = core;
         self.db_path = db_path;
+        self.event_forward_task = Some(spawn_app_event_forwarder(&self.core, app));
         Ok(())
     }
+}
+
+fn spawn_app_event_forwarder(
+    core: &AppCore,
+    app: tauri::AppHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    let mut events = core.subscribe();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) =
+            file_census_backend::events::recv_app_event_tolerating_lag(&mut events).await
+        {
+            let _ = app.emit("app-event", event);
+        }
+    })
 }
 
 #[derive(Serialize)]

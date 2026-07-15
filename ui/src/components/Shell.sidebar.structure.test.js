@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+const componentsDir = dirname(fileURLToPath(import.meta.url));
+const shellSource = readFileSync(join(componentsDir, 'Shell.jsx'), 'utf8');
+
+test('sidebar persists its collapsed state and bounded width without assuming storage is available', () => {
+  assert.match(shellSource, /SIDEBAR_HIDDEN_STORAGE_KEY = 'file-census\.sidebar\.hidden'/);
+  assert.match(shellSource, /SIDEBAR_WIDTH_STORAGE_KEY = 'file-census\.sidebar\.width'/);
+  assert.match(shellSource, /try \{[\s\S]*?window\.localStorage\.getItem\(key\)/);
+  assert.match(shellSource, /try \{[\s\S]*?window\.localStorage\.setItem\(key, value\)/);
+  assert.match(shellSource, /useState\(readStoredSidebarHidden\)/);
+  assert.match(shellSource, /useState\(readStoredSidebarWidth\)/);
+  assert.match(shellSource, /writeSidebarPreference\(SIDEBAR_HIDDEN_STORAGE_KEY, String\(sidebarHidden\)\)/);
+  assert.match(shellSource, /writeSidebarPreference\(SIDEBAR_WIDTH_STORAGE_KEY, String\(sidebarWidth\)\)/);
+});
+
+test('sidebar uses an accessible pointer and keyboard resize separator only when the expanded desktop sidebar is available', () => {
+  assert.match(shellSource, /const sidebarResizeDisabled = compactSidebar \|\| sidebarHidden/);
+  assert.match(shellSource, /role="separator"/);
+  assert.match(shellSource, /aria-valuemin=\{SIDEBAR_MIN_WIDTH\}/);
+  assert.match(shellSource, /aria-valuemax=\{SIDEBAR_MAX_WIDTH\}/);
+  assert.match(shellSource, /aria-valuenow=\{sidebarWidth\}/);
+  assert.match(shellSource, /onPointerDown=\{startSidebarResize\}/);
+  assert.match(shellSource, /onPointerMove=\{moveSidebarResize\}/);
+  assert.match(shellSource, /onPointerUp=\{finishSidebarResize\}/);
+  assert.match(shellSource, /event\.key === 'ArrowLeft'/);
+  assert.match(shellSource, /event\.key === 'ArrowRight'/);
+  assert.match(shellSource, /event\.key === 'Home'/);
+  assert.match(shellSource, /event\.key !== 'End'/);
+  assert.match(shellSource, /style=\{\{ '--sidebar-width': `\$\{sidebarWidth\}px` \}\}/);
+});

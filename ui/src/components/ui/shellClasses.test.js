@@ -5,6 +5,7 @@ import {
   appMainClassName,
   appShellClassName,
   appSidebarClassName,
+  clampSidebarWidth,
   eventStripClassName,
   eventStripStatusClassName,
   headerActionsClassName,
@@ -22,6 +23,9 @@ import {
   pageActionsPanelTitleClassName,
   pageActionsTriggerClassName,
   shellMessageClassName,
+  SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
   sidebarActivityClassName,
   sidebarBrandClassName,
   sidebarBrandSubtitleClassName,
@@ -169,6 +173,16 @@ test('sidebar shell helpers preserve desktop, hidden, and compact layout states'
   assert.match(sidebarHoverZoneClassName({ visible: true, peeking: true }), /pointer-events-none/);
   assert.match(sidebarWindowControlsClassName({ compactSidebar: true }), /hidden/);
   assert.match(sidebarOverlayCloseClassName({ visible: true }), /!inline-flex/);
+});
+
+test('sidebar width helper retains a stable default and clamps pointer or keyboard values', () => {
+  assert.equal(SIDEBAR_MIN_WIDTH, 232);
+  assert.equal(SIDEBAR_DEFAULT_WIDTH, 292);
+  assert.equal(SIDEBAR_MAX_WIDTH, 440);
+  assert.equal(clampSidebarWidth('invalid'), SIDEBAR_DEFAULT_WIDTH);
+  assert.equal(clampSidebarWidth(1), SIDEBAR_MIN_WIDTH);
+  assert.equal(clampSidebarWidth(999), SIDEBAR_MAX_WIDTH);
+  assert.equal(clampSidebarWidth(300.6), 301);
 });
 
 test('sidebar navigation helpers preserve compact Codex-like navigation', () => {

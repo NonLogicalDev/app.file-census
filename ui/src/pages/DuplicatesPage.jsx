@@ -95,7 +95,7 @@ export default function DuplicatesPage({
           {filteredDupes.map((group) => (
             <article className={cardClassName} key={`${group.blake3}-${group.size}-${group.file_kind}`}>
               <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <strong>{group.count} scans - {bytes(group.size)}</strong>
+                <strong>{group.count} locations - {bytes(group.size)}</strong>
                 <span className="rounded-full border border-border bg-surface-muted px-2 py-0.5 text-xs font-bold uppercase text-muted" title="Content kind">
                   {kindLabel(group.file_kind)}
                 </span>

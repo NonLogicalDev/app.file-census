@@ -8,11 +8,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+use serde_json::Value;
 
 use file_census_backend::app;
-use file_census_backend::db::{
-    build_scan_exclude_matcher, Database, LocationInput, LocationType, LocationUpdate,
-};
+use file_census_backend::db::{Database, LocationInput, LocationType, LocationUpdate, TreeEntry};
 use file_census_backend::events::{AppEvent, EventHub};
 use file_census_backend::search::{
     FileSearchExpression, FileSearchFilter, FileSearchOperator, FileSearchQuery, FileSearchTerm,
@@ -60,7 +59,8 @@ pub enum Command {
     Locations(LocationCommand),
     /// Manage scans.
     Scans(ScansCommand),
-    /// Legacy shortcut: scan a registered location into a new snapshot.
+    /// Scan LOCATION_SLUG, or with global --db bootstrap SOURCE_PATH VOLUME_SLUG.
+    /// Bootstrap scan IDs use UTC YYYYMMDDTHHMMSSZ--<slug>; collisions append --2, --3, and so on.
     Scan(ScanArgs),
     /// Search indexed paths and filenames.
     Find(FindArgs),
@@ -72,7 +72,7 @@ pub enum Command {
     Duplicates(DuplicatesCommand),
     /// Build cached thumbnails.
     Thumbnails(ThumbnailsCommand),
-    /// Run optional file enrichment processors.
+    /// Run optional file enrichment processors (currently unavailable).
     FileExtraInfo(FileExtraInfoCommand),
     /// Serve the embedded web UI.
     Serve(ServeArgs),
@@ -86,7 +86,7 @@ pub struct LocationCommand {
 
 #[derive(Subcommand)]
 enum LocationSubcommand {
-    /// Add a local path, disk, or NAS location.
+    /// Add a location rooted at a path.
     Add(AddLocationArgs),
     /// List locations.
     List,
@@ -116,6 +116,25 @@ struct AddLocationArgs {
     path: PathBuf,
     #[arg(long)]
     notes: Option<String>,
+}
+
+impl AddLocationArgs {
+    fn into_location_input(self) -> LocationInput {
+        let Self {
+            kind,
+            name,
+            slug,
+            path,
+            notes,
+        } = self;
+        LocationInput {
+            kind: kind.unwrap_or(LocationKind::Unknown).into(),
+            name: name.unwrap_or_else(|| slug.clone()),
+            slug,
+            root_path: path,
+            notes,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -187,19 +206,19 @@ pub struct ScansCommand {
 enum ScanSubcommand {
     /// List scans.
     List,
-    /// Benchmark metadata-aware filesystem discovery without hashing or DB writes.
+    /// Unavailable: discovery benchmark support is not implemented in this build.
     BenchmarkDiscovery(DiscoveryBenchmarkArgs),
     /// List scans currently running in a targeted server process.
     Running,
     /// Scan a registered location into a new snapshot and wait for completion.
-    Start(ScanArgs),
+    Start(ScanStartArgs),
     /// Update a scan by re-reading missing or incomplete information.
     Update(ScanIdArgs),
-    /// Repair a scan by re-scanning and filling incomplete entries.
+    /// Unavailable: scanner repair support is not implemented in this build.
     Repair(ScanIdArgs),
-    /// Ask a running server process to pause an active scan.
+    /// Unavailable: active scans cannot be paused in this build.
     Pause(ScanIdArgs),
-    /// Ask a running server process to resume a paused scan.
+    /// Unavailable: active scans cannot be resumed in this build.
     Resume(ScanIdArgs),
     /// Ask a running server process to stop an active scan.
     Stop(ScanIdArgs),
@@ -211,7 +230,7 @@ enum ScanSubcommand {
     DeleteCheck(DeleteCheckArgs),
     /// Add, update, or clear notes for a scan.
     Notes(ScanNotesArgs),
-    /// Add or update the short nickname for a scan.
+    /// Unavailable: scans do not have mutable nicknames in this build.
     Nickname(ScanNicknameArgs),
     /// Manage scan exclude patterns.
     Excludes(ScanExcludesCommand),
@@ -227,34 +246,24 @@ enum ScanSubcommand {
 
 #[derive(Args)]
 pub struct ScanArgs {
-    /// Location slug to scan.
+    /// Registered location slug (legacy), or a source directory when VOLUME_SLUG is supplied.
+    #[arg(value_name = "LOCATION_OR_SOURCE")]
+    location_or_source: String,
+    /// Compatible bootstrap shorthand: create or verify this location slug for SOURCE_PATH.
+    #[arg(value_name = "VOLUME_SLUG")]
+    volume_slug: Option<String>,
+    /// Optional subpath under the location/source root.
+    #[arg(long, default_value = "/")]
+    offset: PathBuf,
+}
+
+#[derive(Args)]
+struct ScanStartArgs {
+    /// Registered location slug to scan.
     slug: String,
     /// Optional subpath under the location root.
     #[arg(long, default_value = "/")]
     offset: PathBuf,
-    /// Content hash work to run during the scan.
-    #[arg(long, value_enum, default_value_t = ScanHashModeArg::Full)]
-    hash_mode: ScanHashModeArg,
-    /// Build EXIF metadata as a follow-up extra-info task after the scan completes.
-    #[arg(long)]
-    scan_exif: bool,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum ScanHashModeArg {
-    Full,
-    Light,
-    Both,
-}
-
-impl From<ScanHashModeArg> for scanner::ScanHashMode {
-    fn from(value: ScanHashModeArg) -> Self {
-        match value {
-            ScanHashModeArg::Full => scanner::ScanHashMode::Full,
-            ScanHashModeArg::Light => scanner::ScanHashMode::Light,
-            ScanHashModeArg::Both => scanner::ScanHashMode::Both,
-        }
-    }
 }
 
 #[derive(Args)]
@@ -273,7 +282,7 @@ struct TreeArgs {
     /// Entry offset within this folder page.
     #[arg(long, default_value_t = 0)]
     offset: u32,
-    /// Folder traversal depth. Use 1 for current folder and 0 for recursive.
+    /// Folder traversal depth. Must be at least 1; output is always bounded.
     #[arg(long, default_value_t = 1)]
     depth: u32,
 }
@@ -372,6 +381,8 @@ enum FilesSubcommand {
     Search(FileSearchArgs),
     /// Show all details and occurrences for a content hash.
     Details(FileDetailsArgs),
+    /// List visible occurrences for a file in pages.
+    Occurrences(FileOccurrencesArgs),
     /// Open an indexed file or folder in the system file browser.
     Open(FilePathActionArgs),
     /// Reveal an indexed file or folder in the system file browser.
@@ -380,15 +391,41 @@ enum FilesSubcommand {
 
 #[derive(Args)]
 struct FileDetailsArgs {
+    /// Scan containing the visible file origin.
+    scan_id: String,
+    /// Indexed relative path of the visible file origin.
+    path: String,
     #[arg(long)]
     blake3: String,
     #[arg(long)]
     size: u64,
+    /// Maximum visible occurrences included in the first page.
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+}
+
+#[derive(Args)]
+struct FileOccurrencesArgs {
+    /// Scan containing the visible file origin.
+    scan_id: String,
+    /// Indexed relative path of the visible file origin.
+    path: String,
+    #[arg(long)]
+    blake3: String,
+    #[arg(long)]
+    size: u64,
+    /// Maximum visible occurrences to return.
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    /// Number of visible occurrences to skip.
+    #[arg(long, default_value_t = 0)]
+    offset: u64,
 }
 
 #[derive(Args)]
 struct FilePathActionArgs {
-    location_slug: String,
+    /// Scan ID. A legacy location slug is accepted only when it has exactly one scan.
+    scan_id: String,
     path: String,
 }
 
@@ -491,7 +528,7 @@ pub struct FileExtraInfoCommand {
 
 #[derive(Subcommand)]
 enum FileExtraInfoSubcommand {
-    /// Extract and persist EXIF metadata for indexed files in a scan.
+    /// Unavailable: EXIF enrichment is not implemented in this build.
     Exif(BuildFileExtraInfoArgs),
 }
 
@@ -556,8 +593,8 @@ pub fn run_cli(cli: Cli, db_path: PathBuf) -> Result<RunOutcome> {
         }
         Command::Scan(args) => {
             let db = Database::open(&db_path)?;
-            let summary = scanner::scan_location(&db, &args.slug, &args.offset)?;
-            emit(&summary, cli.json, print_scan_summary)?;
+            let prepared = prepare_compatible_scan(&db, args)?;
+            run_prepared_scan_cli(&db, prepared, cli.json)?;
             Ok(RunOutcome::Done)
         }
         Command::Find(args) => {
@@ -585,7 +622,7 @@ pub fn run_cli(cli: Cli, db_path: PathBuf) -> Result<RunOutcome> {
             Ok(RunOutcome::Done)
         }
         Command::FileExtraInfo(command) => {
-            run_file_extra_info(Database::open(&db_path)?, command, cli.json)?;
+            run_file_extra_info(command)?;
             Ok(RunOutcome::Done)
         }
     };
@@ -606,6 +643,75 @@ pub fn run_cli(cli: Cli, db_path: PathBuf) -> Result<RunOutcome> {
         ),
     }
     result
+}
+
+/// Preserves `scan <LOCATION_SLUG>` while supporting the documented bootstrap
+/// form: `scan <SOURCE_PATH> <VOLUME_SLUG>`. The latter validates both roots
+/// before mutating the database and never repoints an existing location.
+fn prepare_compatible_scan(db: &Database, args: ScanArgs) -> Result<scanner::PreparedScan> {
+    let ScanArgs {
+        location_or_source,
+        volume_slug,
+        offset,
+    } = args;
+    match volume_slug {
+        Some(volume_slug) => {
+            let location_slug =
+                resolve_or_create_bootstrap_location(db, &location_or_source, &volume_slug)?;
+            scanner::prepare_scan_with_started_at(db, &location_slug, &offset, Utc::now())
+        }
+        None => scanner::prepare_scan(db, &location_or_source, &offset),
+    }
+}
+
+fn resolve_or_create_bootstrap_location(
+    db: &Database,
+    source_path: &str,
+    volume_slug: &str,
+) -> Result<String> {
+    if source_path.trim().is_empty() {
+        anyhow::bail!("source path must not be blank")
+    }
+    if volume_slug.trim().is_empty() {
+        anyhow::bail!("volume slug must not be blank")
+    }
+
+    let canonical_source = canonical_directory(Path::new(source_path), "source path")?;
+    match db.location_by_slug(volume_slug)? {
+        Some(location) => {
+            let existing_root = canonical_directory(
+                &location.root_path,
+                &format!("existing location {volume_slug} root"),
+            )?;
+            if existing_root != canonical_source {
+                anyhow::bail!(
+                    "existing location {volume_slug} root {} does not match source path {}",
+                    existing_root.display(),
+                    canonical_source.display()
+                )
+            }
+        }
+        None => {
+            db.add_location(LocationInput {
+                kind: LocationType::Unknown,
+                name: volume_slug.to_string(),
+                slug: volume_slug.to_string(),
+                root_path: canonical_source,
+                notes: None,
+            })?;
+        }
+    }
+    Ok(volume_slug.to_string())
+}
+
+fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {label} {}", path.display()))?;
+    if !canonical.is_dir() {
+        anyhow::bail!("{label} {} is not a directory", path.display())
+    }
+    Ok(canonical)
 }
 
 fn command_path(command: &Command) -> &'static str {
@@ -648,6 +754,7 @@ fn command_path(command: &Command) -> &'static str {
             FilesSubcommand::Find(_) => "files.find",
             FilesSubcommand::Search(_) => "files.search",
             FilesSubcommand::Details(_) => "files.details",
+            FilesSubcommand::Occurrences(_) => "files.occurrences",
             FilesSubcommand::Open(_) => "files.open",
             FilesSubcommand::Reveal(_) => "files.reveal",
         },
@@ -668,14 +775,7 @@ fn command_path(command: &Command) -> &'static str {
 fn run_locations(db: Database, command: LocationCommand, json: bool) -> Result<()> {
     match command.command {
         LocationSubcommand::Add(args) => {
-            let name = args.name.unwrap_or_else(|| args.slug.clone());
-            let location = db.add_location(LocationInput {
-                kind: args.kind.unwrap_or(LocationKind::Unknown).into(),
-                name,
-                slug: args.slug,
-                root_path: args.path,
-                notes: args.notes,
-            })?;
+            let location = db.add_location(args.into_location_input())?;
             emit(&location, json, |location| {
                 println!("added {} ({})", location.slug, location.id);
                 Ok(())
@@ -697,19 +797,26 @@ fn run_locations(db: Database, command: LocationCommand, json: bool) -> Result<(
             })
         }
         LocationSubcommand::Liveness(args) => {
-            if let Some(slug) = args.slug {
-                let location = app::location_liveness(&db, &slug)?;
-                emit(&location, json, |location| {
-                    print_location_liveness(std::slice::from_ref(location))
-                })
-            } else {
-                let locations = app::locations_with_liveness(&db)?;
-                emit(&locations, json, |locations| print_location_liveness(locations))
-            }
+            let locations = serde_json::to_value(app::locations_with_liveness(&db)?)?;
+            let result = match args.slug {
+                Some(slug) => locations
+                    .as_array()
+                    .and_then(|items| {
+                        items
+                            .iter()
+                            .find(|item| {
+                                item.get("slug").and_then(Value::as_str) == Some(slug.as_str())
+                            })
+                    })
+                    .cloned()
+                    .with_context(|| format!("location not found: {slug}"))?,
+                None => locations,
+            };
+            emit(&result, json, print_location_liveness)
         }
         LocationSubcommand::OpenFolder(args) => {
-            let path = app::location_child_path(&db, &args.slug, &args.path)?;
-            app::open_in_system(&path)?;
+            let path = location_child_path(&db, &args.slug, &args.path)?;
+            open_in_system(&path)?;
             let result = serde_json::json!({
                 "opened": true,
                 "slug": args.slug,
@@ -790,16 +897,7 @@ fn run_scans(
     server: Option<&str>,
 ) -> Result<()> {
     match command.command {
-        ScanSubcommand::BenchmarkDiscovery(args) => {
-            let matcher = build_scan_exclude_matcher(&args.excludes)?;
-            let stats = scanner::benchmark_discovery(
-                &args.path,
-                matcher.as_ref(),
-                args.threads,
-                args.stop_after_ms.map(Duration::from_millis),
-            )?;
-            emit(&stats, json, print_discovery_stats)
-        }
+        ScanSubcommand::BenchmarkDiscovery(_) => unavailable_command("scans benchmark-discovery"),
         ScanSubcommand::Running => run_server_scan_request(server, "scans.running", None, json),
         ScanSubcommand::Progress(args) => run_server_scan_request(
             server,
@@ -807,22 +905,8 @@ fn run_scans(
             Some(serde_json::json!({ "scan_id": args.scan_id })),
             json,
         ),
-        ScanSubcommand::Pause(args) => {
-            run_server_scan_request(
-                server,
-                "scans.pause",
-                Some(serde_json::json!({ "scan_id": args.scan_id })),
-                json,
-            )
-        }
-        ScanSubcommand::Resume(args) => {
-            run_server_scan_request(
-                server,
-                "scans.resume",
-                Some(serde_json::json!({ "scan_id": args.scan_id })),
-                json,
-            )
-        }
+        ScanSubcommand::Pause(_) => unavailable_command("scans pause"),
+        ScanSubcommand::Resume(_) => unavailable_command("scans resume"),
         ScanSubcommand::Stop(args) => {
             run_server_scan_request(
                 server,
@@ -838,15 +922,7 @@ fn run_scans(
         }
         ScanSubcommand::Start(args) => {
             let db = Database::open(db_path)?;
-            let prepared = scanner::prepare_scan_with_options(
-                &db,
-                &args.slug,
-                &args.offset,
-                scanner::ScanOptions {
-                    hash_mode: args.hash_mode.into(),
-                    scan_exif: args.scan_exif,
-                },
-            )?;
+            let prepared = scanner::prepare_scan(&db, &args.slug, &args.offset)?;
             run_prepared_scan_cli(&db, prepared, json)
         }
         ScanSubcommand::Update(args) => {
@@ -854,16 +930,18 @@ fn run_scans(
             let prepared = scanner::prepare_update_scan(&db, &args.scan_id)?;
             run_prepared_scan_cli(&db, prepared, json)
         }
-        ScanSubcommand::Repair(args) => {
-            let db = Database::open(db_path)?;
-            let prepared = scanner::prepare_repair_scan(&db, &args.scan_id)?;
-            run_prepared_scan_cli(&db, prepared, json)
-        }
+        ScanSubcommand::Repair(_) => unavailable_command("scans repair"),
         ScanSubcommand::Tree(args) => {
             let db = Database::open(db_path)?;
+            if args.depth == 0 {
+                anyhow::bail!(
+                    "--depth must be at least 1; unbounded recursive tree output is not supported"
+                );
+            }
+            let path = normalized_tree_path(&args.path)?;
             let tree = db.scan_tree_page(
                 &args.scan_id,
-                &args.path,
+                &path,
                 Some(args.limit.max(1)),
                 args.offset,
                 args.depth,
@@ -913,17 +991,7 @@ fn run_scans(
                 Ok(())
             })
         }
-        ScanSubcommand::Nickname(args) => {
-            let db = Database::open(db_path)?;
-            let current = db
-                .scan_by_id(&args.scan_id)?
-                .with_context(|| format!("scan not found: {}", args.scan_id))?;
-            let scan = db.update_scan_metadata(&args.scan_id, Some(args.nickname), current.notes)?;
-            emit(&scan, json, |scan| {
-                println!("renamed scan {} to {}", scan.id, scan.nickname);
-                Ok(())
-            })
-        }
+        ScanSubcommand::Nickname(_) => unavailable_command("scans nickname"),
         ScanSubcommand::Excludes(args) => run_scan_excludes(Database::open(db_path)?, args, json),
         ScanSubcommand::Delete(args) => {
             let db = Database::open(db_path)?;
@@ -947,10 +1015,11 @@ fn run_scans(
         }
         ScanSubcommand::DeletePath(args) => {
             let db = Database::open(db_path)?;
-            let deleted = db.delete_scan_path(&args.scan_id, &args.path)?;
+            let path = normalized_scan_path(&args.path)?;
+            let deleted = db.delete_visible_scan_path(&args.scan_id, &path)?;
             let result = serde_json::json!({
                 "scan_id": args.scan_id,
-                "path": args.path,
+                "path": path,
                 "deleted": deleted
             });
             emit(&result, json, |result| {
@@ -981,6 +1050,12 @@ fn run_scans(
     }
 }
 
+fn unavailable_command(command: &str) -> Result<()> {
+    anyhow::bail!(
+        "{command} is unavailable in this build because the recovered backend does not implement it"
+    )
+}
+
 fn run_prepared_scan_cli(
     db: &Database,
     prepared: scanner::PreparedScan,
@@ -988,7 +1063,8 @@ fn run_prepared_scan_cli(
 ) -> Result<()> {
     if json {
         let summary = scanner::run_prepared_scan(db, prepared, None)?;
-        return emit(&summary, true, print_scan_summary);
+        println!("{}", serde_json::to_string_pretty(&scan_summary_json(&summary))?);
+        return Ok(());
     }
 
     let events = EventHub::default();
@@ -997,6 +1073,7 @@ fn run_prepared_scan_cli(
     let progress = scanner::ScanProgressStore::with_events(events);
     progress.start(&prepared);
     drain_scan_cli_events(&mut rx, &mut printer);
+    let scan_id = prepared.scan_id.clone();
     let scan_db = db.clone();
     let scan_progress = progress.clone();
     let handle = thread::spawn(move || {
@@ -1009,9 +1086,25 @@ fn run_prepared_scan_cli(
     }
     drain_scan_cli_events(&mut rx, &mut printer);
 
-    let summary = handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("scan worker panicked"))??;
+    let worker_result = match handle.join() {
+        Ok(result) => result,
+        Err(_) => {
+            let error = anyhow::anyhow!("scan worker panicked");
+            progress.fail(&scan_id, error.to_string());
+            drain_scan_cli_events(&mut rx, &mut printer);
+            printer.finish();
+            return Err(error);
+        }
+    };
+    let summary = match worker_result {
+        Ok(summary) => summary,
+        Err(error) => {
+            progress.fail(&scan_id, error.to_string());
+            drain_scan_cli_events(&mut rx, &mut printer);
+            printer.finish();
+            return Err(error);
+        }
+    };
     if summary.status == "stopped" {
         progress.stopped(&summary.scan_id);
     } else {
@@ -1020,6 +1113,17 @@ fn run_prepared_scan_cli(
     drain_scan_cli_events(&mut rx, &mut printer);
     printer.finish();
     print_scan_summary(&summary)
+}
+
+fn scan_summary_json(summary: &scanner::ScanSummary) -> Value {
+    serde_json::json!({
+        "scan_id": summary.scan_id.as_str(),
+        "status": summary.status.as_str(),
+        "file_count": summary.file_count,
+        "dir_count": summary.dir_count,
+        "error_count": summary.error_count,
+        "total_bytes": summary.total_bytes,
+    })
 }
 
 fn drain_scan_cli_events(
@@ -1303,43 +1407,68 @@ fn run_server_scan_request(
     let server = server.with_context(|| {
         format!("{method} targets a running app process; pass --server http://127.0.0.1:3838")
     })?;
-    let response = post_json_rpc(server, method, params.unwrap_or_else(|| serde_json::json!({})))?;
-    let result = response
-        .get("result")
-        .cloned()
-        .or_else(|| response.get("error").map(|error| serde_json::json!({ "error": error })))
-        .with_context(|| format!("invalid JSON-RPC response from {server}: {response}"))?;
-    if result.get("error").is_some() {
-        anyhow::bail!("{}", result["error"]["message"].as_str().unwrap_or("server error"));
-    }
+    let result = match method {
+        "scans.running" => request_server_json(server, "GET", "/api/scans/running")?,
+        "scans.progress" => {
+            let scan_id = server_scan_id(params.as_ref())?;
+            let path = format!("/api/scans/{}/progress", encode_path_segment(scan_id));
+            request_server_json(server, "GET", &path)?
+        }
+        "scans.stop" => {
+            let scan_id = server_scan_id(params.as_ref())?;
+            let path = format!("/api/scans/{}/stop", encode_path_segment(scan_id));
+            request_server_json(server, "POST", &path)?
+        }
+        _ => anyhow::bail!("{method} is not supported by the running server API"),
+    };
     emit(&result, json, |result| print_server_scan_result(method, result))
 }
 
-fn post_json_rpc(server: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
-    let endpoint = parse_server_endpoint(server)?;
-    let body = serde_json::to_string(&serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params,
-    }))?;
+fn server_scan_id(params: Option<&Value>) -> Result<&str> {
+    params
+        .and_then(|params| params.get("scan_id"))
+        .and_then(Value::as_str)
+        .context("running server scan request is missing scan_id")
+}
+
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::new();
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+/// The live HTTP server exposes these scan controls as REST routes. JSON-RPC
+/// currently lives only on the event WebSocket, so CLI process control uses
+/// the directly reachable HTTP surface instead of posting to a nonexistent
+/// `/api/rpc` endpoint.
+fn request_server_json(
+    server: &str,
+    http_method: &str,
+    route: &str,
+) -> Result<serde_json::Value> {
+    let endpoint = parse_server_endpoint(server, route)?;
     let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
         .with_context(|| format!("connecting to {server}"))?;
     let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{http_method} {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
         endpoint.path,
-        endpoint.host_header,
-        body.len(),
-        body
+        endpoint.host_header
     );
     stream
         .write_all(request.as_bytes())
-        .with_context(|| format!("sending JSON-RPC request to {server}"))?;
+        .with_context(|| format!("sending {http_method} request to {server}"))?;
 
     let mut raw = String::new();
     stream
         .read_to_string(&mut raw)
-        .with_context(|| format!("reading JSON-RPC response from {server}"))?;
+        .with_context(|| format!("reading response from {server}"))?;
     parse_http_json_response(server, &raw)
 }
 
@@ -1350,7 +1479,10 @@ struct ServerEndpoint {
     path: String,
 }
 
-fn parse_server_endpoint(server: &str) -> Result<ServerEndpoint> {
+fn parse_server_endpoint(server: &str, route: &str) -> Result<ServerEndpoint> {
+    if !route.starts_with('/') {
+        anyhow::bail!("server route must start with a slash")
+    }
     let server = server.trim().trim_end_matches('/');
     let without_scheme = server
         .strip_prefix("http://")
@@ -1371,7 +1503,7 @@ fn parse_server_endpoint(server: &str) -> Result<ServerEndpoint> {
     if host.is_empty() {
         anyhow::bail!("server URL is missing a host");
     }
-    let path = format!("{}/api/rpc", base_path.trim_end_matches('/'));
+    let path = format!("{}{}", base_path.trim_end_matches('/'), route);
     let host_header = if authority.contains(':') {
         authority.to_string()
     } else {
@@ -1437,18 +1569,50 @@ fn run_files(db: Database, command: FilesCommand, json: bool) -> Result<()> {
             emit(&files, json, |files| print_files(files))
         }
         FilesSubcommand::Details(args) => {
-            let details = media::file_details(&db, &args.blake3, args.size)?;
-            emit(&details, json, |_| {
-                println!("file details are only available as JSON; rerun with --json");
+            let path = normalized_scan_path(&args.path)?;
+            let page = db.visible_file_occurrences_page(
+                &args.scan_id,
+                &path,
+                &args.blake3,
+                args.size,
+                args.limit.max(1),
+                0,
+            )?;
+            let details = file_details_page(&db, page)?;
+            emit(&details, json, print_file_details)
+        }
+        FilesSubcommand::Occurrences(args) => {
+            let path = normalized_scan_path(&args.path)?;
+            let page = db.visible_file_occurrences_page(
+                &args.scan_id,
+                &path,
+                &args.blake3,
+                args.size,
+                args.limit.max(1),
+                args.offset,
+            )?;
+            emit(&page, json, |page| {
+                for occurrence in &page.occurrences {
+                    println!("{}\t{}\t{}", occurrence.scan_id, occurrence.size, occurrence.path);
+                }
+                if page.has_more {
+                    eprintln!(
+                        "showing {} of {} occurrences; next offset: {}",
+                        page.occurrences.len(),
+                        page.total,
+                        page.next_offset.unwrap_or(page.offset)
+                    );
+                }
                 Ok(())
             })
         }
         FilesSubcommand::Open(args) => {
-            let path = app::location_child_path(&db, &args.location_slug, &args.path)?;
-            app::open_in_system(&path)?;
+            let scan_id = resolve_action_scan_id(&db, &args.scan_id)?;
+            let path = scan_child_path(&db, &scan_id, &args.path)?;
+            open_in_system(&path)?;
             let result = serde_json::json!({
                 "opened": true,
-                "location_slug": args.location_slug,
+                "scan_id": scan_id,
                 "path": args.path,
                 "resolved_path": path,
             });
@@ -1461,11 +1625,12 @@ fn run_files(db: Database, command: FilesCommand, json: bool) -> Result<()> {
             })
         }
         FilesSubcommand::Reveal(args) => {
-            let path = app::location_child_path(&db, &args.location_slug, &args.path)?;
-            app::reveal_in_system(&path)?;
+            let scan_id = resolve_action_scan_id(&db, &args.scan_id)?;
+            let path = scan_child_path(&db, &scan_id, &args.path)?;
+            reveal_in_system(&path)?;
             let result = serde_json::json!({
                 "revealed": true,
-                "location_slug": args.location_slug,
+                "scan_id": scan_id,
                 "path": args.path,
                 "resolved_path": path,
             });
@@ -1477,6 +1642,189 @@ fn run_files(db: Database, command: FilesCommand, json: bool) -> Result<()> {
                 Ok(())
             })
         }
+    }
+}
+
+fn location_child_path(db: &Database, slug: &str, relative_path: &str) -> Result<PathBuf> {
+    let relative_path = action_relative_path(relative_path)?;
+    location_child_path_from_relative(db, slug, &relative_path)
+}
+
+fn location_child_path_from_relative(
+    db: &Database,
+    slug: &str,
+    relative_path: &Path,
+) -> Result<PathBuf> {
+    let location = db
+        .location_by_slug(slug)?
+        .with_context(|| format!("location not found: {slug}"))?;
+    Ok(location.root_path.join(relative_path))
+}
+
+fn scan_child_path(db: &Database, scan_id: &str, relative_path: &str) -> Result<PathBuf> {
+    let scan = db
+        .scan_by_id(scan_id)?
+        .with_context(|| format!("scan not found: {scan_id}"))?;
+    let entry = visible_scan_entry(db, scan_id, relative_path)?;
+    let location = db
+        .location_by_slug(&scan.location_slug)?
+        .with_context(|| format!("location not found: {}", scan.location_slug))?;
+    let scan_root = location
+        .root_path
+        .join(normalized_scan_offset_path(&scan.offset_path)?);
+    Ok(scan_root.join(PathBuf::from(normalized_scan_path(&entry.path)?)))
+}
+
+fn resolve_action_scan_id(db: &Database, scan_id: &str) -> Result<String> {
+    if db.scan_by_id(scan_id)?.is_some() {
+        return Ok(scan_id.to_string());
+    }
+
+    let scan_ids = db.scan_ids_for_location(scan_id)?;
+    match scan_ids.as_slice() {
+        [scan_id] => Ok(scan_id.clone()),
+        [] => anyhow::bail!("scan not found: {scan_id}; files open/reveal require a scan id"),
+        _ => anyhow::bail!(
+            "location {scan_id} has multiple scans; files open/reveal require a scan id"
+        ),
+    }
+}
+
+fn visible_scan_entry(db: &Database, scan_id: &str, path: &str) -> Result<TreeEntry> {
+    db.scan_by_id(scan_id)?
+        .with_context(|| format!("scan not found: {scan_id}"))?;
+    let path = normalized_scan_path(path)?;
+    let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+    let entry = db
+        .scan_tree(scan_id, parent)?
+        .into_iter()
+        .find(|entry| entry.path == path)
+        .with_context(|| format!("path not found or excluded from scan: {path}"))?;
+    ensure_visible_scan_path(db, scan_id, &entry.path, entry.kind == "dir")?;
+    Ok(entry)
+}
+
+fn ensure_visible_scan_path(
+    db: &Database,
+    scan_id: &str,
+    path: &str,
+    is_dir: bool,
+) -> Result<()> {
+    if !db.scan_path_is_visible(scan_id, path, is_dir)? {
+        anyhow::bail!("path is excluded from scan")
+    }
+    Ok(())
+}
+
+fn file_details_page(
+    db: &Database,
+    page: file_census_backend::db::FileOccurrencePage,
+) -> Result<Value> {
+    let details = media::file_details_from_visible_occurrences(db, &page.occurrences)?;
+    let mut response = serde_json::to_value(details)?;
+    let object = response
+        .as_object_mut()
+        .context("serializing file details response")?;
+    object.insert("occurrence_count".to_string(), Value::from(page.total));
+    object.insert("occurrence_limit".to_string(), Value::from(page.limit));
+    object.insert("occurrence_offset".to_string(), Value::from(page.offset));
+    object.insert(
+        "occurrences_truncated".to_string(),
+        Value::from(page.has_more),
+    );
+    object.insert(
+        "occurrence_next_offset".to_string(),
+        serde_json::to_value(page.next_offset)?,
+    );
+    Ok(response)
+}
+
+fn normalized_scan_path(path: &str) -> Result<String> {
+    let path = normalized_relative_scan_path(path, "scan path")?;
+    if path.is_empty() {
+        anyhow::bail!("path must not be the scan root")
+    }
+    Ok(path)
+}
+
+fn normalized_tree_path(path: &str) -> Result<String> {
+    normalized_relative_scan_path(path, "tree path")
+}
+
+fn action_relative_path(path: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(normalized_relative_scan_path(path, "path")?))
+}
+
+fn normalized_relative_scan_path(path: &str, label: &str) -> Result<String> {
+    let mut prefix = path.chars();
+    if prefix.next().is_some_and(is_path_separator) && prefix.next().is_some_and(is_path_separator)
+    {
+        anyhow::bail!("{label} may not contain a UNC or device prefix")
+    }
+
+    let mut normalized = Vec::new();
+    for part in path.split(is_path_separator) {
+        match part {
+            "" | "." => {}
+            ".." => anyhow::bail!("{label} may not contain traversal"),
+            _ if looks_like_windows_drive_prefix(part) => {
+                anyhow::bail!("{label} may not contain a Windows drive prefix")
+            }
+            _ if part.contains('\0') => anyhow::bail!("{label} may not contain NUL"),
+            _ => normalized.push(part),
+        }
+    }
+    Ok(normalized.join("/"))
+}
+
+fn is_path_separator(character: char) -> bool {
+    character == '/' || character == '\\'
+}
+
+fn looks_like_windows_drive_prefix(part: &str) -> bool {
+    let bytes = part.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+fn normalized_scan_offset_path(offset_path: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(normalized_relative_scan_path(
+        offset_path,
+        "scan offset path",
+    )?))
+}
+
+fn open_in_system(path: &Path) -> Result<()> {
+    open::that(path).with_context(|| format!("opening {}", path.display()))
+}
+
+fn reveal_in_system(path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .status()
+            .with_context(|| format!("revealing {}", path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .status()
+            .with_context(|| format!("revealing {}", path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let folder = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        open::that(folder).with_context(|| format!("revealing {}", path.display()))
     }
 }
 
@@ -1516,21 +1864,9 @@ fn run_thumbnails(db: Database, command: ThumbnailsCommand, json: bool) -> Resul
     }
 }
 
-fn run_file_extra_info(db: Database, command: FileExtraInfoCommand, json: bool) -> Result<()> {
+fn run_file_extra_info(command: FileExtraInfoCommand) -> Result<()> {
     match command.command {
-        FileExtraInfoSubcommand::Exif(args) => {
-            let result = media::build_exif(&db, &args.scan_id, &args.path, args.recursive)?;
-            emit(&result, json, |result| {
-                println!(
-                    "processed {} EXIF candidates, enriched {}, skipped {}, errors {}",
-                    result.processed,
-                    result.enriched,
-                    result.skipped,
-                    result.errors.len()
-                );
-                Ok(())
-            })
-        }
+        FileExtraInfoSubcommand::Exif(_) => unavailable_command("file-extra-info exif"),
     }
 }
 
@@ -1651,8 +1987,8 @@ fn print_scans(scans: &[file_census_backend::db::Scan]) -> Result<()> {
         println!(
             "{}\t{}\t{}\t{}\t{} files\t{}",
             scan.id,
-            scan.nickname,
             scan.location_slug,
+            scan.offset_path,
             scan.status,
             scan.file_count,
             scan.started_at
@@ -1674,21 +2010,6 @@ fn print_scan_summary(summary: &scanner::ScanSummary) -> Result<()> {
     Ok(())
 }
 
-fn print_discovery_stats(stats: &scanner::DiscoveryStats) -> Result<()> {
-    println!(
-        "discovered {} entries: {} files, {} dirs, {} errors, {} bytes in {} ms using {} threads ({:.1} entries/s)",
-        stats.entries,
-        stats.files,
-        stats.dirs,
-        stats.errors,
-        stats.bytes,
-        stats.elapsed_ms,
-        stats.threads,
-        stats.entries_per_second
-    );
-    Ok(())
-}
-
 fn print_files(files: &[file_census_backend::db::FileRow]) -> Result<()> {
     for file in files {
         println!(
@@ -1699,22 +2020,73 @@ fn print_files(files: &[file_census_backend::db::FileRow]) -> Result<()> {
     Ok(())
 }
 
-fn print_location_liveness(locations: &[app::LocationView]) -> Result<()> {
-    for location in locations {
+fn print_file_details(details: &Value) -> Result<()> {
+    let occurrences = details
+        .get("occurrences")
+        .and_then(Value::as_array)
+        .context("file details response is missing occurrences")?;
+    for occurrence in occurrences {
         println!(
             "{}\t{}\t{}",
-            location.location.slug,
-            if location.connected {
-                "connected"
-            } else {
-                "disconnected"
-            },
-            location
-                .liveness_error
-                .as_deref()
-                .unwrap_or_else(|| location.location.root_path.to_str().unwrap_or(""))
+            occurrence["scan_id"].as_str().unwrap_or(""),
+            occurrence["size"].as_u64().unwrap_or(0),
+            occurrence["path"].as_str().unwrap_or("")
         );
     }
+    if details
+        .get("occurrences_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "showing {} of {} occurrences; next offset: {}",
+            occurrences.len(),
+            details
+                .get("occurrence_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            details
+                .get("occurrence_next_offset")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        );
+    }
+    Ok(())
+}
+
+fn print_location_liveness(value: &Value) -> Result<()> {
+    match value {
+        Value::Array(locations) => {
+            for location in locations {
+                print_location_liveness_entry(location)?;
+            }
+        }
+        Value::Object(_) => print_location_liveness_entry(value)?,
+        _ => anyhow::bail!("invalid location liveness response"),
+    }
+    Ok(())
+}
+
+fn print_location_liveness_entry(location: &Value) -> Result<()> {
+    let slug = location
+        .get("slug")
+        .and_then(Value::as_str)
+        .context("location liveness response is missing slug")?;
+    let connected = location
+        .get("connected")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let detail = location
+        .get("liveness_error")
+        .and_then(Value::as_str)
+        .or_else(|| location.get("root_path").and_then(Value::as_str))
+        .unwrap_or("");
+    println!(
+        "{}\t{}\t{}",
+        slug,
+        if connected { "connected" } else { "disconnected" },
+        detail
+    );
     Ok(())
 }
 
@@ -1749,16 +2121,10 @@ fn print_server_scan_result(method: &str, result: &serde_json::Value) -> Result<
                 );
             }
         }
-        method if method.starts_with("scans.") => {
-            let action = method.trim_start_matches("scans.");
-            let key = format!("{action}_requested");
-            println!(
-                "{} {}: {}",
-                action,
-                result["scan_id"].as_str().unwrap_or(""),
-                result.get(&key).and_then(|value| value.as_bool()).unwrap_or(false)
-            );
-        }
+        "scans.stop" => println!(
+            "stop requested: {}",
+            result["stop_requested"].as_bool().unwrap_or(false)
+        ),
         _ => println!("{result}"),
     }
     Ok(())
@@ -1775,4 +2141,59 @@ fn print_duplicate_groups(groups: &[file_census_backend::db::DuplicateGroup]) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn locations_add_defaults_kind_to_unknown_and_name_to_slug() {
+        let cli = Cli::try_parse_from([
+            "file-census",
+            "locations",
+            "add",
+            "--slug",
+            "camera-roll",
+            "--path",
+            "/tmp/camera-roll",
+        ])
+        .unwrap();
+        let Some(Command::Locations(LocationCommand {
+            command: LocationSubcommand::Add(args),
+        })) = cli.command
+        else {
+            panic!("expected locations add command");
+        };
+
+        let input = args.into_location_input();
+        assert_eq!(input.kind, LocationType::Unknown);
+        assert_eq!(input.name, "camera-roll");
+        assert_eq!(input.slug, "camera-roll");
+    }
+
+    #[test]
+    fn locations_add_accepts_explicit_unknown_kind() {
+        let cli = Cli::try_parse_from([
+            "file-census",
+            "locations",
+            "add",
+            "unknown",
+            "--slug",
+            "camera-roll",
+            "--path",
+            "/tmp/camera-roll",
+        ])
+        .unwrap();
+        let Some(Command::Locations(LocationCommand {
+            command: LocationSubcommand::Add(args),
+        })) = cli.command
+        else {
+            panic!("expected locations add command");
+        };
+
+        assert_eq!(args.into_location_input().kind, LocationType::Unknown);
+    }
 }

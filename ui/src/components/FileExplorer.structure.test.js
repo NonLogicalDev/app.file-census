@@ -6,35 +6,33 @@ import { fileURLToPath } from 'node:url';
 
 const componentsDir = dirname(fileURLToPath(import.meta.url));
 const fileExplorerSource = readFileSync(join(componentsDir, 'FileExplorer.jsx'), 'utf8');
-const previewSource = readFileSync(join(dirname(componentsDir), 'preview.jsx'), 'utf8');
+const directoryTreeSource = readFileSync(join(componentsDir, 'DirectoryTree.jsx'), 'utf8');
 
-test('delete check explorer shows include and exclude set summary controls', () => {
-  assert.match(fileExplorerSource, /Delete Check set/);
-  assert.match(fileExplorerSource, /Included/);
-  assert.match(fileExplorerSource, /Excluded/);
-  assert.match(fileExplorerSource, /Clear includes/);
-  assert.match(fileExplorerSource, /Clear excludes/);
-  assert.match(fileExplorerSource, /hasDeleteCheckPathSet/);
+test('delete check remains an explicit scan workflow rather than a folder mutation affordance', () => {
+  assert.match(fileExplorerSource, /Delete Check/);
+  assert.match(fileExplorerSource, /Check current folder/);
+  assert.match(fileExplorerSource, /Safe to delete/);
+  assert.match(fileExplorerSource, /Unsafe to delete/);
   assert.doesNotMatch(fileExplorerSource, /Include folder/);
   assert.doesNotMatch(fileExplorerSource, /Exclude folder/);
 });
 
-test('file explorer exposes an EXIF enrichment action beside file tools', () => {
-  assert.match(fileExplorerSource, /onRequestScanExif/);
-  assert.match(fileExplorerSource, /onRequestScanExifForEntry/);
-  assert.match(fileExplorerSource, /Scan EXIF/);
-  assert.match(fileExplorerSource, /canScanExif/);
+test('file explorer does not advertise unavailable EXIF enrichment controls', () => {
+  assert.doesNotMatch(fileExplorerSource, /onRequestScanExif/);
+  assert.doesNotMatch(fileExplorerSource, /onRequestScanExifForEntry/);
+  assert.doesNotMatch(fileExplorerSource, /Scan EXIF/);
 });
 
-test('file explorer exposes list and file tree views for scan listings', () => {
+test('file explorer uses a separate directory-only tree beside the file workspace', () => {
   assert.match(fileExplorerSource, /aria-label="Scan views"/);
-  assert.doesNotMatch(fileExplorerSource, /aria-label="File listing views"/);
-  assert.doesNotMatch(fileExplorerSource, /const \[fileView, setFileView\]/);
   assert.match(fileExplorerSource, /Files\s*<\/SegmentedTab>/);
   assert.match(fileExplorerSource, /File tree\s*<\/SegmentedTab>/);
   assert.match(fileExplorerSource, /Delete Check\s*<\/SegmentedTab>/);
   assert.match(fileExplorerSource, /const showingFileTree = scanSubview === 'tree'/);
-  assert.match(fileExplorerSource, /hierarchical=\{showingFileTree\}/);
-  assert.match(previewSource, /path: '\/file-explorer\/file-tree-tab'/);
-  assert.match(previewSource, /scanSubview="tree"/);
+  assert.match(fileExplorerSource, /<DirectoryTree/);
+  assert.match(fileExplorerSource, /onToggle=\{onToggleDirectoryTree\}/);
+  assert.match(fileExplorerSource, /onLoadMore=\{onLoadMoreDirectoryTree\}/);
+  assert.doesNotMatch(fileExplorerSource, /hierarchical=\{showingFileTree\}/);
+  assert.match(directoryTreeSource, /aria-label="Directory navigation"/);
+  assert.match(directoryTreeSource, /page\?\.entries \|\| \[\]/);
 });

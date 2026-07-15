@@ -1,5 +1,15 @@
 import { cn } from './cn.js';
 
+export const SIDEBAR_MIN_WIDTH = 232;
+export const SIDEBAR_DEFAULT_WIDTH = 292;
+export const SIDEBAR_MAX_WIDTH = 440;
+
+export function clampSidebarWidth(value) {
+  const width = Number.parseFloat(String(value ?? ''));
+  if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
+}
+
 export const metricsClassName = 'mb-3 flex flex-wrap gap-2';
 
 export const metricItemClassName = 'flex min-w-0 items-baseline gap-[7px] border-transparent bg-transparent p-[0_8px_0_0] shadow-none';
@@ -7,6 +17,34 @@ export const metricItemClassName = 'flex min-w-0 items-baseline gap-[7px] border
 export const metricValueClassName = 'block truncate text-[0.92rem] font-bold';
 
 export const metricLabelClassName = 'text-muted';
+
+export const notificationLayerClassName = cn(
+  'pointer-events-none fixed right-5 top-5 z-[90] grid w-[min(380px,calc(100vw-32px))] gap-2.5',
+  'max-[720px]:left-4 max-[720px]:right-4 max-[720px]:top-4 max-[720px]:w-auto'
+);
+
+const notificationToastVariantClasses = {
+  info: 'border-accent/25 border-l-accent bg-surface text-text',
+  success: 'border-accent/25 border-l-accent bg-accent-soft text-accent',
+  warning: 'border-warning/35 border-l-warning bg-warning-soft text-warning',
+  error: 'border-danger/30 border-l-danger bg-danger-soft text-danger'
+};
+
+export function notificationToastClassName({ variant = 'info', className } = {}) {
+  return cn(
+    'pointer-events-auto grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2.5 rounded-ui border border-l-2 px-3 py-2.5 shadow-none',
+    notificationToastVariantClasses[variant] ?? notificationToastVariantClasses.info,
+    className
+  );
+}
+
+export const notificationTextClassName = 'min-w-0 text-sm font-medium leading-5';
+
+export const notificationCloseClassName = cn(
+  'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-ui border border-transparent bg-transparent p-0 text-current opacity-70 shadow-none',
+  'hover:!border-current/20 hover:!bg-surface-muted hover:!text-current hover:!opacity-100 hover:!shadow-none',
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-line'
+);
 
 export const shellMessageClassName = cn(
   'mb-3.5 rounded-panel border border-accent/25 border-l-[3px] border-l-accent bg-accent-soft px-3 py-2.5'
@@ -61,7 +99,7 @@ export function appShellClassName({ sidebarHidden = false, compactSidebar = fals
     'grid min-h-screen bg-bg',
     sidebarHidden || compactSidebar
       ? 'grid-cols-[var(--sidebar-peek-width)_minmax(0,1fr)]'
-      : 'grid-cols-[292px_minmax(0,1fr)]',
+      : 'grid-cols-[var(--sidebar-width)_minmax(0,1fr)]',
     className
   );
 }
@@ -73,14 +111,26 @@ export function appSidebarClassName({ sidebarHidden = false, sidebarPeeking = fa
     'top-0 z-40 flex min-w-0 flex-col overflow-hidden border-r border-[var(--sidebar-border)] bg-[var(--sidebar-bg)]',
     'px-2.5 py-[13px] text-[color:var(--sidebar-text)] transition-[box-shadow,transform] duration-150 ease-out',
     'after:pointer-events-none after:absolute after:bottom-0 after:right-0 after:top-0 after:w-[var(--sidebar-peek-width)]',
-    'after:border-r after:border-[var(--sidebar-border)] after:bg-[linear-gradient(90deg,transparent,rgb(255_255_255_/_0.05))] after:content-[\'\']',
+    'after:border-r after:border-[var(--sidebar-border)] after:bg-[var(--sidebar-bg)] after:content-[\'\']',
     overlayMode
       ? cn(
         'fixed left-0 shadow-lg hover:translate-x-0 focus-within:translate-x-0 hover:after:opacity-0 focus-within:after:opacity-0',
-        compactSidebar ? 'h-[100dvh] w-[min(292px,calc(100vw-44px))]' : 'h-screen w-[292px]',
+        compactSidebar ? 'h-[100dvh] w-[min(var(--sidebar-width),calc(100vw-44px))]' : 'h-screen w-[var(--sidebar-width)]',
         sidebarPeeking ? 'translate-x-0 after:opacity-0' : 'translate-x-[calc(-100%+var(--sidebar-peek-width))] after:opacity-100'
       )
-      : 'sticky h-screen w-[292px] after:opacity-0',
+      : 'sticky h-screen w-[var(--sidebar-width)] after:opacity-0',
+    className
+  );
+}
+
+export function sidebarResizeHandleClassName({ disabled = false, resizing = false, className } = {}) {
+  return cn(
+    'absolute bottom-0 right-[-4px] top-0 z-[3] hidden w-2 cursor-col-resize touch-none',
+    'after:absolute after:bottom-3 after:left-1/2 after:top-3 after:w-px after:-translate-x-1/2 after:rounded-full',
+    'after:bg-transparent after:transition-colors after:duration-150 hover:after:bg-accent-line focus-visible:after:bg-accent-line',
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-line focus-visible:ring-offset-0',
+    !disabled && 'min-[961px]:block',
+    resizing && 'after:bg-accent-line',
     className
   );
 }
@@ -182,9 +232,10 @@ export const sidebarScanListClassName = 'ml-[27px] grid gap-0.5 border-l border-
 export function sidebarScanClassName({ selected = false, active = false, className } = {}) {
   return cn(
     'grid w-full min-w-0 grid-cols-[34px_minmax(0,1fr)] items-center gap-[7px] rounded-[7px] border-0 bg-transparent px-2 py-[7px] text-left',
-    'text-[color:var(--sidebar-text)] shadow-none hover:!border-transparent hover:!bg-[var(--sidebar-surface-hover)] hover:!text-[color:var(--sidebar-text)] hover:!shadow-none',
-    selected && 'bg-[var(--sidebar-active)] hover:!bg-[var(--sidebar-active)]',
-    active && 'data-[active=true]:bg-transparent',
+    'text-[color:var(--sidebar-text)] shadow-none',
+    !selected && 'hover:!border-transparent hover:!bg-[var(--sidebar-surface-hover)] hover:!text-[color:var(--sidebar-text)] hover:!shadow-none',
+    selected && '!bg-[var(--sidebar-active)]',
+    active && 'shadow-[inset_3px_0_0_var(--accent-line)]',
     className
   );
 }
@@ -219,6 +270,18 @@ export const sidebarSpacerClassName = 'min-h-3 flex-1';
 export const sidebarFooterClassName = 'grid gap-2 border-t border-[var(--sidebar-border)] pt-2.5 max-[960px]:grid-cols-1';
 
 export const sidebarConnectionPillClassName = '!inline-flex !min-h-0 !items-center !gap-[7px] !rounded-none !border-0 !bg-transparent !p-0 !text-[0.84rem] !font-[650] !leading-normal !text-[color:var(--sidebar-muted)]';
+
+export function sidebarOptionsButtonClassName({ active = false, className } = {}) {
+  return cn(
+    'inline-flex min-h-9 w-full cursor-pointer items-center justify-start gap-2.5',
+    'rounded-ui border border-transparent bg-transparent px-2.5 py-1.5',
+    'text-sm font-[560] text-[color:var(--sidebar-text)] shadow-none transition-[background-color] duration-150 ease-out',
+    'hover:bg-[var(--sidebar-surface-hover)] hover:text-[color:var(--sidebar-text)] hover:shadow-none',
+    'disabled:cursor-not-allowed disabled:opacity-60',
+    active && '!bg-[var(--sidebar-active)] hover:!bg-[var(--sidebar-active)]',
+    className
+  );
+}
 
 export const appMainClassName = cn(
   'col-start-2 mx-auto min-w-0 w-[min(100%,1560px)] px-[22px] pb-14 pt-[18px]',

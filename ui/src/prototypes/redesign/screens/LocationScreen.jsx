@@ -27,6 +27,13 @@ import {
   X,
 } from 'lucide-react'
 
+import {
+  buildDirectoryNavigationTree,
+  buildWorkspaceFileTreeRows,
+  directoryPathAncestors,
+  filesInDirectory,
+  normalizeDirectoryPath
+} from '../directoryTree.js'
 import { locations, scanFiles, scans } from '../mockData.js'
 import './location.css'
 
@@ -85,27 +92,97 @@ const valueForSort = (file, key) => {
   return `${file[key] ?? ''}`.toLocaleLowerCase()
 }
 
-function TreeItem({ icon: Icon = Folder, label, count, depth = 0, selected, expanded, onClick, onToggle }) {
+function DirectoryNavigationItem({ node, depth = 0, selectedPath, expandedPaths, onSelect, onToggle }) {
+  const selected = node.path === selectedPath
+  const expanded = expandedPaths.has(node.path)
+  const canExpand = node.children.length > 0
+
   return (
-    <div
-      className={`loc-tree-item${selected ? ' loc-selected' : ''}`}
-      style={{ '--tree-depth': depth }}
-      role="treeitem"
-      aria-selected={selected}
-      aria-expanded={onToggle ? expanded : undefined}
-    >
-      {onToggle ? (
-        <button className="loc-tree-toggle" type="button" onClick={onToggle} aria-label={`${expanded ? 'Collapse' : 'Expand'} ${label}`}>
-          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+    <div role="treeitem" aria-level={depth + 1} aria-selected={selected} aria-expanded={canExpand ? expanded : undefined}>
+      <div className={`loc-tree-item${selected ? ' loc-selected' : ''}`} style={{ '--tree-indent': `${depth * 13}px` }}>
+        {canExpand ? (
+          <button className="loc-tree-toggle" type="button" onClick={() => onToggle(node.path)} aria-label={`${expanded ? 'Collapse' : 'Expand'} ${node.name}`}>
+            {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          </button>
+        ) : (
+          <span className="loc-tree-toggle-spacer" />
+        )}
+        <button className="loc-tree-label" type="button" onClick={() => onSelect(node.path)}>
+          <Folder size={14} strokeWidth={1.7} />
+          <span>{node.name}</span>
+          <span className="loc-tree-count">{node.fileCount.toLocaleString()}</span>
         </button>
-      ) : (
-        <span className="loc-tree-toggle-spacer" />
+      </div>
+      {canExpand && expanded && (
+        <div role="group">
+          {node.children.map((child) => (
+            <DirectoryNavigationItem
+              key={child.id}
+              node={child}
+              depth={depth + 1}
+              selectedPath={selectedPath}
+              expandedPaths={expandedPaths}
+              onSelect={onSelect}
+              onToggle={onToggle}
+            />
+          ))}
+        </div>
       )}
-      <button className="loc-tree-label" type="button" onClick={onClick}>
-        <Icon size={14} strokeWidth={1.7} />
-        <span>{label}</span>
-        {count != null && <span className="loc-tree-count">{count}</span>}
-      </button>
+    </div>
+  )
+}
+
+function WorkspaceFileTree({ rows, selectedFolderPath, selectedFile, onSelectFolder, onToggleFolder, onSelectFile }) {
+  return (
+    <div className="loc-file-tree-view" role="tree" aria-label="Files in current workspace">
+      {rows.map((row) => {
+        if (row.kind === 'file') {
+          const Icon = fileIcon(row.file)
+          const selected = selectedFile?.id === row.file.id
+          return (
+            <button
+              key={`file:${row.file.id}`}
+              type="button"
+              className={`loc-file-tree-row loc-file-tree-file${selected ? ' loc-selected' : ''}`}
+              style={{ '--tree-indent': `${row.depth * 14}px` }}
+              role="treeitem"
+              aria-level={row.depth + 1}
+              aria-selected={selected}
+              onClick={() => onSelectFile(row.file)}
+            >
+              <span className="loc-file-tree-toggle-spacer" aria-hidden="true" />
+              <Icon size={15} />
+              <span className="loc-file-tree-name">{row.file.name}</span>
+              <span className="loc-file-tree-detail">{row.file.sizeLabel}</span>
+            </button>
+          )
+        }
+
+        const { node, depth, expandable, expanded } = row
+        const selected = node.path === selectedFolderPath
+        return (
+          <div
+            className={`loc-file-tree-row loc-file-tree-folder${selected ? ' loc-selected' : ''}`}
+            style={{ '--tree-indent': `${depth * 14}px` }}
+            key={`folder:${node.id}`}
+            role="treeitem"
+            aria-level={depth + 1}
+            aria-selected={selected}
+            aria-expanded={expandable ? expanded : undefined}
+          >
+            {expandable ? (
+              <button className="loc-file-tree-toggle" type="button" onClick={() => onToggleFolder(node.path)} aria-label={`${expanded ? 'Collapse' : 'Expand'} ${node.name}`}>
+                {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              </button>
+            ) : <span className="loc-file-tree-toggle-spacer" aria-hidden="true" />}
+            {node.path ? <Folder size={15} /> : <FolderOpen size={15} />}
+            <button className="loc-file-tree-label" type="button" onClick={() => onSelectFolder(node.path)}>
+              <span className="loc-file-tree-name">{node.name}</span>
+              <span className="loc-file-tree-detail">{node.fileCount.toLocaleString()} files</span>
+            </button>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -129,15 +206,20 @@ export default function LocationScreen({ commandLocationId, commandScanId, onCom
     || scans[0]
     || {}
   const normalizedFiles = useMemo(() => (scanFiles[scan.id] || []).map(normalizeFile), [scan.id])
-  const activeTopFolder = normalizedFiles[0]?.path.split('/').filter(Boolean)[0] || 'Files'
+  const directoryTree = useMemo(() => buildDirectoryNavigationTree(normalizedFiles), [normalizedFiles])
+  const activeFolderPath = useMemo(() => {
+    const firstSegments = normalizeDirectoryPath(normalizedFiles[0]?.path).split('/').filter(Boolean)
+    return firstSegments.length > 1 ? firstSegments[0] : ''
+  }, [normalizedFiles])
   const [mode, setMode] = useState('Files')
   const [draftQuery, setDraftQuery] = useState('')
   const [query, setQuery] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [columnMenuOpen, setColumnMenuOpen] = useState(false)
   const [visibleColumns, setVisibleColumns] = useState(() => new Set(COLUMN_OPTIONS.map(([key]) => key)))
-  const [selectedTree, setSelectedTree] = useState(`folder-${activeTopFolder}`)
-  const [selectedFolder, setSelectedFolder] = useState(activeTopFolder)
+  const [selectedFolderPath, setSelectedFolderPath] = useState(activeFolderPath)
+  const [navigationExpandedPaths, setNavigationExpandedPaths] = useState(() => new Set(directoryPathAncestors(activeFolderPath)))
+  const [workspaceExpandedPaths, setWorkspaceExpandedPaths] = useState(() => new Set(directoryPathAncestors(activeFolderPath)))
   const [selectedFile, setSelectedFile] = useState(normalizedFiles[0] || null)
   const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth >= 1360)
   const inspectorToggleRef = useRef(null)
@@ -156,28 +238,52 @@ export default function LocationScreen({ commandLocationId, commandScanId, onCom
   }, [commandLocationId])
 
   useEffect(() => {
-    setSelectedTree(`folder-${activeTopFolder}`)
-    setSelectedFolder(activeTopFolder)
-    setSelectedFile(normalizedFiles[0] || null)
+    const firstFolderPath = activeFolderPath
+    setSelectedFolderPath(firstFolderPath)
+    setNavigationExpandedPaths(new Set(directoryPathAncestors(firstFolderPath)))
+    setWorkspaceExpandedPaths(new Set(directoryPathAncestors(firstFolderPath)))
+    setSelectedFile(filesInDirectory(normalizedFiles, firstFolderPath)[0] || normalizedFiles[0] || null)
     setStagedDeleteCheckIds(new Set())
-    setPathIndex(1)
-  }, [activeTopFolder, location.id, normalizedFiles])
+    setPathIndex(firstFolderPath ? 1 : 0)
+  }, [activeFolderPath, directoryTree, location.id, normalizedFiles])
 
-  const history = ['Root', `Root/${selectedFolder}`]
+  const history = selectedFolderPath ? ['Root', `Root/${selectedFolderPath}`] : ['Root']
   const currentPath = history[pathIndex]
 
-  const selectFolder = useCallback((name) => {
-    const firstFile = normalizedFiles.find((file) => file.path.split('/').filter(Boolean)[0] === name) || null
-    setSelectedFolder(name)
-    setSelectedTree(`folder-${name}`)
-    setPathIndex(1)
+  const selectFolder = useCallback((path) => {
+    const nextPath = normalizeDirectoryPath(path)
+    const firstFile = filesInDirectory(normalizedFiles, nextPath)[0] || normalizedFiles[0] || null
+    setSelectedFolderPath(nextPath)
+    setPathIndex(nextPath ? 1 : 0)
+    setNavigationExpandedPaths((current) => new Set([...current, ...directoryPathAncestors(nextPath)]))
+    setWorkspaceExpandedPaths((current) => new Set([...current, ...directoryPathAncestors(nextPath)]))
     setSelectedFile(firstFile)
   }, [normalizedFiles])
+
+  const toggleNavigationFolder = useCallback((path) => {
+    const nextPath = normalizeDirectoryPath(path)
+    setNavigationExpandedPaths((current) => {
+      const next = new Set(current)
+      if (next.has(nextPath)) next.delete(nextPath)
+      else next.add(nextPath)
+      return next
+    })
+  }, [])
+
+  const toggleWorkspaceFolder = useCallback((path) => {
+    const nextPath = normalizeDirectoryPath(path)
+    setWorkspaceExpandedPaths((current) => {
+      const next = new Set(current)
+      if (next.has(nextPath)) next.delete(nextPath)
+      else next.add(nextPath)
+      return next
+    })
+  }, [])
 
   const filteredFiles = useMemo(() => {
     const scopedFiles = pathIndex === 0
       ? normalizedFiles
-      : normalizedFiles.filter((file) => file.path.split('/').filter(Boolean)[0] === selectedFolder)
+      : filesInDirectory(normalizedFiles, selectedFolderPath)
     const needle = query.trim().toLocaleLowerCase()
     const queryMatches = needle
       ? scopedFiles.filter((file) => `${file.name} ${file.path} ${file.kind}`.toLocaleLowerCase().includes(needle))
@@ -197,7 +303,13 @@ export default function LocationScreen({ commandLocationId, commandScanId, onCom
       const comparison = typeof a === 'number' ? a - b : a.localeCompare(b)
       return sort.direction === 'asc' ? comparison : -comparison
     })
-  }, [kindFilter, normalizedFiles, pathIndex, query, selectedFolder, sizeFilter, sort])
+  }, [kindFilter, normalizedFiles, pathIndex, query, selectedFolderPath, sizeFilter, sort])
+
+  const workspaceDirectoryTree = useMemo(() => buildDirectoryNavigationTree(filteredFiles), [filteredFiles])
+  const workspaceTreeRows = useMemo(
+    () => buildWorkspaceFileTreeRows(workspaceDirectoryTree, filteredFiles, workspaceExpandedPaths),
+    [filteredFiles, workspaceDirectoryTree, workspaceExpandedPaths]
+  )
 
   const visibleSelectedFile = selectedFile
     ? filteredFiles.find((file) => file.id === selectedFile.id) || null
@@ -251,15 +363,6 @@ export default function LocationScreen({ commandLocationId, commandScanId, onCom
       return next
     })
   }
-
-  const folderRows = useMemo(() => {
-    const folders = new Map()
-    normalizedFiles.forEach((file) => {
-      const folder = file.path.split('/').filter(Boolean)[0] || 'Root files'
-      folders.set(folder, (folders.get(folder) || 0) + 1)
-    })
-    return [...folders].slice(0, 3).map(([name, count]) => ({ name, count }))
-  }, [normalizedFiles])
 
   const onPrototypeCommand = useCallback((event) => {
       const command = event.detail || {}
@@ -430,12 +533,11 @@ export default function LocationScreen({ commandLocationId, commandScanId, onCom
       <nav className="loc-path-strip" aria-label="Current path">
         <button type="button" disabled={pathIndex === 0} onClick={() => {
           setPathIndex(0)
-          setSelectedTree(null)
         }} aria-label="Back">
           <ArrowLeft size={14} />
         </button>
         <button type="button" disabled={pathIndex === history.length - 1} onClick={() => {
-          selectFolder(selectedFolder)
+          selectFolder(selectedFolderPath)
         }} aria-label="Forward">
           <ArrowRight size={14} />
         </button>
@@ -444,9 +546,8 @@ export default function LocationScreen({ commandLocationId, commandScanId, onCom
           <span className="loc-crumb" key={`${part}-${index}`}>
             {index > 0 && <ChevronRight size={12} />}
             <button type="button" onClick={() => {
-              setPathIndex(Math.min(index, history.length - 1))
-              if (index === 0) setSelectedTree(null)
-              else selectFolder(selectedFolder)
+              if (index === 0) setPathIndex(0)
+              else selectFolder(parts.slice(1, index + 1).join('/'))
             }}>{part}</button>
             {index === parts.length - 1 && <span className="loc-path-count">{filteredFiles.length} items</span>}
           </span>
@@ -470,38 +571,29 @@ export default function LocationScreen({ commandLocationId, commandScanId, onCom
             <span>Folders</span>
           </div>
           <div className="loc-tree" role="tree">
-            {folderRows.map((folder) => (
-              <TreeItem
-                key={folder.name}
-                label={folder.name}
-                depth={0}
-                selected={selectedTree === `folder-${folder.name}`}
-                onClick={() => selectFolder(folder.name)}
-              />
-            ))}
+            <DirectoryNavigationItem
+              node={directoryTree}
+              selectedPath={pathIndex === 0 ? '' : selectedFolderPath}
+              expandedPaths={navigationExpandedPaths}
+              onSelect={selectFolder}
+              onToggle={toggleNavigationFolder}
+            />
           </div>
           <div className="loc-tree-footer">
-            <span>{folderRows.length} folders shown</span>
+            <span>{directoryTree.children.length} root folder{directoryTree.children.length === 1 ? '' : 's'} loaded</span>
           </div>
         </aside>
 
         <main className="loc-results-pane">
           {mode === 'File tree' ? (
-            <div className="loc-file-tree-view">
-              <div className="loc-file-tree-heading">
-                <span className="loc-file-tree-toggle-slot" aria-hidden="true" />
-                <FolderOpen size={15} />
-                <span>{currentPath}</span>
-              </div>
-              {folderRows.map((folder) => (
-                <button type="button" key={folder.name} onClick={() => selectFolder(folder.name)}>
-                  <ChevronRight size={13} />
-                  <Folder size={15} />
-                  <span>{folder.name}</span>
-                  <span>{folder.count.toLocaleString()} sampled files</span>
-                </button>
-              ))}
-            </div>
+            <WorkspaceFileTree
+              rows={workspaceTreeRows}
+              selectedFolderPath={pathIndex === 0 ? '' : selectedFolderPath}
+              selectedFile={selectedFile}
+              onSelectFolder={selectFolder}
+              onToggleFolder={toggleWorkspaceFolder}
+              onSelectFile={selectFile}
+            />
           ) : (
             <div className="loc-table-wrap">
               <table className="loc-file-table">

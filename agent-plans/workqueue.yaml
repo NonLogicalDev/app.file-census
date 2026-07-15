@@ -4,7 +4,7 @@ queue:
   subject: file-census production rebuild and acceptance
   coordinator: root
   created_at: 2026-07-15T05:45:00Z
-  updated_at: 2026-07-15T08:45:00Z
+  updated_at: 2026-07-15T11:30:00Z
 tasks:
   - id: rebuild-requirements-ledger
     work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
@@ -60,7 +60,7 @@ tasks:
       - native-bundle-icon-assets
     priority: 96
     created_at: 2026-07-15T08:45:00Z
-    outcome: Read-only audit found an empty ui/dist, no UI dependency lock or node_modules, no flake.lock, no ambient Node/Rust toolchain, and an external untracked Cargo.lock. This work needs explicit approval before network or high-disk writes.
+    outcome: Exact PostCSS and Tailwind source configs are restored. The remaining gate is an empty ui/dist, an incomplete ignored ui/node_modules store with no executable Vite links, no canonical frontend lockfile, no flake.lock, no ambient Node/Rust toolchain, and an external untracked Cargo.lock. This work needs explicit approval before network or high-disk writes.
     resources:
       - user-approval-for-network-and-build-artifacts
 
@@ -75,23 +75,52 @@ tasks:
     claim:
       owner: root
       started_at: 2026-07-15T08:41:00Z
-    outcome: Rebuilding the missing database exclusion contract intentionally; initial persistence, ingestion, and RPC/event foundation is integrated, while shared visibility/action predicates and validation remain.
+    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, and a legacy-safe Unknown location-kind migration. Browser/native details use visible media sources and WebSocket lag is recoverable. Remaining work is compile proof plus real scanner controls/dashboard/shell contracts, not an implied runtime success.
 
   - id: production-shell-and-routing
     work: Build the real dark application shell, routing, persisted collapsible sidebar, and main-top-bar Cmd-K foundation.
-    status: open
+    status: claimed
     prerequisites:
       - backend-domain-foundation
     priority: 98
     created_at: 2026-07-15T05:45:00Z
+    claim:
+      owner: root
+      started_at: 2026-07-15T11:27:00Z
+    outcome: Static implementation now has real route/scan Cmd-K callbacks plus a persistent, collapsible, keyboard- and pointer-resizable sidebar. Browser/build proof remains a separate gate.
+
+  - id: ui-runtime-contract-closure
+    work: "Restore truthful production shell contracts: main-top-bar Cmd-K, dashboard live activity, Tasks stop wiring, real scan action availability, and one coherent cancellation policy across browser/native/backend."
+    status: claimed
+    prerequisites:
+      - backend-domain-foundation
+    priority: 98
+    created_at: 2026-07-15T10:27:00Z
+    claim:
+      owner: root
+      started_at: 2026-07-15T10:27:00Z
+    outcome: Production Cmd-K now dispatches real route/location/scan/current-view callbacks, Tasks receives real Stop wiring, unsupported controls are truthful rather than fake RPCs, Dashboard receives activity props, and local-only cancellation is explicit. Static source closure is complete; runtime proof remains pending.
+
+  - id: ui-source-horizon-closure
+    work: "Close mixed-horizon UI source defects without weakening tests: real shared exports, File tree/hierarchy behavior, matching shell/grid classes, and redesign preview route registration."
+    status: succeeded
+    prerequisites:
+      - structured-source-recovery
+    priority: 100
+    created_at: 2026-07-15T10:45:00Z
+    outcome: Static export P0s, exact prototype/routing recovery, directory-only File tree behavior, shell/grid class coverage, preview build entry, and stale search-filter test closure are repaired. Runtime/build validation belongs to reproducible-build-inputs and browser/native acceptance tasks.
 
   - id: scan-workspace-and-directory-navigation
     work: Build the scan-relative Files/File tree workspace, directory-only side navigation, file table, inspector, and safe actions.
-    status: open
+    status: claimed
     prerequisites:
       - production-shell-and-routing
     priority: 98
     created_at: 2026-07-15T05:45:00Z
+    claim:
+      owner: root
+      started_at: 2026-07-15T11:05:00Z
+    outcome: Production File tree is now real paged directory-only navigation beside the file workspace. Remaining work is compile/runtime/browser proof and any audit findings, not a completion claim.
 
   - id: scan-exclude-filter-contract
     work: Implement persistent non-destructive per-scan excludes across every scan-scoped query/action with database/source integrity tests.
@@ -111,19 +140,36 @@ tasks:
 
   - id: cli-scan-bootstrap
     work: Implement and prove compatible CLI scan bootstrap with canonical source validation, atomic location/scan creation, UTC date-based IDs, collisions, and legacy behavior.
-    status: open
+    status: claimed
     prerequisites:
       - backend-domain-foundation
     priority: 88
     created_at: 2026-07-15T05:45:00Z
+    claim:
+      owner: root
+      started_at: 2026-07-15T11:18:00Z
+    outcome: Static implementation now canonicalizes the source, creates only a compatible Unknown location, uses the real scanner lifecycle, reserves UTC date IDs atomically with deterministic collisions, and preserves legacy CLI forms. Toolchain-backed integration proof remains pending.
 
   - id: scanner-progress-tui
     work: Implement and prove opt-in Ratatui progress with bounded active-operation telemetry, truthful queue/pool bars, duration ordering, terminal restoration, and non-TTY fallback.
-    status: open
+    status: claimed
     prerequisites:
       - backend-domain-foundation
     priority: 86
     created_at: 2026-07-15T05:45:00Z
+    claim:
+      owner: root
+      started_at: 2026-07-15T11:27:00Z
+    outcome: Bounded authoritative active-operation telemetry is now present in source with stable oldest-first projection and cleanup coverage. The Ratatui/Crossterm dependency, renderer, and terminal acceptance remain intentionally unstarted until approved reproducible inputs are available.
+
+  - id: scanner-containment-atomicity
+    work: "Eliminate or explicitly constrain the remaining scanner P2s: post-discovery filesystem replacement races and update-scan setup orphan records. Use a durable, reviewed design; do not claim final quality while either remains unresolved."
+    status: open
+    prerequisites:
+      - backend-domain-foundation
+    priority: 85
+    created_at: 2026-07-15T09:27:00Z
+    outcome: Static root containment is complete. Portable no-follow descriptor traversal needs an explicit design decision, while update-scan setup should use a short atomic database seed transaction.
 
   - id: browser-native-accessibility-matrix
     work: Prove browser-server, native/Tauri, keyboard/accessibility, destructive-fixture, and transport behavior on the rebuilt product.
@@ -133,7 +179,9 @@ tasks:
       - duplicates-tasks-search-options
       - native-bundle-icon-assets
       - reproducible-build-inputs
+      - scanner-containment-atomicity
     priority: 80
+    outcome: In-app browser connectivity is available, but the current enterprise policy blocks the local preview origin. Do not substitute Chrome; browser evidence remains pending permitted local access and reproducible build inputs.
     created_at: 2026-07-15T05:45:00Z
 
   - id: visual-qa-and-final-approval

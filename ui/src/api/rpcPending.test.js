@@ -62,6 +62,7 @@ test('cancels one pending rpc request', async () => {
   });
 
   assert.equal(cancelPendingRpc(pending, 9, new Error('cancelled')), true);
+  assert.equal(settlePendingRpc(pending, { id: 9, result: { stale: true } }), false);
 
   await assert.rejects(promise, /cancelled/);
   assert.equal(pending.has(9), false);

@@ -25,6 +25,14 @@ export const exifGridClassName = cn(
   '[&_strong]:mt-[3px] [&_strong]:block [&_strong]:break-words'
 );
 
+export const metadataListClassName = cn(
+  'overflow-hidden rounded-ui border border-border bg-surface divide-y divide-border'
+);
+
+export const metadataRowClassName = cn(
+  'grid grid-cols-[9rem_minmax(0,1fr)] items-start gap-3 px-3 py-2 max-[960px]:grid-cols-1'
+);
+
 export function metadataGridClassName({ compact = false, className } = {}) {
   return cn(
     'grid gap-2 max-[960px]:grid-cols-1',

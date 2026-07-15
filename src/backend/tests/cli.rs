@@ -22,6 +22,17 @@ fn run_json(args: &[&str]) -> Value {
     assert_success(output)
 }
 
+fn run_failure(args: &[&str]) -> Output {
+    let output = file_census().args(args).output().unwrap();
+    assert!(
+        !output.status.success(),
+        "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
 fn assert_success(output: Output) -> Value {
     assert!(
         output.status.success(),
@@ -40,6 +51,25 @@ fn assert_success(output: Output) -> Value {
 
 fn db_path(root: &Path) -> PathBuf {
     root.join("state.sqlite")
+}
+
+fn assert_date_derived_scan_id(scan_id: &str, slug: &str) {
+    let suffix = format!("--{slug}");
+    let timestamp = scan_id
+        .strip_suffix(&suffix)
+        .expect("scan ID has the expected volume slug suffix");
+    assert_eq!(timestamp.chars().count(), 16);
+    assert!(
+        timestamp
+            .chars()
+            .enumerate()
+            .all(|(index, character)| match index {
+                8 => character == 'T',
+                15 => character == 'Z',
+                _ => character.is_ascii_digit(),
+            }),
+        "unexpected date-derived scan ID: {scan_id}"
+    );
 }
 
 #[test]
@@ -143,6 +173,124 @@ fn scans_start_runs_foreground_and_list_reports_completed_scan_as_json() {
     assert_eq!(scans.len(), 1);
     assert_eq!(scans[0]["status"], "complete");
     assert_eq!(scans[0]["file_count"], 2);
+}
+
+#[test]
+fn scan_shorthand_bootstraps_unknown_location_and_preserves_legacy_form() {
+    let root = temp_root("scan-shorthand");
+    let source = root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("alpha.txt"), "source shorthand\n").unwrap();
+    let db = db_path(&root);
+    let db_arg = db.to_string_lossy().to_string();
+    let source_arg = source.to_string_lossy().to_string();
+    let canonical_source = source.canonicalize().unwrap().to_string_lossy().to_string();
+
+    let shorthand = run_json(&[
+        "--db",
+        &db_arg,
+        "--json",
+        "scan",
+        &source_arg,
+        "archive-volume",
+    ]);
+    assert_eq!(shorthand["status"], "complete");
+    assert_eq!(shorthand["file_count"], 1);
+    assert_date_derived_scan_id(
+        shorthand["scan_id"].as_str().expect("scan summary ID"),
+        "archive-volume",
+    );
+
+    let locations = run_json(&["--db", &db_arg, "--json", "locations", "list"]);
+    let locations = locations.as_array().expect("locations list is an array");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0]["slug"], "archive-volume");
+    assert_eq!(locations[0]["name"], "archive-volume");
+    assert_eq!(locations[0]["kind"], "unknown");
+    assert_eq!(locations[0]["root_path"], canonical_source);
+
+    let repeated_shorthand = run_json(&[
+        "--db",
+        &db_arg,
+        "--json",
+        "scan",
+        &source_arg,
+        "archive-volume",
+    ]);
+    assert_eq!(repeated_shorthand["status"], "complete");
+
+    let legacy = run_json(&["--db", &db_arg, "--json", "scan", "archive-volume"]);
+    assert_eq!(legacy["status"], "complete");
+
+    let scans = run_json(&["--db", &db_arg, "--json", "scans", "list"]);
+    let scans = scans.as_array().expect("scans list is an array");
+    assert_eq!(scans.len(), 3);
+    assert!(
+        scans
+            .iter()
+            .all(|scan| scan["location_slug"] == "archive-volume")
+    );
+}
+
+#[test]
+fn scan_shorthand_rejects_mismatched_existing_location_without_mutation() {
+    let root = temp_root("scan-shorthand-mismatch");
+    let source_a = root.join("source-a");
+    let source_b = root.join("source-b");
+    fs::create_dir_all(&source_a).unwrap();
+    fs::create_dir_all(&source_b).unwrap();
+    let db = db_path(&root);
+    let db_arg = db.to_string_lossy().to_string();
+    let source_a_arg = source_a.to_string_lossy().to_string();
+    let source_b_arg = source_b.to_string_lossy().to_string();
+
+    run_json(&[
+        "--db",
+        &db_arg,
+        "--json",
+        "locations",
+        "add",
+        "local",
+        "--name",
+        "Existing volume",
+        "--slug",
+        "archive-volume",
+        "--path",
+        &source_a_arg,
+    ]);
+
+    let failure = run_failure(&[
+        "--db",
+        &db_arg,
+        "--json",
+        "scan",
+        &source_b_arg,
+        "archive-volume",
+    ]);
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("does not match source path"));
+
+    let blank_slug = run_failure(&[
+        "--db",
+        &db_arg,
+        "--json",
+        "scan",
+        &source_b_arg,
+        " ",
+    ]);
+    assert!(String::from_utf8_lossy(&blank_slug.stderr).contains("volume slug must not be blank"));
+
+    let locations = run_json(&["--db", &db_arg, "--json", "locations", "list"]);
+    let locations = locations.as_array().expect("locations list is an array");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0]["name"], "Existing volume");
+    assert_eq!(locations[0]["kind"], "local");
+    assert_eq!(
+        locations[0]["root_path"],
+        source_a.canonicalize().unwrap().to_string_lossy().to_string()
+    );
+
+    let scans = run_json(&["--db", &db_arg, "--json", "scans", "list"]);
+    assert!(scans.as_array().unwrap().is_empty());
 }
 
 #[test]

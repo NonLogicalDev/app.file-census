@@ -34,6 +34,10 @@ export const progressPoolTitleClassName = 'min-w-0 truncate text-[0.78rem] font-
 
 export const progressPoolCountClassName = 'shrink-0 whitespace-nowrap tabular-nums font-[650]';
 
+export const progressMetaClassName = 'flex min-h-[1.2rem] min-w-0 items-center justify-between gap-2 text-xs text-muted';
+
+export const progressStatusClassName = 'min-w-0 truncate text-xs text-muted';
+
 export function progressBarClassName({ compact = false, className } = {}) {
   return cn(
     'flex overflow-hidden rounded-[2px] border',

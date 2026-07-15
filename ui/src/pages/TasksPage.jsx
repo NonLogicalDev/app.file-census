@@ -16,11 +16,10 @@ export default function TasksPage({
   backgroundTasks = [],
   eventLog = [],
   busy = false,
-  onStopScan,
-  onPauseScan,
-  onResumeScan
+  onStopScan
 }) {
   const activeCount = runningProgress.length + backgroundTasks.length;
+  const canStopScan = typeof onStopScan === 'function';
 
   return (
     <section className={pageGridClassName}>
@@ -78,14 +77,19 @@ export default function TasksPage({
                   </span>
                 </div>
                 <ScanProgressPools progress={progress} />
-                <div className="flex flex-wrap gap-2">
-                  {progress.status === 'paused' ? (
-                    <Button variant="secondary" onClick={() => onResumeScan?.(progress.scan_id)} disabled={busy} icon={<Icon name="resume" />}>Resume</Button>
-                  ) : (
-                    <Button variant="secondary" onClick={() => onPauseScan?.(progress.scan_id)} disabled={busy || progress.status === 'stopping'} icon={<Icon name="pause" />}>Pause</Button>
-                  )}
-                  <Button variant="warning" onClick={() => onStopScan?.(progress.scan_id)} disabled={busy || progress.status === 'stopping'} icon={<Icon name="stop" />}>Stop</Button>
-                </div>
+                {canStopScan && progress.status !== 'stopping' && (
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="warning" onClick={() => onStopScan(progress.scan_id)} disabled={busy} icon={<Icon name="stop" />}>Stop</Button>
+                  </div>
+                )}
+                {(progress.status === 'paused' || progress.status === 'repairing') && (
+                  <p className="m-0 text-xs text-muted">
+                    {progress.status === 'paused'
+                      ? 'Pause and resume are unavailable in this build.'
+                      : 'Repair is unavailable in this build.'}{' '}
+                    Use a new scan to refresh this location.
+                  </p>
+                )}
                 {progress.current_path && (
                   <code className="block min-w-0 truncate text-sm text-muted" title={progress.current_path}>
                     {progress.current_path}

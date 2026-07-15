@@ -17,10 +17,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower_http::trace::TraceLayer;
 
-use crate::db::{Database, Location, LocationInput, LocationType, LocationUpdate};
-use crate::events::EventHub;
+use crate::db::{
+    Database, Location, LocationInput, LocationType, LocationUpdate, TreeEntry,
+};
+use crate::events::{recv_app_event_tolerating_lag, EventHub};
 use crate::media;
 use crate::scanner::{self, ScanProgressStore};
+use crate::search::FileSearchQuery;
 
 #[derive(RustEmbed)]
 #[folder = "../../ui/dist/"]
@@ -89,8 +92,8 @@ async fn events_socket(socket: WebSocket, state: AppState) {
     let mut rx = state.events.subscribe();
     loop {
         tokio::select! {
-            event = rx.recv() => {
-                let Ok(event) = event else { break; };
+            event = recv_app_event_tolerating_lag(&mut rx) => {
+                let Some(event) = event else { break; };
                 let notification = json_rpc_event(event.kind, event.payload);
                 if sender.send(Message::Text(notification.to_string())).await.is_err() {
                     break;
@@ -250,13 +253,16 @@ async fn handle_rpc_result(
         }
         "scans.delete_path" => {
             let params: DeleteScanPathParams = decode_params(params)?;
-            let deleted = state.db.delete_scan_path(&params.scan_id, &params.path)?;
+            let path = normalized_scan_path(&params.path)?;
+            let deleted = state
+                .db
+                .delete_visible_scan_path(&params.scan_id, &path)?;
             if deleted > 0 {
                 state.events.emit(
                     "scan_path_deleted",
                     serde_json::json!({
                         "scan_id": params.scan_id,
-                        "path": params.path,
+                        "path": path,
                         "deleted": deleted,
                     }),
                 );
@@ -321,9 +327,13 @@ async fn handle_rpc_result(
         }
         "scans.tree" => {
             let params: TreeRpcParams = decode_params(params)?;
-            Ok(serde_json::to_value(state.db.scan_tree(
+            Ok(serde_json::to_value(state.db.scan_tree_page(
                 &params.scan_id,
                 params.path.as_deref().unwrap_or(""),
+                params.limit,
+                params.offset.unwrap_or(0),
+                params.depth.unwrap_or(1),
+                params.query.as_ref(),
             )?)?)
         }
         "files.find" => {
@@ -334,37 +344,48 @@ async fn handle_rpc_result(
                     .find_files(&params.q, params.limit.unwrap_or(200))?,
             )?)
         }
+        "files.search" => {
+            let query: FileSearchQuery = decode_params(params)?;
+            Ok(serde_json::to_value(state.db.search_files(&query)?)?)
+        }
         "files.occurrences" => {
             let params: FileOccurrencesParams = decode_params(params)?;
-            Ok(serde_json::to_value(
-                state.db.file_occurrences(&params.blake3, params.size)?,
-            )?)
+            let page = state.db.visible_file_occurrences_page(
+                &params.scan_id,
+                &params.path,
+                &params.blake3,
+                params.size,
+                params.limit.unwrap_or(100).max(1),
+                params.offset.unwrap_or(0),
+            )?;
+            Ok(serde_json::to_value(page)?)
         }
         "files.details" => {
             let params: FileOccurrencesParams = decode_params(params)?;
-            Ok(serde_json::to_value(media::file_details(
-                &state.db,
-                &params.blake3,
-                params.size,
-            )?)?)
+            file_details_page(&state.db, &params)
         }
         "files.open" => {
             let params: FilePathActionParams = decode_params(params)?;
-            let path = location_child_path(&state.db, &params.location_slug, &params.path)?;
+            let path = scan_child_path(&state.db, &params.scan_id, &params.path)?;
             open_in_system(&path)?;
             Ok(serde_json::json!({ "opened": true }))
         }
         "files.reveal" => {
             let params: FilePathActionParams = decode_params(params)?;
-            let path = location_child_path(&state.db, &params.location_slug, &params.path)?;
+            let path = scan_child_path(&state.db, &params.scan_id, &params.path)?;
             reveal_in_system(&path)?;
             Ok(serde_json::json!({ "revealed": true }))
         }
         "dupes.list" => {
-            let params: LimitQuery =
-                decode_params(params).unwrap_or(LimitQuery { limit: Some(100) });
+            let params: LimitQuery = decode_params(params).unwrap_or(LimitQuery {
+                limit: Some(100),
+                scan_ids: Vec::new(),
+            });
             Ok(serde_json::to_value(
-                state.db.duplicate_groups(params.limit.unwrap_or(100))?,
+                state.db.duplicate_groups_for_scans(
+                    params.limit.unwrap_or(100),
+                    &params.scan_ids,
+                )?,
             )?)
         }
         "thumbnails.build" => {
@@ -445,11 +466,133 @@ fn location_child_path(db: &Database, slug: &str, relative_path: &str) -> Result
     Ok(location.root_path.join(clean_relative_path(relative_path)))
 }
 
+fn scan_child_path(db: &Database, scan_id: &str, relative_path: &str) -> Result<PathBuf> {
+    let scan = db
+        .scan_by_id(scan_id)?
+        .with_context(|| format!("scan not found: {scan_id}"))?;
+    let entry = visible_scan_entry(db, scan_id, relative_path)?;
+    let location = db
+        .location_by_slug(&scan.location_slug)?
+        .with_context(|| format!("location not found: {}", scan.location_slug))?;
+    let scan_root = location
+        .root_path
+        .join(normalized_scan_offset_path(&scan.offset_path)?);
+    Ok(scan_root.join(PathBuf::from(normalized_scan_path(&entry.path)?)))
+}
+
+fn visible_scan_entry(db: &Database, scan_id: &str, path: &str) -> Result<TreeEntry> {
+    db.scan_by_id(scan_id)?
+        .with_context(|| format!("scan not found: {scan_id}"))?;
+    let path = normalized_scan_path(path)?;
+    let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+    let entry = db
+        .scan_tree(scan_id, parent)?
+        .into_iter()
+        .find(|entry| entry.path == path)
+        .with_context(|| format!("path not found or excluded from scan: {path}"))?;
+    ensure_visible_scan_path(db, scan_id, &entry.path, entry.kind == "dir")?;
+    Ok(entry)
+}
+
+fn normalized_scan_path(path: &str) -> Result<String> {
+    let path = normalized_relative_scan_path(path, "scan path")?;
+    if path.is_empty() {
+        anyhow::bail!("path must not be the scan root")
+    }
+    Ok(path)
+}
+
+fn ensure_visible_scan_path(
+    db: &Database,
+    scan_id: &str,
+    path: &str,
+    is_dir: bool,
+) -> Result<()> {
+    if !db.scan_path_is_visible(scan_id, path, is_dir)? {
+        anyhow::bail!("path is excluded from scan")
+    }
+    Ok(())
+}
+
+fn file_details_page(db: &Database, params: &FileOccurrencesParams) -> Result<Value> {
+    let page = db.visible_file_occurrences_page(
+        &params.scan_id,
+        &params.path,
+        &params.blake3,
+        params.size,
+        params.limit.unwrap_or(100).max(1),
+        params.offset.unwrap_or(0),
+    )?;
+    let details = media::file_details_from_visible_occurrences(db, &page.occurrences)?;
+    let mut response = serde_json::to_value(details)?;
+    let object = response
+        .as_object_mut()
+        .context("serializing file details response")?;
+    object.insert("occurrence_count".to_string(), Value::from(page.total));
+    object.insert("occurrence_limit".to_string(), Value::from(page.limit));
+    object.insert("occurrence_offset".to_string(), Value::from(page.offset));
+    object.insert(
+        "occurrences_truncated".to_string(),
+        Value::from(page.has_more),
+    );
+    object.insert(
+        "occurrence_next_offset".to_string(),
+        serde_json::to_value(page.next_offset)?,
+    );
+    Ok(response)
+}
+
 fn clean_relative_path(path: &str) -> PathBuf {
     path.trim_start_matches('/')
         .split('/')
         .filter(|part| !part.is_empty() && *part != "." && *part != "..")
         .collect()
+}
+
+/// Normalizes an untrusted scan-relative path without allowing a caller to
+/// change its target through `.`/`..` cleanup. Both separators are parsed so
+/// Windows-form paths cannot regain traversal semantics after validation.
+fn normalized_relative_scan_path(path: &str, label: &str) -> Result<String> {
+    let mut prefix = path.chars();
+    if prefix.next().map_or(false, is_path_separator)
+        && prefix.next().map_or(false, is_path_separator)
+    {
+        anyhow::bail!("{label} may not contain a UNC or device prefix")
+    }
+
+    let mut normalized = Vec::new();
+    for part in path.split(is_path_separator) {
+        match part {
+            "" | "." => {}
+            ".." => anyhow::bail!("{label} may not contain traversal"),
+            _ if looks_like_windows_drive_prefix(part) => {
+                anyhow::bail!("{label} may not contain a Windows drive prefix")
+            }
+            _ => normalized.push(part),
+        }
+    }
+    Ok(normalized.join("/"))
+}
+
+fn is_path_separator(character: char) -> bool {
+    character == '/' || character == '\\'
+}
+
+fn looks_like_windows_drive_prefix(part: &str) -> bool {
+    let bytes = part.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+/// Converts the persisted scan offset into a location-relative action root.
+///
+/// Indexed file paths are already relative to this root, so actions must not
+/// resolve them directly from the enclosing location. Stored traversal is
+/// rejected rather than silently rewritten before an OS action is launched.
+fn normalized_scan_offset_path(offset_path: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(normalized_relative_scan_path(
+        offset_path,
+        "scan offset path",
+    )?))
 }
 
 fn open_in_system(path: &FsPath) -> Result<()> {
@@ -604,6 +747,10 @@ struct DeleteCheckParams {
 struct TreeRpcParams {
     scan_id: String,
     path: Option<String>,
+    depth: Option<u32>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    query: Option<FileSearchQuery>,
 }
 
 async fn scan_location(
@@ -734,6 +881,12 @@ async fn scan_files(
 #[derive(Deserialize)]
 struct TreeQuery {
     path: Option<String>,
+    depth: Option<u32>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    /// URL-encoded JSON `FileSearchQuery`, kept separate from the tree page
+    /// window so the same filter semantics apply to REST and JSON-RPC.
+    query: Option<String>,
 }
 
 async fn scan_tree(
@@ -741,9 +894,21 @@ async fn scan_tree(
     Path(scan_id): Path<String>,
     Query(query): Query<TreeQuery>,
 ) -> ApiResult<Json<impl Serialize>> {
-    Ok(Json(state.db.scan_tree(
+    let file_query = query
+        .query
+        .as_deref()
+        .map(|raw| {
+            serde_json::from_str::<FileSearchQuery>(raw)
+                .context("tree query must be a JSON-encoded FileSearchQuery")
+        })
+        .transpose()?;
+    Ok(Json(state.db.scan_tree_page(
         &scan_id,
         query.path.as_deref().unwrap_or(""),
+        query.limit,
+        query.offset.unwrap_or(0),
+        query.depth.unwrap_or(1),
+        file_query.as_ref(),
     )?))
 }
 
@@ -782,13 +947,17 @@ struct FindQuery {
 
 #[derive(Deserialize)]
 struct FileOccurrencesParams {
+    scan_id: String,
+    path: String,
     blake3: String,
     size: u64,
+    limit: Option<u32>,
+    offset: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct FilePathActionParams {
-    location_slug: String,
+    scan_id: String,
     path: String,
 }
 
@@ -812,13 +981,18 @@ async fn find(
 #[derive(Deserialize)]
 struct LimitQuery {
     limit: Option<u32>,
+    #[serde(default)]
+    scan_ids: Vec<String>,
 }
 
 async fn dupes(
     State(state): State<AppState>,
     Query(query): Query<LimitQuery>,
 ) -> ApiResult<Json<impl Serialize>> {
-    Ok(Json(state.db.duplicate_groups(query.limit.unwrap_or(50))?))
+    Ok(Json(state.db.duplicate_groups_for_scans(
+        query.limit.unwrap_or(50),
+        &query.scan_ids,
+    )?))
 }
 
 async fn static_handler(uri: Uri) -> impl IntoResponse {
@@ -871,5 +1045,66 @@ impl IntoResponse for ApiError {
             "error": self.0.to_string(),
         }));
         (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_action_path_keeps_indexed_entry_under_nested_offset() {
+        let location_root = PathBuf::from("location-root");
+        let scan_root = location_root
+            .join(normalized_scan_offset_path("/nested/album").unwrap());
+
+        assert_eq!(
+            scan_root.join(PathBuf::from(normalized_scan_path("cover.jpg").unwrap())),
+            PathBuf::from("location-root/nested/album/cover.jpg")
+        );
+    }
+
+    #[test]
+    fn scan_path_rejects_traversal_with_any_separator() {
+        for path in [
+            "../x",
+            "nested/../elsewhere",
+            r"..\x",
+            r"nested\..\elsewhere",
+            r"nested/..\elsewhere",
+            r"C:\elsewhere",
+            "C:relative",
+            "nested/C:relative",
+            "//server/share",
+            r"\\server\share",
+            r"\\?\C:\elsewhere",
+        ] {
+            assert!(normalized_scan_path(path).is_err(), "{path}");
+        }
+        assert_eq!(
+            normalized_scan_path(r"nested\cover.jpg").unwrap(),
+            "nested/cover.jpg"
+        );
+    }
+
+    #[test]
+    fn scan_offset_rejects_traversal_with_any_separator() {
+        for offset in [
+            "nested/../elsewhere",
+            r"nested\..\elsewhere",
+            r"nested/..\elsewhere",
+            r"C:\elsewhere",
+            "C:relative",
+            "nested/C:relative",
+            "//server/share",
+            r"\\server\share",
+            r"\\?\C:\elsewhere",
+        ] {
+            assert!(normalized_scan_offset_path(offset).is_err(), "{offset}");
+        }
+        assert_eq!(
+            normalized_scan_offset_path(r"\nested\album").unwrap(),
+            PathBuf::from("nested/album")
+        );
     }
 }

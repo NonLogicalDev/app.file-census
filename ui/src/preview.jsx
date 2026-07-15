@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import ScanProgressPools from './components/ScanProgressPools.jsx';
+import PrototypeApp from './prototypes/redesign/PrototypeApp.jsx';
 import './style.css';
 
 const SAMPLE_SCAN_PROGRESS = {
@@ -23,6 +24,33 @@ const SAMPLE_SCAN_PROGRESS = {
 
 const PREVIEWS = [
   {
+    path: '/redesign/location-scan-browser',
+    group: 'Redesign prototype',
+    variant: 'location and scan browser',
+    title: 'Location / Scan Browser',
+    description: 'Backend-free full-screen prototype for location-first file browsing.',
+    fullScreen: true,
+    render: () => <PrototypeApp screen="location" />
+  },
+  {
+    path: '/redesign/duplicates',
+    group: 'Redesign prototype',
+    variant: 'duplicates',
+    title: 'Duplicates',
+    description: 'Backend-free full-screen prototype for exact duplicate comparison.',
+    fullScreen: true,
+    render: () => <PrototypeApp screen="duplicates" />
+  },
+  {
+    path: '/redesign/tasks',
+    group: 'Redesign prototype',
+    variant: 'tasks',
+    title: 'Tasks',
+    description: 'Backend-free full-screen prototype for scan and enrichment activity.',
+    fullScreen: true,
+    render: () => <PrototypeApp screen="tasks" />
+  },
+  {
     path: '/scan-progress/expanded',
     group: 'ScanProgressPools',
     variant: 'expanded',
@@ -43,13 +71,14 @@ const PREVIEWS = [
 ];
 
 function routeFromHash(hash = '') {
-  const route = String(hash || '').replace(/^#/, '') || PREVIEWS[0].path;
+  const route = String(hash || '').replace(/^#/, '') || '/scan-progress/expanded';
   return route.startsWith('/') ? route : `/${route}`;
 }
 
 function previewForRoute(route) {
   const normalized = routeFromHash(route);
-  return PREVIEWS.find((preview) => preview.path === normalized) || PREVIEWS[0];
+  return PREVIEWS.find((preview) => preview.path === normalized)
+    || PREVIEWS.find((preview) => preview.path === '/scan-progress/expanded');
 }
 
 function PreviewApp() {
@@ -61,6 +90,10 @@ function PreviewApp() {
   }, []);
 
   const activePreview = useMemo(() => previewForRoute(route), [route]);
+
+  if (activePreview.fullScreen) {
+    return activePreview.render();
+  }
 
   return (
     <main className="grid min-h-screen grid-cols-[280px_minmax(0,1fr)] bg-bg text-text">

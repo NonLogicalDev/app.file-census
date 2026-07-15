@@ -3,6 +3,12 @@ import { chooseDatabase, chooseFolder, databaseInfo as loadDatabaseInfo, isTauri
 import { requireTreePage } from './api/treePage.js';
 import { useRpcConnection } from './api/useRpcConnection.js';
 import AppModals from './components/AppModals.jsx';
+import {
+  DIRECTORY_TREE_PAGE_LIMIT,
+  directoryAncestorPaths,
+  directoryTreeScopeKey,
+  mergeDirectoryTreePage
+} from './components/directoryTree.js';
 import { Icon } from './components/Icon.jsx';
 import Shell from './components/Shell.jsx';
 import { Button } from './components/ui/index.jsx';
@@ -39,6 +45,7 @@ const fileColumns = [
 ];
 
 const defaultColumns = ['name', 'size', 'file_count', 'duplicate_file_count', 'original_file_count', 'same_scan_duplicate_file_count', 'blake3', 'ctime', 'mtime'];
+const MAX_AUTO_DIRECTORY_TREE_DEPTH = 4;
 
 export default function App() {
   const [overview, setOverview] = useState(null);
@@ -48,9 +55,15 @@ export default function App() {
   const [selectedDuplicateScanIds, setSelectedDuplicateScanIds] = useState([]);
   const [duplicateView, setDuplicateViewState] = useState('flat');
   const [searchView, setSearchViewState] = useState('flat');
+  const [searchAllScans, setSearchAllScans] = useState(false);
+  const [selectedSearchScanIds, setSelectedSearchScanIds] = useState([]);
   const [results, setResults] = useState([]);
   const [scanProgress, setScanProgress] = useState({});
   const [treeEntries, setTreeEntries] = useState([]);
+  const [directoryTreeNodes, setDirectoryTreeNodes] = useState({});
+  const [directoryTreeScope, setDirectoryTreeScope] = useState('');
+  const [directoryTreeExpandedPaths, setDirectoryTreeExpandedPaths] = useState(['']);
+  const [directoryTreeLoadingPaths, setDirectoryTreeLoadingPaths] = useState([]);
   const [deleteCheck, setDeleteCheck] = useState(null);
   const [selectedGridPaths, setSelectedGridPaths] = useState([]);
   const [eventLog, setEventLog] = useState([]);
@@ -93,16 +106,25 @@ export default function App() {
   const latest = useRef({});
   const refreshPromise = useRef(null);
   const treeRequestId = useRef(0);
+  const directoryTreeGeneration = useRef(0);
+  const directoryTreeNodesRef = useRef({});
+  const directoryTreeScopeRef = useRef('');
+  const directoryTreeExpandedPathsRef = useRef(['']);
+  const directoryTreeRequests = useRef(new Map());
+  const directoryTreeControllers = useRef(new Map());
   const treeReloadTimer = useRef(null);
   const lagRecoveryTimer = useRef(null);
   const hydratingProgress = useRef(new Set());
   const refreshRef = useRef(null);
   const loadTreeRef = useRef(null);
   const treeAbortController = useRef(null);
+  const rpcRef = useRef(null);
   const searchRef = useRef(null);
   const pendingRouteSearch = useRef(false);
+  const scanExcludeRefreshes = useRef(new Map());
+  const reconcilingExcludeTrees = useRef(new Set());
 
-  Object.assign(latest.current, { locations, scans, dupes, selectedDuplicateScanIds, duplicateView, searchView, scanProgress, selectedLocationSlug, selectedScanId, selectedPath, scanSubview, activeTab, query, searchFilters, pathHistory, pathHistoryIndex, deleteCheck, selectedGridPaths });
+  Object.assign(latest.current, { locations, scans, dupes, selectedDuplicateScanIds, duplicateView, searchView, searchAllScans, selectedSearchScanIds, scanProgress, selectedLocationSlug, selectedScanId, selectedPath, scanSubview, activeTab, query, searchFilters, pathHistory, pathHistoryIndex, deleteCheck, deleteCheckPath, selectedGridPaths, buildThumbnailRequest, confirmDeletePath, fileInfo });
 
   const mergeProgress = useCallback((items) => {
     const validItems = (items || []).filter(Boolean);
@@ -172,8 +194,8 @@ export default function App() {
     if (appEvent.kind === 'scan_path_deleted' && appEvent.payload?.scan_id === latest.current.selectedScanId) {
       scheduleTreeReload();
     }
-    if (appEvent.kind === 'scan_excludes_updated' && appEvent.payload?.scan_id === latest.current.selectedScanId) {
-      scheduleTreeReload();
+    if (appEvent.kind === 'scan_excludes_updated') {
+      void refreshAfterScanExcludesUpdate(appEvent.payload?.scan_id);
     }
     if (appEvent.kind === 'database_changed') {
       setDatabaseInfo(appEvent.payload || null);
@@ -201,12 +223,13 @@ export default function App() {
         selectedGridPaths: []
       });
     }
-    if (['database_changed', 'location_added', 'location_updated', 'location_deleted', 'scan_started', 'scan_update_started', 'scan_repair_started', 'scan_finished', 'scan_stopped', 'scan_failed', 'scan_paused', 'scan_resumed', 'scan_deleted', 'scan_path_deleted', 'scan_representative_set', 'scan_notes_updated', 'scan_excludes_updated', 'scan_recovery_completed'].includes(appEvent.kind)) {
+    if (['database_changed', 'location_added', 'location_updated', 'location_deleted', 'scan_started', 'scan_update_started', 'scan_repair_started', 'scan_finished', 'scan_stopped', 'scan_failed', 'scan_paused', 'scan_resumed', 'scan_deleted', 'scan_path_deleted', 'scan_representative_set', 'scan_notes_updated', 'scan_recovery_completed'].includes(appEvent.kind)) {
       refreshRef.current?.();
     }
   }, [mergeProgress]);
 
   const { rpc, status: wsStatus, statusDetail } = useRpcConnection({ onEvent: handleEvent, onOpen: () => refreshRef.current?.() });
+  rpcRef.current = rpc;
 
   useEffect(() => {
     if (!desktopRuntime) return;
@@ -260,6 +283,13 @@ export default function App() {
     if (!scan || scan.location_slug !== selectedLocationSlug) return null;
     return scanView(scan);
   }, [scans, selectedLocationSlug, selectedScanId, scanProgress, scanView]);
+  const activeDirectoryTreeScope = useMemo(() => directoryTreeScopeKey({
+    scanId: selectedScanId,
+    query,
+    filters: searchFilters
+  }), [selectedScanId, query, searchFilters]);
+  const visibleDirectoryTreeNodes = directoryTreeScope === activeDirectoryTreeScope ? directoryTreeNodes : {};
+  const visibleDirectoryTreeLoadingPaths = directoryTreeScope === activeDirectoryTreeScope ? directoryTreeLoadingPaths : [];
   const showingDeleteCheck = scanSubview === 'delete-check';
   const fileGridRows = useMemo(() => gridRows(treeEntries, selectedPath), [treeEntries, selectedPath]);
   const deleteCheckRows = useMemo(() => deleteCheck ? (deleteCheck.safe ? deleteCheck.checked_files : deleteCheck.missing_files) : [], [deleteCheck]);
@@ -294,6 +324,12 @@ export default function App() {
     } else if (state.activeTab === 'search') {
       path = '/search';
       if (state.searchView && state.searchView !== 'flat') params.set('view', state.searchView);
+      if (state.selectedSearchScanIds?.length) {
+        params.set('scope', 'explicit');
+        params.set('scans', state.selectedSearchScanIds.join(','));
+      } else if (state.searchAllScans) {
+        params.set('scope', 'all');
+      }
       if (state.query.trim()) params.set('q', state.query.trim());
       const encodedFilters = encodeSearchFilters(state.searchFilters);
       if (encodedFilters) params.set('filters', encodedFilters);
@@ -349,7 +385,7 @@ export default function App() {
       setActiveTab('duplicates');
       const nextQuery = url.searchParams.get('q') || '';
       const nextSearchFilters = decodeSearchFilters(url.searchParams.get('filters'));
-      const nextDuplicateScanIds = parseDuplicateScanIds(url.searchParams.get('scans'));
+      const nextDuplicateScanIds = parseScanIds(url.searchParams.get('scans'));
       const nextDuplicateView = url.searchParams.get('view') === 'tree' ? 'tree' : 'flat';
       setQuery(nextQuery);
       setSearchFilters(nextSearchFilters);
@@ -363,10 +399,18 @@ export default function App() {
       const nextQuery = url.searchParams.get('q') || '';
       const nextSearchFilters = decodeSearchFilters(url.searchParams.get('filters'));
       const nextSearchView = url.searchParams.get('view') === 'tree' ? 'tree' : 'flat';
+      const nextSearchScope = url.searchParams.get('scope');
+      const requestedSearchScanIds = parseScanIds(url.searchParams.get('scans'));
+      const nextSearchScanIds = nextSearchScope === 'explicit' || (!nextSearchScope && requestedSearchScanIds.length)
+        ? requestedSearchScanIds
+        : [];
+      const nextSearchAllScans = !nextSearchScanIds.length && nextSearchScope === 'all';
       setQuery(nextQuery);
       setSearchFilters(nextSearchFilters);
       setSearchViewState(nextSearchView);
-      Object.assign(latest.current, { activeTab: 'search', query: nextQuery, searchFilters: nextSearchFilters, searchView: nextSearchView });
+      setSearchAllScans(nextSearchAllScans);
+      setSelectedSearchScanIds(nextSearchScanIds);
+      Object.assign(latest.current, { activeTab: 'search', query: nextQuery, searchFilters: nextSearchFilters, searchView: nextSearchView, searchAllScans: nextSearchAllScans, selectedSearchScanIds: nextSearchScanIds });
       pendingRouteSearch.current = Boolean(nextQuery.trim() || nextSearchFilters.length);
       return;
     }
@@ -376,7 +420,9 @@ export default function App() {
     const routeView = url.searchParams.get('view');
     const nextQuery = url.searchParams.get('q') || '';
     const nextSearchFilters = decodeSearchFilters(url.searchParams.get('filters'));
-    const nextScanSubview = nextScanId && routeView === 'delete-check' ? 'delete-check' : 'files';
+    const nextScanSubview = nextScanId && (routeView === 'delete-check' || routeView === 'tree')
+      ? routeView
+      : 'files';
     const nextDeleteCheck = nextScanId && nextScanId === latest.current.selectedScanId ? latest.current.deleteCheck : null;
     setActiveTab('locations');
     setSelectedLocationSlug(nextLocationSlug);
@@ -517,6 +563,122 @@ export default function App() {
   }, [rpc, routeTo]);
   loadTreeRef.current = loadTree;
 
+  const clearDirectoryTree = useCallback(() => {
+    directoryTreeGeneration.current += 1;
+    directoryTreeControllers.current.forEach((controller) => controller.abort());
+    directoryTreeControllers.current.clear();
+    directoryTreeRequests.current.clear();
+    directoryTreeScopeRef.current = '';
+    directoryTreeNodesRef.current = {};
+    directoryTreeExpandedPathsRef.current = [''];
+    setDirectoryTreeScope('');
+    setDirectoryTreeNodes({});
+    setDirectoryTreeExpandedPaths(['']);
+    setDirectoryTreeLoadingPaths([]);
+  }, []);
+
+  const resetDirectoryTreeScope = useCallback((scope) => {
+    if (directoryTreeScopeRef.current === scope) return false;
+    clearDirectoryTree();
+    directoryTreeScopeRef.current = scope;
+    setDirectoryTreeScope(scope);
+    return true;
+  }, [clearDirectoryTree]);
+
+  const loadDirectoryTreePage = useCallback(async (path = '', { append = false } = {}) => {
+    const state = latest.current;
+    const scanId = state.selectedScanId;
+    if (!scanId) return null;
+
+    const scope = directoryTreeScopeKey({
+      scanId,
+      query: state.query,
+      filters: state.searchFilters
+    });
+    const scopeChanged = resetDirectoryTreeScope(scope);
+    const normalizedPath = path || '';
+    const existing = scopeChanged ? null : directoryTreeNodesRef.current[normalizedPath];
+    if (!append && existing) return existing;
+    const offset = append ? existing?.nextOffset : 0;
+    if (append && offset == null) return existing || null;
+
+    const requestKey = `${scope}:${normalizedPath}:${offset}`;
+    const pending = directoryTreeRequests.current.get(requestKey);
+    if (pending) return pending;
+
+    const generation = directoryTreeGeneration.current;
+    const controller = new AbortController();
+    directoryTreeControllers.current.set(requestKey, controller);
+    setDirectoryTreeLoadingPaths((current) => current.includes(normalizedPath) ? current : [...current, normalizedPath]);
+
+    const shouldFilter = Boolean(state.query?.trim() || state.searchFilters?.length);
+    const request = rpc('scans.tree', {
+      scan_id: scanId,
+      path: normalizedPath,
+      depth: 1,
+      limit: DIRECTORY_TREE_PAGE_LIMIT,
+      offset,
+      ...(shouldFilter ? { query: buildFileSearchQuery(state.query, state.searchFilters) } : {})
+    }, { signal: controller.signal });
+    directoryTreeRequests.current.set(requestKey, request);
+
+    try {
+      const page = requireTreePage(await request);
+      if (
+        generation !== directoryTreeGeneration.current
+        || directoryTreeScopeRef.current !== scope
+        || latest.current.selectedScanId !== scanId
+      ) return null;
+
+      const nextNode = mergeDirectoryTreePage(directoryTreeNodesRef.current[normalizedPath], page, { append });
+      const nextNodes = { ...directoryTreeNodesRef.current, [normalizedPath]: nextNode };
+      directoryTreeNodesRef.current = nextNodes;
+      setDirectoryTreeNodes(nextNodes);
+      return nextNode;
+    } catch (error) {
+      if (error?.name !== 'AbortError') setMessage(error?.message || String(error));
+      return null;
+    } finally {
+      if (directoryTreeRequests.current.get(requestKey) === request) directoryTreeRequests.current.delete(requestKey);
+      if (directoryTreeControllers.current.get(requestKey) === controller) directoryTreeControllers.current.delete(requestKey);
+      if (generation === directoryTreeGeneration.current) {
+        setDirectoryTreeLoadingPaths((current) => current.filter((item) => item !== normalizedPath));
+      }
+    }
+  }, [resetDirectoryTreeScope, rpc]);
+
+  const ensureDirectoryTreePath = useCallback(async (path = '') => {
+    await loadDirectoryTreePage('');
+    const ancestorPaths = directoryAncestorPaths(path, {
+      maxDepth: MAX_AUTO_DIRECTORY_TREE_DEPTH
+    });
+    const nextExpanded = [...new Set([...directoryTreeExpandedPathsRef.current, ...ancestorPaths])];
+    directoryTreeExpandedPathsRef.current = nextExpanded;
+    setDirectoryTreeExpandedPaths(nextExpanded);
+
+    for (const ancestorPath of ancestorPaths.slice(1)) {
+      await loadDirectoryTreePage(ancestorPath);
+    }
+  }, [loadDirectoryTreePage]);
+
+  const toggleDirectoryTree = useCallback((path = '') => {
+    const current = directoryTreeExpandedPathsRef.current;
+    const isExpanded = current.includes(path);
+    const next = isExpanded ? current.filter((item) => item !== path) : [...current, path];
+    directoryTreeExpandedPathsRef.current = next;
+    setDirectoryTreeExpandedPaths(next);
+    if (!isExpanded) void loadDirectoryTreePage(path);
+  }, [loadDirectoryTreePage]);
+
+  const loadMoreDirectoryTree = useCallback((path = '') => {
+    void loadDirectoryTreePage(path, { append: true });
+  }, [loadDirectoryTreePage]);
+
+  useEffect(() => {
+    if (scanSubview !== 'tree' || !selectedScanId) return;
+    void ensureDirectoryTreePath(selectedPath);
+  }, [ensureDirectoryTreePath, query, scanSubview, searchFilters, selectedPath, selectedScanId]);
+
   const loadDuplicateGroups = useCallback(async (scanIds = latest.current.selectedDuplicateScanIds || []) => {
     setDuplicatesLoading(true);
     try {
@@ -542,6 +704,7 @@ export default function App() {
       ]);
       const knownScanIds = new Set(nextScans.map((scan) => scan.id));
       const nextSelectedDuplicateScanIds = (latest.current.selectedDuplicateScanIds || []).filter((scanId) => knownScanIds.has(scanId));
+      const nextSelectedSearchScanIds = (latest.current.selectedSearchScanIds || []).filter((scanId) => knownScanIds.has(scanId));
       const nextDupes = await rpc('dupes.list', { limit: 100, scan_ids: nextSelectedDuplicateScanIds });
       setOverview(nextOverview);
       setLocations(nextLocations);
@@ -551,13 +714,19 @@ export default function App() {
         setSelectedDuplicateScanIds(nextSelectedDuplicateScanIds);
         latest.current.selectedDuplicateScanIds = nextSelectedDuplicateScanIds;
       }
+      if (nextSelectedSearchScanIds.length !== (latest.current.selectedSearchScanIds || []).length) {
+        setSelectedSearchScanIds(nextSelectedSearchScanIds);
+        latest.current.selectedSearchScanIds = nextSelectedSearchScanIds;
+      }
       latest.current.locations = nextLocations;
       latest.current.scans = nextScans;
       latest.current.dupes = nextDupes;
       mergeProgress(running);
       ensureSelection(nextLocations);
       routeTo(true);
-      await loadTreeRef.current?.(latest.current.selectedPath, { updateHistory: false, preserveDeleteCheck: true });
+      if (!reconcilingExcludeTrees.current.has(latest.current.selectedScanId)) {
+        await loadTreeRef.current?.(latest.current.selectedPath, { updateHistory: false, preserveDeleteCheck: true });
+      }
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -589,7 +758,7 @@ export default function App() {
     if (wsStatus !== 'live' || !pendingRouteSearch.current || activeTab !== 'search') return;
     pendingRouteSearch.current = false;
     searchRef.current?.({ replaceRoute: true });
-  }, [wsStatus, activeTab, query, searchFilters]);
+  }, [wsStatus, activeTab, query, searchFilters, searchAllScans, selectedSearchScanIds]);
 
   function scheduleTreeReload() {
     if (latest.current.deleteCheck || treeReloadTimer.current) return;
@@ -597,6 +766,149 @@ export default function App() {
       treeReloadTimer.current = null;
       loadTreeRef.current?.(latest.current.selectedPath, { updateHistory: false, replaceRoute: false });
     }, 700);
+  }
+
+  function refreshAfterScanExcludesUpdate(scanId) {
+    const key = scanId || '*';
+    const existing = scanExcludeRefreshes.current.get(key);
+    if (existing) return existing;
+
+    let refresh;
+    refresh = reconcileAndRefreshAfterScanExcludesUpdate(scanId)
+      .catch((error) => {
+        setMessage(error?.message || String(error));
+      })
+      .finally(() => {
+        if (scanExcludeRefreshes.current.get(key) === refresh) {
+          scanExcludeRefreshes.current.delete(key);
+        }
+      });
+    scanExcludeRefreshes.current.set(key, refresh);
+    return refresh;
+  }
+
+  async function reconcileAndRefreshAfterScanExcludesUpdate(scanId) {
+    const state = latest.current;
+    const selectedScanId = state.selectedScanId;
+    const affectsSelectedScan = !scanId || scanId === selectedScanId;
+    const fileInfoAffected = !scanId
+      || state.fileInfo?.file?.scan_id === scanId
+      || (Array.isArray(state.fileInfo?.occurrences) && state.fileInfo.occurrences.some((occurrence) => occurrence.scan_id === scanId));
+
+    if (fileInfoAffected) {
+      setFileInfo(null);
+      setShowFileInfo(false);
+      state.fileInfo = null;
+    }
+
+    if (!scanId || state.confirmDeletePath?.scan_id === scanId) {
+      setConfirmDeletePath(null);
+      state.confirmDeletePath = null;
+    }
+    if (!scanId || state.buildThumbnailRequest?.scan_id === scanId) {
+      setBuildThumbnailRequest(null);
+      setShowBuildThumbnails(false);
+      state.buildThumbnailRequest = null;
+    }
+
+    if (affectsSelectedScan) {
+      setDeleteCheck(null);
+      setDeleteCheckPath('');
+      setSelectedGridPaths([]);
+      Object.assign(state, { deleteCheck: null, deleteCheckPath: '', selectedGridPaths: [] });
+    }
+
+    const shouldReconcileTree = Boolean(affectsSelectedScan && selectedScanId);
+    let reconciliationError = null;
+    if (shouldReconcileTree) {
+      reconcilingExcludeTrees.current.add(selectedScanId);
+      invalidateSelectedScanTree();
+    }
+
+    try {
+      const inFlightRefresh = refreshPromise.current;
+      if (inFlightRefresh) await inFlightRefresh;
+      if (shouldReconcileTree) {
+        reconciliationError = await reconcileSelectedScanPathAfterExcludes(selectedScanId);
+      }
+    } finally {
+      if (shouldReconcileTree) reconcilingExcludeTrees.current.delete(selectedScanId);
+    }
+
+    const skippedTreeRefresh = refreshPromise.current;
+    if (skippedTreeRefresh) await skippedTreeRefresh;
+    await refreshRef.current?.();
+
+    if (latest.current.activeTab === 'search') {
+      await searchRef.current?.({ replaceRoute: true });
+    }
+
+    if (reconciliationError) setMessage(reconciliationError.message);
+  }
+
+  async function reconcileSelectedScanPathAfterExcludes(scanId) {
+    const state = latest.current;
+    const originalPath = state.selectedPath || '';
+    if (state.selectedScanId !== scanId) return null;
+
+    let nextPath = originalPath;
+    let reconciliationError = null;
+    try {
+      nextPath = await nearestVisibleScanPath(scanId, originalPath);
+    } catch (error) {
+      nextPath = '';
+      reconciliationError = new Error(`Could not reconcile the excluded folder: ${error?.message || String(error)}`);
+    }
+
+    if (latest.current.selectedScanId !== scanId || latest.current.selectedPath !== originalPath) return null;
+    if (nextPath === originalPath) return reconciliationError;
+
+    const nextHistory = pathHistoryFor(nextPath);
+    setSelectedPath(nextPath);
+    setPathHistory(nextHistory);
+    setPathHistoryIndex(nextHistory.length - 1);
+    Object.assign(latest.current, {
+      selectedPath: nextPath,
+      pathHistory: nextHistory,
+      pathHistoryIndex: nextHistory.length - 1
+    });
+    routeTo(true);
+    return reconciliationError;
+  }
+
+  function invalidateSelectedScanTree() {
+    treeRequestId.current += 1;
+    treeAbortController.current?.abort();
+    treeAbortController.current = null;
+    setTreeEntries([]);
+    setTreeLoading(true);
+    clearDirectoryTree();
+    if (latest.current.scanSubview === 'tree') {
+      void ensureDirectoryTreePath(latest.current.selectedPath);
+    }
+  }
+
+  async function nearestVisibleScanPath(scanId, path) {
+    let candidate = path || '';
+    if (!candidate) return '';
+    const rpcCall = rpcRef.current;
+    if (!rpcCall) throw new Error('The connection is not ready.');
+
+    while (candidate) {
+      const parent = parentPath(candidate);
+      const page = requireTreePage(await rpcCall('scans.tree', {
+        scan_id: scanId,
+        path: parent,
+        depth: 1,
+        limit: 500,
+        offset: 0
+      }));
+      if (page.entries.some((entry) => entry.kind === 'dir' && entry.path === candidate)) {
+        return candidate;
+      }
+      candidate = parent;
+    }
+    return '';
   }
 
   function scheduleLagRecovery() {
@@ -627,7 +939,7 @@ export default function App() {
   }
 
   function setScanSubview(view, replace = false) {
-    const nextView = view === 'delete-check' ? 'delete-check' : 'files';
+    const nextView = view === 'delete-check' || view === 'tree' ? view : 'files';
     setScanSubviewState(nextView);
     latest.current.scanSubview = nextView;
     routeTo(replace);
@@ -816,35 +1128,6 @@ export default function App() {
     }
   }
 
-  async function startRepairScan(sourceScanId) {
-    setBusy(true);
-    try {
-      setDeleteCheck(null);
-      const sourceScan = latest.current.scans.find((scan) => scan.id === sourceScanId);
-      const result = await rpc('scans.repair', { scan_id: sourceScanId });
-      const slug = sourceScan?.location_slug || selectedLocationSlug;
-      const location = slug ? locationBySlug(slug) : selectedLocationValue;
-      setActiveTab('locations');
-      if (slug) setSelectedLocationSlug(slug);
-      setSelectedScanId(result.scan_id);
-      setSelectedPath('');
-      setScanSubviewState('files');
-      setSelectedGridPaths([]);
-      Object.assign(latest.current, { activeTab: 'locations', selectedLocationSlug: slug, selectedScanId: result.scan_id, selectedPath: '', scanSubview: 'files', selectedGridPaths: [] });
-      routeTo();
-      setScanProgress((current) => ({ ...current, [result.scan_id]: { scan_id: result.scan_id, location_slug: slug || '', location_name: location?.name || slug || '', status: 'repairing', file_count: 0, dir_count: 0, error_count: 0, total_bytes: 0, current_path: null, log: [`Repair scan queued from ${sourceScanId}`] } }));
-      setScans((current) => [{ id: result.scan_id, location_slug: slug || '', location_name: location?.name || slug || '', is_representative: false, status: 'running', file_count: 0, dir_count: 0, error_count: 0, total_bytes: 0, offset_path: sourceScan?.offset_path || '/', started_at: new Date().toISOString(), finished_at: null, notes: null }, ...current]);
-      setMessage('Repair scan started.');
-      hydrateProgress(result.scan_id);
-      scheduleTreeReload();
-      await loadTree('', { updateHistory: false });
-    } catch (error) {
-      setMessage(error.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   function chooseLocation(slug) {
     setDeleteCheck(null);
     setSelectedLocationSlug(slug);
@@ -931,30 +1214,6 @@ export default function App() {
     }
   }
 
-  async function pauseScan(scanId) {
-    setBusy(true);
-    try {
-      await rpc('scans.pause', { scan_id: scanId });
-      hydrateProgress(scanId);
-    } catch (error) {
-      setMessage(error.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function resumeScan(scanId) {
-    setBusy(true);
-    try {
-      await rpc('scans.resume', { scan_id: scanId });
-      hydrateProgress(scanId);
-    } catch (error) {
-      setMessage(error.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function setRepresentativeScan(scanId) {
     setBusy(true);
     try {
@@ -1026,8 +1285,7 @@ export default function App() {
         .filter(Boolean);
       const excludes = await rpc('scans.excludes.set', { scan_id: scanExcludesForm.scan_id, patterns });
       setShowScanExcludes(false);
-      await loadTree(selectedPath, { updateHistory: false });
-      await refresh();
+      await refreshAfterScanExcludesUpdate(scanExcludesForm.scan_id);
       setMessage(`Saved ${excludes.length} scan ${excludes.length === 1 ? 'exclude' : 'excludes'}.`);
     } catch (error) {
       setMessage(error.message);
@@ -1176,10 +1434,7 @@ export default function App() {
     setBusy(true);
     try {
       const excludes = await rpc('scans.excludes.append_exact_path', { scan_id: selectedScanId, path: entry.path, kind: entry.kind });
-      setSelectedGridPaths((current) => current.filter((path) => path !== entry.path));
-      latest.current.selectedGridPaths = latest.current.selectedGridPaths.filter((path) => path !== entry.path);
-      await loadTree(selectedPath, { updateHistory: false });
-      await refresh();
+      await refreshAfterScanExcludesUpdate(selectedScanId);
       setMessage(`Excluded ${entry.path}. Scan now has ${excludes.length} ${excludes.length === 1 ? 'pattern' : 'patterns'}.`);
     } catch (error) {
       setMessage(error.message);
@@ -1206,11 +1461,25 @@ export default function App() {
   async function search(options = {}) {
     const activeQuery = String(options.query ?? latest.current.query ?? query).trim();
     const activeFilters = options.filters ?? latest.current.searchFilters ?? searchFilters;
+    const activeSearchScanIds = uniqueScanIds(
+      options.scanIds ?? latest.current.selectedSearchScanIds ?? selectedSearchScanIds
+    );
+    const activeSearchAllScans = activeSearchScanIds.length
+      ? false
+      : Boolean(options.allScans ?? latest.current.searchAllScans ?? searchAllScans);
     if (!activeQuery && !activeFilters.length) {
       setActiveTab('search');
       setQuery('');
       setSearchFilters([]);
-      Object.assign(latest.current, { activeTab: 'search', query: '', searchFilters: [] });
+      setSearchAllScans(activeSearchAllScans);
+      setSelectedSearchScanIds(activeSearchScanIds);
+      Object.assign(latest.current, {
+        activeTab: 'search',
+        query: '',
+        searchFilters: [],
+        searchAllScans: activeSearchAllScans,
+        selectedSearchScanIds: activeSearchScanIds
+      });
       setResults([]);
       setSearchLoading(false);
       routeTo(true);
@@ -1220,9 +1489,21 @@ export default function App() {
     setSearchLoading(true);
     try {
       setActiveTab('search');
-      Object.assign(latest.current, { activeTab: 'search', query: activeQuery, searchFilters: activeFilters });
+      setSearchAllScans(activeSearchAllScans);
+      setSelectedSearchScanIds(activeSearchScanIds);
+      Object.assign(latest.current, {
+        activeTab: 'search',
+        query: activeQuery,
+        searchFilters: activeFilters,
+        searchAllScans: activeSearchAllScans,
+        selectedSearchScanIds: activeSearchScanIds
+      });
       routeTo(options.replaceRoute);
-      setResults(await rpc('files.search', buildFileSearchQuery(activeQuery, activeFilters, { limit: 200 })));
+      setResults(await rpc('files.search', buildFileSearchQuery(activeQuery, activeFilters, {
+        limit: 200,
+        scanIds: activeSearchScanIds,
+        allScans: activeSearchAllScans
+      })));
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -1231,6 +1512,32 @@ export default function App() {
     }
   }
   searchRef.current = search;
+
+  function setSearchAllScanScope(nextAllScans) {
+    const allScans = Boolean(nextAllScans);
+    const scanIds = [];
+    setSearchAllScans(allScans);
+    setSelectedSearchScanIds(scanIds);
+    Object.assign(latest.current, { searchAllScans: allScans, selectedSearchScanIds: scanIds });
+    if (latest.current.activeTab === 'search') {
+      searchRef.current?.({ replaceRoute: true, scanIds, allScans });
+    } else {
+      routeTo(true);
+    }
+  }
+
+  function setSearchScanSelection(nextScanIds) {
+    const scanIds = uniqueScanIds(nextScanIds);
+    const allScans = scanIds.length ? false : Boolean(latest.current.searchAllScans);
+    setSearchAllScans(allScans);
+    setSelectedSearchScanIds(scanIds);
+    Object.assign(latest.current, { searchAllScans: allScans, selectedSearchScanIds: scanIds });
+    if (latest.current.activeTab === 'search') {
+      searchRef.current?.({ replaceRoute: true, scanIds, allScans });
+    } else {
+      routeTo(true);
+    }
+  }
 
   function updateSearchQuery(value) {
     setQuery(value);
@@ -1352,11 +1659,19 @@ export default function App() {
   }
 
   async function inspectFile(entry) {
-    if (!entry?.blake3 || !entry?.size) return;
+    const scanId = entry?.scan_id || latest.current.selectedScanId;
+    if (!scanId || !entry?.path || entry.kind !== 'file' || !entry.blake3 || entry.size == null) return;
     setBusy(true);
     try {
-      const details = await rpc('files.details', { blake3: entry.blake3, size: entry.size });
-      setFileInfo({ file: entry, ...details });
+      const details = await rpc('files.details', {
+        scan_id: scanId,
+        path: entry.path,
+        blake3: entry.blake3,
+        size: entry.size
+      });
+      const nextFileInfo = { ...details, file: { ...entry, scan_id: scanId } };
+      setFileInfo(nextFileInfo);
+      latest.current.fileInfo = nextFileInfo;
       setShowFileInfo(true);
     } catch (error) {
       setMessage(error.message);
@@ -1367,20 +1682,26 @@ export default function App() {
 
   async function loadMoreFileOccurrences() {
     const current = fileInfo;
-    if (!current?.file?.blake3 || !current?.file?.size || current.occurrence_next_offset == null) return;
+    const scanId = current?.file?.scan_id;
+    const path = current?.file?.path;
+    const blake3 = current?.file?.blake3;
+    const size = current?.file?.size;
+    if (!scanId || !path || !blake3 || size == null || current.occurrence_next_offset == null) return;
     setBusy(true);
     try {
       const page = await rpc('files.occurrences', {
-        blake3: current.file.blake3,
-        size: current.file.size,
+        scan_id: scanId,
+        path,
+        blake3,
+        size,
         limit: current.occurrence_limit || 100,
         offset: current.occurrence_next_offset
       });
       setFileInfo((latestInfo) => {
-        if (!latestInfo || latestInfo.file.blake3 !== current.file.blake3 || latestInfo.file.size !== current.file.size) {
+        if (!latestInfo || latestInfo.file.scan_id !== scanId || latestInfo.file.path !== path || latestInfo.file.blake3 !== blake3 || latestInfo.file.size !== size) {
           return latestInfo;
         }
-        return {
+        const nextFileInfo = {
           ...latestInfo,
           occurrences: [...(latestInfo.occurrences || []), ...(page.occurrences || [])],
           occurrence_count: page.total,
@@ -1389,6 +1710,8 @@ export default function App() {
           occurrences_truncated: page.has_more,
           occurrence_next_offset: page.next_offset ?? null
         };
+        latest.current.fileInfo = nextFileInfo;
+        return nextFileInfo;
       });
     } catch (error) {
       setMessage(error.message);
@@ -1432,9 +1755,10 @@ export default function App() {
   }
 
   async function openOccurrence(occurrence) {
+    if (!occurrence?.scan_id || !occurrence?.path) return;
     setBusy(true);
     try {
-      await rpc('files.open', { location_slug: occurrence.location_slug, path: occurrence.path });
+      await rpc('files.open', { scan_id: occurrence.scan_id, path: occurrence.path });
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -1443,21 +1767,15 @@ export default function App() {
   }
 
   async function revealOccurrence(occurrence) {
+    if (!occurrence?.scan_id || !occurrence?.path) return;
     setBusy(true);
     try {
-      await rpc('files.reveal', { location_slug: occurrence.location_slug, path: occurrence.path });
+      await rpc('files.reveal', { scan_id: occurrence.scan_id, path: occurrence.path });
     } catch (error) {
       setMessage(error.message);
     } finally {
       setBusy(false);
     }
-  }
-
-  function openFileReference(file) {
-    setActiveTab('locations');
-    setSelectedLocationSlug(file.location_slug);
-    Object.assign(latest.current, { activeTab: 'locations', selectedLocationSlug: file.location_slug });
-    selectScan(file.scan_id);
   }
 
   const commonLocationProps = {
@@ -1478,6 +1796,9 @@ export default function App() {
     visibleColumns,
     gridVisibleColumns,
     visibleGridRows,
+    directoryTreeNodes: visibleDirectoryTreeNodes,
+    directoryTreeExpandedPaths,
+    directoryTreeLoadingPaths: visibleDirectoryTreeLoadingPaths,
     query,
     setQuery: updateSearchQuery,
     searchFilters,
@@ -1495,10 +1816,7 @@ export default function App() {
     onStartScan: startScan,
     onSelectScan: selectScan,
     onStopScan: stopScan,
-    onPauseScan: pauseScan,
-    onResumeScan: resumeScan,
     onUpdateScan: startUpdateScan,
-    onRepairScan: startRepairScan,
     onSetRepresentative: setRepresentativeScan,
     onClearRepresentative: clearRepresentativeScan,
     onRunDeleteCheck: runDeleteCheck,
@@ -1524,30 +1842,335 @@ export default function App() {
     onSetGridSelection: setGridSelection,
     onClearGridSelection: clearGridSelection,
     onLoadTree: loadTree,
+    onToggleDirectoryTree: toggleDirectoryTree,
+    onLoadMoreDirectoryTree: loadMoreDirectoryTree,
     onOpenGridEntry: openGridEntry,
     onInspectFile: inspectFile,
     onRequestExcludePath: requestExcludePath,
     onRequestDeletePath: requestDeletePath
   };
 
+  const currentViewCommands = [];
+  if (activeTab === 'locations' && selectedScanView) {
+    if (isActiveStatus(selectedScanView.status) && selectedScanView.status !== 'stopping') {
+      currentViewCommands.push({
+        id: 'stop-scan',
+        label: 'Stop scan',
+        detail: `Stop the active scan for ${selectedScanView.location_slug}.`,
+        keywords: 'cancel running scan',
+        iconName: 'stop',
+        disabled: busy,
+        onSelect: () => void stopScan(selectedScanView.id)
+      });
+    }
+    if (!isActiveStatus(selectedScanView.status)) {
+      currentViewCommands.push({
+        id: 'update-scan',
+        label: 'Update scan',
+        detail: `Create an update scan from ${selectedScanView.id}.`,
+        keywords: 'rescan refresh scan',
+        iconName: 'update',
+        disabled: busy,
+        onSelect: () => void startUpdateScan(selectedScanView.id)
+      });
+    }
+
+    currentViewCommands.push(
+      {
+        id: 'open-scan-excludes',
+        label: 'Edit scan excludes',
+        detail: 'Set the non-destructive filters used by this scan.',
+        keywords: 'filter ignore exclude patterns',
+        iconName: 'exclude',
+        disabled: busy,
+        onSelect: () => void openScanExcludes(selectedScanView)
+      },
+      {
+        id: 'edit-scan-notes',
+        label: selectedScanView.notes ? 'Edit scan notes' : 'Add scan notes',
+        detail: 'Keep a note attached to this scan.',
+        keywords: 'annotation comment notes',
+        iconName: 'edit',
+        disabled: busy,
+        onSelect: () => openScanNotes(selectedScanView)
+      },
+      {
+        id: 'run-delete-check',
+        label: 'Run delete check',
+        detail: 'Check the selected scan contents before any destructive action.',
+        keywords: 'missing files verify safety',
+        iconName: 'deleteCheck',
+        disabled: busy,
+        onSelect: () => void runDeleteCheck(selectedScanView.id)
+      },
+      {
+        id: 'build-thumbnails',
+        label: selectedGridEntries.length ? 'Build thumbnails for selected items' : 'Build thumbnails for this folder',
+        detail: selectedGridEntries.length
+          ? `${selectedGridEntries.length} selected ${selectedGridEntries.length === 1 ? 'item' : 'items'}.`
+          : `Current folder: ${selectedPath || 'scan root'}.`,
+        keywords: 'preview image media thumbnails',
+        iconName: 'thumbnails',
+        disabled: busy,
+        onSelect: () => requestBuildThumbnails()
+      }
+    );
+
+    if (selectedScanView.is_representative) {
+      currentViewCommands.push({
+        id: 'clear-representative',
+        label: 'Clear representative scan',
+        detail: 'Remove this scan from duplicate-detection defaults.',
+        keywords: 'duplicates representative default',
+        iconName: 'representative',
+        disabled: busy,
+        onSelect: () => void clearRepresentativeScan(selectedScanView.id)
+      });
+    } else {
+      currentViewCommands.push({
+        id: 'set-representative',
+        label: 'Use for duplicates',
+        detail: 'Use this scan as the duplicate-detection representative.',
+        keywords: 'duplicates representative default',
+        iconName: 'representative',
+        disabled: busy,
+        onSelect: () => void setRepresentativeScan(selectedScanView.id)
+      });
+    }
+
+    if (!isActiveStatus(selectedScanView.status)) {
+      currentViewCommands.push({
+        id: 'delete-scan',
+        label: 'Delete scan',
+        detail: 'Open a confirmation before removing this scan record.',
+        keywords: 'remove scan destructive confirm',
+        iconName: 'delete',
+        disabled: busy,
+        onSelect: () => requestDeleteScan(selectedScanView.id)
+      });
+    }
+
+    if (selectedPath) {
+      currentViewCommands.push({
+        id: 'go-parent-folder',
+        label: 'Go to parent folder',
+        detail: `Parent of ${selectedPath}.`,
+        keywords: 'up folder tree navigation',
+        iconName: 'parent',
+        disabled: busy,
+        onSelect: goParent
+      });
+    }
+    if (pathHistoryIndex > 0) {
+      currentViewCommands.push({
+        id: 'go-back',
+        label: 'Go back',
+        detail: 'Return to the previous folder in this scan.',
+        keywords: 'folder history navigation',
+        iconName: 'back',
+        disabled: busy,
+        onSelect: goBack
+      });
+    }
+    if (pathHistoryIndex < pathHistory.length - 1) {
+      currentViewCommands.push({
+        id: 'go-forward',
+        label: 'Go forward',
+        detail: 'Return to the next folder in this scan.',
+        keywords: 'folder history navigation',
+        iconName: 'forward',
+        disabled: busy,
+        onSelect: goForward
+      });
+    }
+    if (selectedGridEntries.length) {
+      currentViewCommands.push({
+        id: 'clear-file-selection',
+        label: 'Clear file selection',
+        detail: `Clear ${selectedGridEntries.length} selected ${selectedGridEntries.length === 1 ? 'item' : 'items'}.`,
+        keywords: 'files selection clear',
+        iconName: 'close',
+        onSelect: clearGridSelection
+      });
+    }
+
+    const selectedFile = selectedGridEntries.length === 1 && selectedGridEntries[0].kind === 'file'
+      ? selectedGridEntries[0]
+      : null;
+    if (selectedFile) {
+      const occurrence = { ...selectedFile, scan_id: selectedScanView.id };
+      currentViewCommands.push(
+        {
+          id: 'inspect-selected-file',
+          label: 'Inspect selected file',
+          detail: selectedFile.path,
+          keywords: 'file details metadata occurrences',
+          iconName: 'preview',
+          disabled: busy,
+          onSelect: () => void inspectFile(selectedFile)
+        },
+        {
+          id: 'open-selected-file',
+          label: 'Open selected file',
+          detail: selectedFile.path,
+          keywords: 'launch file default application',
+          iconName: 'openFile',
+          disabled: busy,
+          onSelect: () => void openOccurrence(occurrence)
+        },
+        {
+          id: 'reveal-selected-file',
+          label: 'Reveal selected file',
+          detail: selectedFile.path,
+          keywords: 'finder explorer folder reveal',
+          iconName: 'revealFile',
+          disabled: busy,
+          onSelect: () => void revealOccurrence(occurrence)
+        }
+      );
+    }
+  } else if (activeTab === 'locations' && selectedLocationView) {
+    currentViewCommands.push(
+      {
+        id: 'edit-location',
+        label: 'Edit location',
+        detail: selectedLocationView.root_path,
+        keywords: 'source location settings path',
+        iconName: 'edit',
+        disabled: busy,
+        onSelect: () => openEditLocation(selectedLocationView)
+      },
+      {
+        id: selectedLocationView.disabled ? 'enable-location-duplicates' : 'disable-location-duplicates',
+        label: selectedLocationView.disabled ? 'Enable duplicate detection' : 'Disable duplicate detection',
+        detail: selectedLocationView.disabled
+          ? 'Include this location in duplicate detection again.'
+          : 'Exclude this location from duplicate detection without deleting scans.',
+        keywords: 'duplicates location enable disable',
+        iconName: selectedLocationView.disabled ? 'enable' : 'disable',
+        disabled: busy,
+        onSelect: () => void setLocationDisabled(selectedLocationView, !selectedLocationView.disabled)
+      }
+    );
+
+    if (selectedLocationView.connected && !selectedLocationView.activeScan) {
+      currentViewCommands.push({
+        id: 'start-location-scan',
+        label: 'Scan location now',
+        detail: `Start a new scan for ${selectedLocationView.slug}.`,
+        keywords: 'scan start index files',
+        iconName: 'scan',
+        disabled: busy,
+        onSelect: () => void startScan(selectedLocationView.slug)
+      });
+    }
+    if (selectedLocationView.connected) {
+      currentViewCommands.push({
+        id: 'browse-location-folder',
+        label: 'Open location folder',
+        detail: selectedLocationView.root_path,
+        keywords: 'open finder explorer source folder',
+        iconName: 'currentFolder',
+        disabled: busy,
+        onSelect: () => void browseCurrentFolder(selectedLocationView)
+      });
+    }
+    if (!selectedLocationView.activeScan) {
+      currentViewCommands.push({
+        id: 'delete-location',
+        label: 'Delete location',
+        detail: 'Open a confirmation before removing this location and its scans.',
+        keywords: 'remove source destructive confirm',
+        iconName: 'delete',
+        disabled: busy,
+        onSelect: () => requestDeleteLocation(selectedLocationView.slug)
+      });
+    }
+  }
+
+  const commandGroups = [
+    {
+      id: 'navigation',
+      label: 'Navigation',
+      commands: [
+        { id: 'dashboard', label: 'Dashboard', detail: 'Overview and active work.', keywords: 'home activity', iconName: 'dashboard', onSelect: () => setTab('dashboard') },
+        { id: 'locations', label: 'Locations', detail: 'Browse source locations and scans.', keywords: 'sources folders scans', iconName: 'locations', onSelect: () => setTab('locations') },
+        { id: 'duplicates', label: 'Duplicates', detail: 'Review exact-content matches.', keywords: 'copies hashes matches', iconName: 'duplicates', onSelect: () => setTab('duplicates') },
+        { id: 'search', label: 'Search', detail: 'Find indexed files.', keywords: 'files paths names', iconName: 'searchFiles', onSelect: () => setTab('search') },
+        { id: 'tasks', label: 'Tasks', detail: 'Monitor active scanner work.', keywords: 'progress running jobs', iconName: 'tasks', onSelect: () => setTab('tasks') },
+        { id: 'options', label: 'Options', detail: 'Choose the active database.', keywords: 'settings database', iconName: 'options', onSelect: () => setTab('options') }
+      ]
+    },
+    {
+      id: 'locations',
+      label: 'Locations',
+      commands: locationList.map((location) => ({
+        id: `location-${location.slug}`,
+        label: `Open ${location.name || location.slug}`,
+        detail: `${location.slug} · ${location.scanCount} ${location.scanCount === 1 ? 'scan' : 'scans'}`,
+        keywords: `${location.slug} ${location.root_path || ''} source location`,
+        iconName: 'locations',
+        onSelect: () => chooseLocation(location.slug)
+      }))
+    },
+    {
+      id: 'scans',
+      label: 'Scans',
+      commands: scans.map((scan) => {
+        const location = locationList.find((item) => item.slug === scan.location_slug);
+        const locationName = location?.name || scan.location_name || scan.location_slug;
+        return {
+          id: `scan-${scan.id}`,
+          label: `Open ${locationName} scan`,
+          detail: `${scan.status} · ${Number(scan.file_count || 0).toLocaleString()} files · ${scan.id}`,
+          keywords: `${scan.id} ${scan.location_slug} ${locationName} scan ${scan.status}`,
+          iconName: 'file',
+          onSelect: () => void selectScan(scan.id, scan.location_slug)
+        };
+      })
+    },
+    ...(currentViewCommands.length ? [{ id: 'current-view', label: 'Current view', commands: currentViewCommands }] : []),
+    {
+      id: 'actions',
+      label: 'Actions',
+      commands: [
+        {
+          id: 'refresh',
+          label: 'Refresh',
+          detail: 'Reload locations, scans, and active work.',
+          keywords: 'reload sync data',
+          iconName: 'refresh',
+          disabled: busy,
+          onSelect: () => void refresh()
+        },
+        {
+          id: 'add-location',
+          label: 'Add location',
+          detail: 'Register a new source location.',
+          keywords: 'new source folder volume',
+          iconName: 'add',
+          disabled: busy,
+          onSelect: () => setShowAddLocation(true)
+        }
+      ]
+    }
+  ];
+
+  const dashboardActivityState = wsStatus === 'live'
+    ? 'live'
+    : wsStatus === 'connecting'
+      ? 'initial-loading'
+      : 'disconnected';
+
   const topBarActions = activeTab === 'locations'
     ? selectedScanView
       ? (
         <>
-          {isActiveStatus(selectedScanView.status) ? (
-            <>
-              {selectedScanView.status === 'paused' ? (
-                <Button variant="secondary" onClick={() => resumeScan(selectedScanView.id)} disabled={busy} icon={<Icon name="resume" />}>Resume</Button>
-              ) : selectedScanView.status !== 'stopping' ? (
-                <Button variant="secondary" onClick={() => pauseScan(selectedScanView.id)} disabled={busy} icon={<Icon name="pause" />}>Pause</Button>
-              ) : null}
-              <Button variant="warning" onClick={() => stopScan(selectedScanView.id)} disabled={busy} icon={<Icon name="stop" />}>Stop</Button>
-            </>
-          ) : (
-            <>
-              <Button variant="secondary" onClick={() => startUpdateScan(selectedScanView.id)} disabled={busy} icon={<Icon name="update" />}>Update scan</Button>
-              <Button variant="secondary" onClick={() => startRepairScan(selectedScanView.id)} disabled={busy} icon={<Icon name="repair" />}>Repair scan</Button>
-            </>
+          {isActiveStatus(selectedScanView.status) && selectedScanView.status !== 'stopping' && (
+            <Button variant="warning" onClick={() => stopScan(selectedScanView.id)} disabled={busy} icon={<Icon name="stop" />}>Stop</Button>
+          )}
+          {!isActiveStatus(selectedScanView.status) && (
+            <Button variant="secondary" onClick={() => startUpdateScan(selectedScanView.id)} disabled={busy} icon={<Icon name="update" />}>Update scan</Button>
           )}
           {selectedScanView.is_representative ? (
             <Button variant="warning" onClick={() => clearRepresentativeScan(selectedScanView.id)} disabled={busy} icon={<Icon name="representative" />}>Clear representative</Button>
@@ -1580,31 +2203,41 @@ export default function App() {
       message={message}
       wsStatus={wsStatus}
       statusDetail={statusDetail}
+      eventLog={eventLog}
       runningProgress={runningProgress}
       activeTab={activeTab}
       setTab={setTab}
       refresh={refresh}
       busy={busy}
+      databaseInfo={databaseInfo}
+      canChooseDatabase={desktopRuntime}
+      onChooseDatabase={chooseDatabaseLocation}
       locationList={locationList}
       selectedLocationSlug={selectedLocationSlug}
       selectedScanId={selectedScanId}
       onChooseLocation={chooseLocation}
       onSelectScan={selectScan}
       onShowAddLocation={() => setShowAddLocation(true)}
+      commandGroups={commandGroups}
       topBarActions={topBarActions}
     >
       {activeTab === 'dashboard' && (
         <DashboardPage
           overview={overview}
-          locationList={locationList}
-          scans={scans}
+          liveScans={runningProgress}
+          backgroundTasks={[]}
           eventLog={eventLog}
+          activityState={dashboardActivityState}
+          activityDetail={statusDetail}
         />
       )}
       {activeTab === 'tasks' && (
         <TasksPage
           runningProgress={runningProgress}
+          backgroundTasks={[]}
           eventLog={eventLog}
+          busy={busy}
+          onStopScan={stopScan}
         />
       )}
       {activeTab === 'locations' && <LocationsPage {...commonLocationProps} />}
@@ -1635,7 +2268,7 @@ export default function App() {
           onReplaceFilterState={replaceSearchFilterStateForCurrentView}
           onSetSelectedScanIds={setDuplicateScanSelection}
           onSetDuplicateView={setDuplicateView}
-          onOpenDuplicate={openFileReference}
+          onOpenDuplicate={inspectFile}
         />
       )}
       {activeTab === 'search' && (
@@ -1649,13 +2282,17 @@ export default function App() {
           busy={busy}
           loading={searchLoading}
           searchView={searchView}
+          searchAllScans={searchAllScans}
+          selectedScanIds={selectedSearchScanIds}
           onSearch={search}
           onSetSearchView={setSearchView}
+          onSetSearchAllScans={setSearchAllScanScope}
+          onSetSelectedScanIds={setSearchScanSelection}
           onAddFilter={addSearchFilterForCurrentView}
           onRemoveFilter={removeSearchFilterForCurrentView}
           onGroupFilters={groupSearchFiltersForCurrentView}
           onReplaceFilterState={replaceSearchFilterStateForCurrentView}
-          onOpenResult={openFileReference}
+          onInspectResult={inspectFile}
         />
       )}
       <AppModals
@@ -1699,6 +2336,7 @@ export default function App() {
         onDeleteLocation={deleteLocation}
         onOpenOccurrence={openOccurrence}
         onRevealOccurrence={revealOccurrence}
+        onRevealFileInScan={revealOccurrence}
         onLoadMoreFileOccurrences={loadMoreFileOccurrences}
         onBuildThumbnails={buildThumbnails}
       />
@@ -1724,9 +2362,13 @@ function duplicateText(file, group) {
   ].join(' ').toLowerCase();
 }
 
-function parseDuplicateScanIds(value) {
+function parseScanIds(value) {
   if (!value) return [];
   return [...new Set(value.split(',').map((scanId) => scanId.trim()).filter(Boolean))];
+}
+
+function uniqueScanIds(scanIds) {
+  return [...new Set((scanIds || []).filter(Boolean))];
 }
 
 function parentPath(selectedPath) {
@@ -1734,4 +2376,14 @@ function parentPath(selectedPath) {
   const parts = selectedPath.split('/').filter(Boolean);
   parts.pop();
   return parts.join('/');
+}
+
+function pathHistoryFor(path) {
+  const history = [''];
+  let current = '';
+  for (const segment of path.split('/').filter(Boolean)) {
+    current = current ? `${current}/${segment}` : segment;
+    history.push(current);
+  }
+  return history;
 }

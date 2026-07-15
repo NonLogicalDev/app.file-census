@@ -13,7 +13,6 @@ export function invokeNativeRpc(invoke, { requestId, method, params = {}, signal
     };
 
     abortHandler = () => {
-      void invoke('rpc_cancel', { requestId }).catch(() => {});
       finish(reject, abortError());
     };
 

@@ -1,22 +1,30 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use rusqlite::{params, Connection, OptionalExtension};
+use regex::Regex;
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::search::{
+    FileSearchExpression, FileSearchFilter, FileSearchOperator, FileSearchQuery, FileSearchTerm,
+};
+
+const DEFAULT_TREE_PAGE_LIMIT: u32 = 500;
 
 #[derive(Clone)]
 pub struct Database {
     path: PathBuf,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LocationType {
+    Unknown,
     Local,
     Disk,
     Nas,
@@ -25,6 +33,7 @@ pub enum LocationType {
 impl fmt::Display for LocationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            LocationType::Unknown => f.write_str("unknown"),
             LocationType::Local => f.write_str("local"),
             LocationType::Disk => f.write_str("disk"),
             LocationType::Nas => f.write_str("nas"),
@@ -37,6 +46,7 @@ impl TryFrom<String> for LocationType {
 
     fn try_from(value: String) -> Result<Self> {
         match value.as_str() {
+            "unknown" => Ok(LocationType::Unknown),
             "local" => Ok(LocationType::Local),
             "disk" => Ok(LocationType::Disk),
             "nas" => Ok(LocationType::Nas),
@@ -106,6 +116,9 @@ pub struct FileRow {
     pub scan_id: String,
     pub location_slug: String,
     pub location_name: String,
+    /// Filesystem topology (`file` or `dir`) remains in `kind`; this is a
+    /// response-only semantic category inferred from the filename extension.
+    pub file_kind: String,
     pub kind: String,
     pub path: String,
     pub name: String,
@@ -138,11 +151,27 @@ pub struct FileOccurrence {
     pub error: Option<String>,
 }
 
+/// A source-validated page of visible content occurrences. The origin check
+/// and the occurrence collection share one read snapshot so a newly excluded
+/// source cannot authorize a later cross-scan result set.
+#[derive(Clone, Debug, Serialize)]
+pub struct FileOccurrencePage {
+    pub occurrences: Vec<FileOccurrence>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u64,
+    pub has_more: bool,
+    pub next_offset: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DuplicateGroup {
     pub blake3: String,
     pub size: u64,
     pub count: u64,
+    /// Shared semantic category for the visible files, or `mixed` when their
+    /// filename-derived categories disagree.
+    pub file_kind: String,
     pub files: Vec<FileRow>,
 }
 
@@ -161,6 +190,36 @@ pub struct TreeEntry {
     pub duplicate_file_count: u64,
     pub original_file_count: u64,
     pub same_scan_duplicate_file_count: u64,
+}
+
+/// A persisted-cache lifecycle record for the effective duplicate comparison
+/// scope. It is intentionally separate from the live duplicate counters on a
+/// tree row: callers can render a truthful cache state without treating a
+/// partial cache run as data truth.
+#[derive(Clone, Debug, Serialize)]
+pub struct DuplicateCacheStatus {
+    pub fingerprint: Option<String>,
+    pub status: String,
+    pub run_id: Option<String>,
+    pub total_files: u64,
+    pub processed_files: u64,
+    pub scan_count: u64,
+    pub started_at: Option<String>,
+    pub ready_at: Option<String>,
+    pub error: Option<String>,
+}
+
+/// A fully materialized, post-filter tree page. `limit` and `offset` refer to
+/// the tree itself; a supplied search query contributes only its filter AST.
+#[derive(Clone, Debug, Serialize)]
+pub struct TreePage {
+    pub entries: Vec<TreeEntry>,
+    pub limit: u32,
+    pub offset: u32,
+    pub total: u64,
+    pub has_more: bool,
+    pub next_offset: Option<u32>,
+    pub duplicate_cache: DuplicateCacheStatus,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -228,6 +287,17 @@ pub struct ReusableFile {
     pub mode: Option<u32>,
 }
 
+/// Read-only material collected before an update scan reserves its new scan
+/// record. Keeping this separate lets callers validate the source/root first,
+/// then perform the small create-and-copy-excludes transaction atomically.
+#[derive(Clone, Debug)]
+pub struct UpdateScanSeed {
+    pub source_scan_id: String,
+    pub location: Location,
+    pub offset_path: PathBuf,
+    pub reusable_files: HashMap<String, ReusableFile>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Overview {
     pub location_count: u64,
@@ -237,13 +307,59 @@ pub struct Overview {
     pub duplicate_groups: u64,
 }
 
+/// Query-local visibility state for persistent, non-destructive scan excludes.
+///
+/// Matchers are compiled once per involved scan and are then used to populate
+/// the connection-local `excluded_file_ids` table before any public query
+/// pagination, counting, or duplicate grouping happens in SQL.
+struct ScanVisibility {
+    matchers: HashMap<String, Option<Gitignore>>,
+}
+
+#[derive(Clone, Debug)]
+struct TreeSourceRow {
+    file: FileRow,
+    other_location_count: u64,
+    same_scan_count: u64,
+}
+
+impl ScanVisibility {
+    fn load<I>(conn: &Connection, scan_ids: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let scan_ids = scan_ids.into_iter().collect::<HashSet<_>>();
+        let mut matchers = HashMap::with_capacity(scan_ids.len());
+        let mut patterns_stmt = conn.prepare(
+            "SELECT pattern FROM scan_excludes WHERE scan_id = ?1 ORDER BY id",
+        )?;
+
+        for scan_id in scan_ids {
+            let patterns = patterns_stmt
+                .query_map([scan_id.as_str()], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let matcher = build_scan_exclude_matcher(&patterns)?;
+            matchers.insert(scan_id, matcher);
+        }
+
+        Ok(Self { matchers })
+    }
+
+    fn is_visible(&self, scan_id: &str, path: &str, is_dir: bool) -> bool {
+        !self
+            .matchers
+            .get(scan_id)
+            .map_or(false, |matcher| scan_path_is_excluded(matcher, path, is_dir))
+    }
+}
+
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Self {
             path: path.as_ref().to_path_buf(),
         };
-        let conn = db.connect()?;
-        db.migrate(&conn)?;
+        let mut conn = db.connect()?;
+        db.migrate(&mut conn)?;
         Ok(db)
     }
 
@@ -263,14 +379,14 @@ impl Database {
         &self.path
     }
 
-    fn migrate(&self, conn: &Connection) -> Result<()> {
+    fn migrate(&self, conn: &mut Connection) -> Result<()> {
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS locations (
                 id TEXT PRIMARY KEY,
                 slug TEXT UNIQUE NOT NULL,
                 name TEXT NOT NULL,
-                type TEXT NOT NULL CHECK (type IN ('local', 'disk', 'nas')),
+                type TEXT NOT NULL CHECK (type IN ('unknown', 'local', 'disk', 'nas')),
                 root_path TEXT NOT NULL,
                 notes TEXT,
                 representative_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL,
@@ -327,12 +443,52 @@ impl Database {
                 UNIQUE(scan_id, pattern)
             );
 
+            CREATE TABLE IF NOT EXISTS duplicate_cache_runs (
+                id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL UNIQUE,
+                fingerprint_payload TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('building', 'ready', 'failed')),
+                total_files INTEGER NOT NULL DEFAULT 0,
+                processed_files INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                ready_at TEXT,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS duplicate_cache_run_scans (
+                run_id TEXT NOT NULL REFERENCES duplicate_cache_runs(id) ON DELETE CASCADE,
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                location_id TEXT NOT NULL,
+                location_slug TEXT NOT NULL,
+                scan_started_at TEXT NOT NULL,
+                scan_finished_at TEXT,
+                file_count INTEGER NOT NULL,
+                dir_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                total_bytes INTEGER NOT NULL,
+                PRIMARY KEY (run_id, scan_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS duplicate_cache_path_counts (
+                run_id TEXT NOT NULL REFERENCES duplicate_cache_runs(id) ON DELETE CASCADE,
+                scan_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'file' CHECK (kind IN ('file', 'dir')),
+                duplicate_file_count INTEGER NOT NULL DEFAULT 0,
+                original_file_count INTEGER NOT NULL DEFAULT 0,
+                same_scan_duplicate_file_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (run_id, scan_id, path)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_locations_slug ON locations(slug);
             CREATE INDEX IF NOT EXISTS idx_scans_location ON scans(location_id);
             CREATE INDEX IF NOT EXISTS idx_files_scan_path ON files(scan_id, path);
             CREATE INDEX IF NOT EXISTS idx_files_name ON files(name);
             CREATE INDEX IF NOT EXISTS idx_files_blake3_size ON files(blake3, size);
             CREATE INDEX IF NOT EXISTS idx_scan_excludes_scan ON scan_excludes(scan_id);
+            CREATE INDEX IF NOT EXISTS idx_duplicate_cache_runs_fingerprint_status ON duplicate_cache_runs(fingerprint, status);
+            CREATE INDEX IF NOT EXISTS idx_duplicate_cache_run_scans_run ON duplicate_cache_run_scans(run_id);
+            CREATE INDEX IF NOT EXISTS idx_duplicate_cache_path_counts_run_scan_path ON duplicate_cache_path_counts(run_id, scan_id, path);
             "#,
         )?;
         if !column_exists(conn, "locations", "representative_scan_id")? {
@@ -359,6 +515,7 @@ impl Database {
         if !column_exists(conn, "files", "ctime")? {
             conn.execute("ALTER TABLE files ADD COLUMN ctime TEXT", [])?;
         }
+        migrate_locations_type_check(conn)?;
         Ok(())
     }
 
@@ -378,6 +535,7 @@ impl Database {
                 created_at,
             ],
         )?;
+        invalidate_duplicate_cache_conn(&conn)?;
         self.location_by_id(&id)?
             .context("inserted location was not found")
     }
@@ -407,6 +565,7 @@ impl Database {
         if updated == 0 {
             anyhow::bail!("location not found: {slug}");
         }
+        invalidate_duplicate_cache_conn(&conn)?;
         self.location_by_slug(slug)?
             .with_context(|| format!("updated location was not found: {slug}"))
     }
@@ -420,6 +579,7 @@ impl Database {
         if updated == 0 {
             anyhow::bail!("location not found: {slug}");
         }
+        invalidate_duplicate_cache_conn(&conn)?;
         self.location_by_slug(slug)?
             .with_context(|| format!("updated location was not found: {slug}"))
     }
@@ -457,6 +617,7 @@ impl Database {
         )?;
         tx.execute("DELETE FROM scans WHERE location_id = ?1", [&location_id])?;
         tx.execute("DELETE FROM locations WHERE id = ?1", [&location_id])?;
+        invalidate_duplicate_cache_conn(&tx)?;
         tx.commit()?;
         Ok(true)
     }
@@ -482,6 +643,7 @@ impl Database {
             "UPDATE locations SET representative_scan_id = ?1 WHERE id = ?2",
             params![scan_id, scan.location_id],
         )?;
+        invalidate_duplicate_cache_conn(&conn)?;
         self.scan_by_id(scan_id)?
             .with_context(|| format!("representative scan not found after update: {scan_id}"))
     }
@@ -495,6 +657,7 @@ impl Database {
             "UPDATE locations SET representative_scan_id = NULL WHERE id = ?1 AND representative_scan_id = ?2",
             params![scan.location_id, scan_id],
         )?;
+        invalidate_duplicate_cache_conn(&conn)?;
         self.scan_by_id(scan_id)?
             .with_context(|| format!("scan not found after representative clear: {scan_id}"))
     }
@@ -564,7 +727,138 @@ impl Database {
                 Utc::now().to_rfc3339(),
             ],
         )?;
+        invalidate_duplicate_cache_conn(&conn)?;
         Ok(id)
+    }
+
+    /// Atomically inserts a running scan with an ID derived from the supplied
+    /// UTC start time and the stored location slug. Collisions use `--2`,
+    /// `--3`, and so on, chosen and inserted inside one write transaction.
+    pub fn start_scan_with_started_at(
+        &self,
+        location: &Location,
+        offset_path: &Path,
+        started_at: DateTime<Utc>,
+    ) -> Result<String> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = Self::next_date_derived_scan_id(&tx, &started_at, &location.slug)?;
+        tx.execute(
+            "INSERT INTO scans (id, location_id, offset_path, started_at, status) VALUES (?1, ?2, ?3, ?4, 'running')",
+            params![
+                id,
+                location.id,
+                offset_path.to_string_lossy(),
+                started_at.to_rfc3339(),
+            ],
+        )?;
+        invalidate_duplicate_cache_conn(&tx)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    fn next_date_derived_scan_id(
+        conn: &Connection,
+        started_at: &DateTime<Utc>,
+        slug: &str,
+    ) -> Result<String> {
+        let base = format!("{}--{slug}", started_at.format("%Y%m%dT%H%M%SZ"));
+        let mut suffix = 1_u64;
+        loop {
+            let candidate = if suffix == 1 {
+                base.clone()
+            } else {
+                format!("{base}--{suffix}")
+            };
+            let exists = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM scans WHERE id = ?1)",
+                [candidate.as_str()],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Ok(candidate);
+            }
+            suffix = suffix
+                .checked_add(1)
+                .context("exhausted date-derived scan ID collision suffixes")?;
+        }
+    }
+
+    /// Reads the source data needed for an update scan without creating any
+    /// new database rows. Callers should validate filesystem/root constraints
+    /// after this phase and before `create_update_scan_from_seed`.
+    pub fn update_scan_seed(&self, source_scan_id: &str) -> Result<UpdateScanSeed> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let source_scan = scan_by_id_from_conn(&tx, source_scan_id)?
+            .with_context(|| format!("unknown source scan: {source_scan_id}"))?;
+        let location = location_by_id_from_conn(&tx, &source_scan.location_id)?
+            .with_context(|| format!("unknown source location: {}", source_scan.location_id))?;
+        let reusable_files = reusable_files_for_scan_conn(&tx, source_scan_id)?;
+        let seed = UpdateScanSeed {
+            source_scan_id: source_scan_id.to_string(),
+            location,
+            offset_path: PathBuf::from(&source_scan.offset_path),
+            reusable_files,
+        };
+        tx.commit()?;
+        Ok(seed)
+    }
+
+    /// Atomically reserves the destination scan and copies the source scan's
+    /// exclude policy. It verifies that the seed's source, location, and root
+    /// have not changed since the read phase; any setup failure rolls back the
+    /// new scan row instead of leaving an orphaned running scan behind.
+    pub fn create_update_scan_from_seed(&self, seed: &UpdateScanSeed) -> Result<String> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source = tx
+            .query_row(
+                "SELECT location_id, offset_path FROM scans WHERE id = ?1",
+                [&seed.source_scan_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .with_context(|| format!("unknown source scan: {}", seed.source_scan_id))?;
+        let expected_offset = seed.offset_path.to_string_lossy().to_string();
+        if source.0 != seed.location.id || source.1 != expected_offset {
+            anyhow::bail!("source scan changed while preparing update; retry the update");
+        }
+        let current_root = tx
+            .query_row(
+                "SELECT root_path FROM locations WHERE id = ?1",
+                [&seed.location.id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .with_context(|| format!("source location disappeared: {}", seed.location.id))?;
+        let expected_root = seed.location.root_path.to_string_lossy().to_string();
+        if current_root != expected_root {
+            anyhow::bail!("source location changed while preparing update; retry the update");
+        }
+
+        let scan_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO scans (id, location_id, offset_path, started_at, status) VALUES (?1, ?2, ?3, ?4, 'running')",
+            params![
+                scan_id,
+                seed.location.id,
+                expected_offset,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO scan_excludes (scan_id, pattern, created_at)
+            SELECT ?1, pattern, created_at
+            FROM scan_excludes
+            WHERE scan_id = ?2
+            "#,
+            params![scan_id, seed.source_scan_id],
+        )?;
+        invalidate_duplicate_cache_conn(&tx)?;
+        tx.commit()?;
+        Ok(scan_id)
     }
 
     pub fn insert_file_batch(&self, files: &[NewFile]) -> Result<()> {
@@ -594,6 +888,7 @@ impl Database {
                 ])?;
             }
         }
+        invalidate_duplicate_cache_conn(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -652,6 +947,7 @@ impl Database {
                 scan_id,
             ],
         )?;
+        invalidate_duplicate_cache_conn(&conn)?;
         Ok(())
     }
 
@@ -668,28 +964,76 @@ impl Database {
             "UPDATE scans SET file_count = ?1, dir_count = ?2, error_count = ?3, total_bytes = ?4 WHERE id = ?5",
             params![file_count, dir_count, error_count, total_bytes, scan_id],
         )?;
+        invalidate_duplicate_cache_conn(&conn)?;
         Ok(())
     }
 
     pub fn delete_scan(&self, scan_id: &str) -> Result<bool> {
-        let conn = self.connect()?;
-        let deleted = conn.execute("DELETE FROM scans WHERE id = ?1", [scan_id])?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted = tx.execute("DELETE FROM scans WHERE id = ?1", [scan_id])?;
+        if deleted > 0 {
+            invalidate_duplicate_cache_conn(&tx)?;
+        }
+        tx.commit()?;
         Ok(deleted > 0)
     }
 
+    /// Deletes one visible indexed file or directory path in a single
+    /// write transaction. The method rechecks visibility itself so a caller's
+    /// earlier tree lookup cannot race a later exclude update. A directory
+    /// deletion is rejected when it would also delete an excluded descendant;
+    /// excludes are a query filter, never permission to discard raw rows.
     pub fn delete_scan_path(&self, scan_id: &str, path: &str) -> Result<u64> {
+        self.delete_visible_scan_path(scan_id, path)
+    }
+
+    pub fn delete_visible_scan_path(&self, scan_id: &str, path: &str) -> Result<u64> {
         let normalized = normalize_file_path(path);
         if normalized.is_empty() {
             anyhow::bail!("refusing to delete the scan root; delete the scan instead");
         }
         let descendant_like = format!("{}/%", normalized.replace('%', "\\%").replace('_', "\\_"));
         let mut conn = self.connect()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_scan_exists(&tx, scan_id)?;
+
+        let direct_kind = tx
+            .query_row(
+                "SELECT kind FROM files WHERE scan_id = ?1 AND path = ?2",
+                params![scan_id, normalized],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let has_descendants = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE scan_id = ?1 AND path LIKE ?2 ESCAPE '\\')",
+            params![scan_id, descendant_like],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if direct_kind.is_none() && !has_descendants {
+            tx.commit()?;
+            return Ok(0);
+        }
+
+        let is_dir = direct_kind.as_deref() == Some("dir") || has_descendants;
+        let visibility = ScanVisibility::load(&tx, [scan_id.to_string()])?;
+        if !visibility.is_visible(scan_id, &normalized, is_dir) {
+            anyhow::bail!("path is excluded from scan: {normalized}");
+        }
+        if is_dir && scan_path_has_excluded_descendants_in_conn(&tx, scan_id, &normalized)? {
+            anyhow::bail!(
+                "refusing to delete directory {normalized}: it contains excluded descendants"
+            );
+        }
+
         let deleted = tx.execute(
             "DELETE FROM files WHERE scan_id = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
             params![scan_id, normalized, descendant_like],
         )? as u64;
-        refresh_scan_file_counts(&tx, scan_id)?;
+        if deleted > 0 {
+            refresh_scan_file_counts(&tx, scan_id)?;
+            invalidate_duplicate_cache_conn(&tx)?;
+        }
         tx.commit()?;
         Ok(deleted)
     }
@@ -704,6 +1048,37 @@ impl Database {
         let conn = self.connect()?;
         ensure_scan_exists(&conn, scan_id)?;
         scan_exclude_patterns_from_conn(&conn, scan_id)
+    }
+
+    /// Returns whether a path remains visible through this scan's persistent
+    /// exclude filter. This is intentionally a query-layer predicate: it never
+    /// removes indexed rows or changes stored scan counts.
+    pub fn scan_path_is_visible(&self, scan_id: &str, path: &str, is_dir: bool) -> Result<bool> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        ensure_scan_exists(&tx, scan_id)?;
+        let visibility = ScanVisibility::load(&tx, [scan_id.to_string()])?;
+        let visible = visibility.is_visible(scan_id, path, is_dir);
+        tx.commit()?;
+        Ok(visible)
+    }
+
+    /// Reports whether deleting this directory would remove any raw indexed
+    /// row hidden by the scan's current exclude filter. This is deliberately a
+    /// read-only preflight; `delete_visible_scan_path` performs the same check
+    /// again inside its write transaction to close the TOCTOU window.
+    pub fn scan_path_has_excluded_descendants(&self, scan_id: &str, path: &str) -> Result<bool> {
+        let normalized = normalize_file_path(path);
+        if normalized.is_empty() {
+            anyhow::bail!("scan root has no deletable path descendants");
+        }
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        ensure_scan_exists(&tx, scan_id)?;
+        let has_excluded_descendants =
+            scan_path_has_excluded_descendants_in_conn(&tx, scan_id, &normalized)?;
+        tx.commit()?;
+        Ok(has_excluded_descendants)
     }
 
     pub fn set_scan_excludes(
@@ -729,6 +1104,7 @@ impl Database {
             }
         }
 
+        invalidate_duplicate_cache_conn(&tx)?;
         tx.commit()?;
         self.scan_excludes(scan_id)
     }
@@ -747,6 +1123,7 @@ impl Database {
             "INSERT OR IGNORE INTO scan_excludes (scan_id, pattern, created_at) VALUES (?1, ?2, ?3)",
             params![scan_id, pattern, Utc::now().to_rfc3339()],
         )?;
+        invalidate_duplicate_cache_conn(&tx)?;
         tx.commit()?;
         self.scan_excludes(scan_id)
     }
@@ -769,8 +1146,223 @@ impl Database {
             }
         }
 
+        invalidate_duplicate_cache_conn(&tx)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn current_duplicate_scope_fingerprint(&self) -> Result<Option<String>> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let fingerprint = current_duplicate_scope(&tx)?.map(|scope| scope.fingerprint);
+        tx.commit()?;
+        Ok(fingerprint)
+    }
+
+    /// Returns the lifecycle state of the persisted duplicate-count cache for
+    /// the *current* effective representative scope. A run from a previous
+    /// scope is reported as stale rather than being presented as usable.
+    pub fn current_duplicate_cache_status(&self) -> Result<DuplicateCacheStatus> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let status = Self::current_duplicate_cache_status_for_conn(&tx)?;
+        tx.commit()?;
+        Ok(status)
+    }
+
+    fn current_duplicate_cache_status_for_conn(conn: &Connection) -> Result<DuplicateCacheStatus> {
+        let Some(scope) = current_duplicate_scope(conn)? else {
+            return Ok(DuplicateCacheStatus {
+                fingerprint: None,
+                status: "empty".to_string(),
+                run_id: None,
+                total_files: 0,
+                processed_files: 0,
+                scan_count: 0,
+                started_at: None,
+                ready_at: None,
+                error: None,
+            });
+        };
+        if scope.scans.is_empty() {
+            return Ok(DuplicateCacheStatus {
+                fingerprint: Some(scope.fingerprint),
+                status: "empty".to_string(),
+                run_id: None,
+                total_files: scope.total_visible_files,
+                processed_files: 0,
+                scan_count: 0,
+                started_at: None,
+                ready_at: None,
+                error: None,
+            });
+        }
+
+        let status = conn
+            .query_row(
+                r#"
+                SELECT id, status, total_files, processed_files, started_at, ready_at, error
+                FROM duplicate_cache_runs
+                WHERE fingerprint = ?1
+                "#,
+                [&scope.fingerprint],
+                |row| {
+                    Ok(DuplicateCacheStatus {
+                        fingerprint: Some(scope.fingerprint.clone()),
+                        status: row.get(1)?,
+                        run_id: Some(row.get(0)?),
+                        total_files: row.get(2)?,
+                        processed_files: row.get(3)?,
+                        scan_count: scope.scans.len() as u64,
+                        started_at: row.get(4)?,
+                        ready_at: row.get(5)?,
+                        error: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(status) = status {
+            return Ok(status);
+        }
+
+        let stale_runs = scalar_u64(conn, "SELECT COUNT(*) FROM duplicate_cache_runs")?;
+        Ok(DuplicateCacheStatus {
+            fingerprint: Some(scope.fingerprint),
+            status: if stale_runs > 0 {
+                "stale".to_string()
+            } else {
+                "missing".to_string()
+            },
+            run_id: None,
+            total_files: scope.total_visible_files,
+            processed_files: 0,
+            scan_count: scope.scans.len() as u64,
+            started_at: None,
+            ready_at: None,
+            error: None,
+        })
+    }
+
+    /// Builds a cache atomically from the current visible duplicate scope. A
+    /// run becomes `ready` only after every visible file in the same snapshot
+    /// has contributed its path and ancestor counts.
+    pub fn rebuild_duplicate_cache_for_current_scope(&self) -> Result<Option<String>> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(scope) = current_duplicate_scope(&tx)? else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        if scope.scans.is_empty() {
+            tx.commit()?;
+            return Ok(None);
+        }
+
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        tx.execute(
+            "DELETE FROM duplicate_cache_runs WHERE fingerprint = ?1",
+            [&scope.fingerprint],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO duplicate_cache_runs
+                (id, fingerprint, fingerprint_payload, status, total_files, processed_files, started_at)
+            VALUES
+                (?1, ?2, ?3, 'building', ?4, 0, ?5)
+            "#,
+            params![
+                run_id,
+                scope.fingerprint,
+                scope.payload_json,
+                scope.total_visible_files,
+                started_at,
+            ],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO duplicate_cache_run_scans
+                    (run_id, scan_id, location_id, location_slug, scan_started_at, scan_finished_at,
+                     file_count, dir_count, error_count, total_bytes)
+                VALUES
+                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+            )?;
+            for scan in &scope.scans {
+                stmt.execute(params![
+                    run_id,
+                    scan.scan_id,
+                    scan.location_id,
+                    scan.location_slug,
+                    scan.started_at,
+                    scan.finished_at,
+                    scan.file_count,
+                    scan.dir_count,
+                    scan.error_count,
+                    scan.total_bytes,
+                ])?;
+            }
+        }
+
+        let files = duplicate_cache_scope_files(&tx, &scope.scans)?;
+        let path_counts = duplicate_cache_path_counts(&files);
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO duplicate_cache_path_counts
+                    (run_id, scan_id, path, kind, duplicate_file_count, original_file_count, same_scan_duplicate_file_count)
+                VALUES
+                    (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(run_id, scan_id, path) DO UPDATE SET
+                    kind = excluded.kind,
+                    duplicate_file_count = excluded.duplicate_file_count,
+                    original_file_count = excluded.original_file_count,
+                    same_scan_duplicate_file_count = excluded.same_scan_duplicate_file_count
+                "#,
+            )?;
+            for ((scan_id, path), counts) in &path_counts {
+                stmt.execute(params![
+                    run_id,
+                    scan_id,
+                    path,
+                    counts.kind,
+                    counts.duplicate_file_count,
+                    counts.original_file_count,
+                    counts.same_scan_duplicate_file_count,
+                ])?;
+            }
+        }
+
+        let processed_files = files.len() as u64;
+        if processed_files == scope.total_visible_files {
+            tx.execute(
+                r#"
+                UPDATE duplicate_cache_runs
+                SET status = 'ready', processed_files = ?1, ready_at = ?2
+                WHERE id = ?3
+                "#,
+                params![processed_files, Utc::now().to_rfc3339(), run_id],
+            )?;
+        } else {
+            tx.execute(
+                r#"
+                UPDATE duplicate_cache_runs
+                SET status = 'failed', processed_files = ?1, error = ?2
+                WHERE id = ?3
+                "#,
+                params![
+                    processed_files,
+                    format!(
+                        "processed {processed_files} files but expected {}",
+                        scope.total_visible_files
+                    ),
+                    run_id,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(run_id))
     }
 
     pub fn scans(&self) -> Result<Vec<Scan>> {
@@ -791,81 +1383,101 @@ impl Database {
     }
 
     pub fn scan_files(&self, scan_id: &str, limit: u32) -> Result<Vec<FileRow>> {
-        let conn = self.connect()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
-            FROM files f
-            JOIN scans s ON s.id = f.scan_id
-            JOIN locations l ON l.id = s.location_id
-            WHERE f.scan_id = ?1 AND f.kind = 'file'
-            ORDER BY f.id DESC
-            LIMIT ?2
-            "#,
-        )?;
-        let rows = stmt.query_map(params![scan_id, limit], file_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        prepare_excluded_file_ids(&tx, [scan_id.to_string()])?;
+        let files = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                JOIN scans s ON s.id = f.scan_id
+                JOIN locations l ON l.id = s.location_id
+                WHERE excluded_f.id IS NULL AND f.scan_id = ?1 AND f.kind = 'file'
+                ORDER BY f.id DESC
+                LIMIT ?2
+                "#,
+            )?;
+            stmt.query_map(params![scan_id, limit], file_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(files)
     }
 
     pub fn scan_tree(&self, scan_id: &str, prefix: &str) -> Result<Vec<TreeEntry>> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let selected_location_id = scan_location_id(&tx, scan_id)?;
+        let mut visibility_scan_ids = vec![scan_id.to_string()];
+        visibility_scan_ids.extend(duplicate_scope_scan_ids(
+            &tx,
+            selected_location_id.as_deref(),
+        )?);
+        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
         let normalized = normalize_tree_prefix(prefix);
         let like = if normalized.is_empty() {
             "%".to_string()
         } else {
             format!("{}%", normalized.replace('%', "\\%").replace('_', "\\_"))
         };
-        let mut stmt = conn.prepare(
-            r#"
-            WITH selected_scan AS (
-                SELECT location_id
-                FROM scans
-                WHERE id = ?1
-            ),
-            duplicate_scope AS (
-                SELECT COALESCE(
-                    l.representative_scan_id,
-                    (
-                        SELECT s2.id
-                        FROM scans s2
-                        WHERE s2.location_id = l.id AND s2.status = 'complete'
-                        ORDER BY s2.started_at DESC
-                        LIMIT 1
-                    )
-                ) AS scan_id
-                FROM locations l
-                WHERE l.disabled = 0 AND l.id != (SELECT location_id FROM selected_scan)
-            )
-            SELECT f.kind, f.path, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode,
-                   (
-                     SELECT COUNT(DISTINCT s2.location_id)
-                     FROM files f2
-                     JOIN scans s2 ON s2.id = f2.scan_id
-                     WHERE f.kind = 'file'
-                       AND f2.kind = 'file'
-                       AND f2.error IS NULL
-                       AND f2.blake3 = f.blake3
-                       AND f2.size = f.size
-                       AND f2.scan_id IN (SELECT scan_id FROM duplicate_scope WHERE scan_id IS NOT NULL)
-                   ) AS other_location_count,
-                   (
-                     SELECT COUNT(*)
-                     FROM files same_scan
-                     WHERE same_scan.scan_id = f.scan_id
-                       AND f.kind = 'file'
-                       AND same_scan.kind = 'file'
-                       AND same_scan.error IS NULL
-                       AND same_scan.blake3 = f.blake3
-                       AND same_scan.size = f.size
-                   ) AS same_scan_count
-            FROM files f
-            WHERE f.scan_id = ?1 AND f.error IS NULL AND f.path LIKE ?2 ESCAPE '\'
-            ORDER BY path
-            "#,
-        )?;
-        let files = stmt
-            .query_map(params![scan_id, like], |row| {
+        let files = {
+            let mut stmt = tx.prepare(
+                r#"
+                WITH selected_scan AS (
+                    SELECT location_id
+                    FROM scans
+                    WHERE id = ?1
+                ),
+                duplicate_scope AS (
+                    SELECT COALESCE(
+                        l.representative_scan_id,
+                        (
+                            SELECT s2.id
+                            FROM scans s2
+                            WHERE s2.location_id = l.id AND s2.status = 'complete'
+                            ORDER BY s2.started_at DESC
+                            LIMIT 1
+                        )
+                    ) AS scan_id
+                    FROM locations l
+                    WHERE l.disabled = 0 AND l.id != (SELECT location_id FROM selected_scan)
+                )
+                SELECT f.kind, f.path, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode,
+                       (
+                         SELECT COUNT(DISTINCT s2.location_id)
+                         FROM files f2
+                         LEFT JOIN excluded_file_ids excluded_f2 ON excluded_f2.id = f2.id
+                         JOIN scans s2 ON s2.id = f2.scan_id
+                         WHERE excluded_f2.id IS NULL
+                           AND f.kind = 'file'
+                           AND f2.kind = 'file'
+                           AND f2.error IS NULL
+                           AND f2.blake3 = f.blake3
+                           AND f2.size = f.size
+                           AND f2.scan_id IN (SELECT scan_id FROM duplicate_scope WHERE scan_id IS NOT NULL)
+                       ) AS other_location_count,
+                       (
+                         SELECT COUNT(*)
+                         FROM files same_scan
+                         LEFT JOIN excluded_file_ids excluded_same_scan ON excluded_same_scan.id = same_scan.id
+                         WHERE excluded_same_scan.id IS NULL
+                           AND same_scan.scan_id = f.scan_id
+                           AND f.kind = 'file'
+                           AND same_scan.kind = 'file'
+                           AND same_scan.error IS NULL
+                           AND same_scan.blake3 = f.blake3
+                           AND same_scan.size = f.size
+                       ) AS same_scan_count
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                WHERE excluded_f.id IS NULL
+                  AND f.scan_id = ?1 AND f.error IS NULL AND f.path LIKE ?2 ESCAPE '\'
+                ORDER BY path
+                "#,
+            )?;
+            stmt.query_map(params![scan_id, like], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -879,7 +1491,8 @@ impl Database {
                     row.get::<_, u64>(9)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
 
         let mut dirs: std::collections::BTreeMap<String, TreeEntry> =
             std::collections::BTreeMap::new();
@@ -975,11 +1588,68 @@ impl Database {
 
         let mut dir_entries = dirs.into_values().collect::<Vec<_>>();
         dir_entries.append(&mut out);
+        tx.commit()?;
         Ok(dir_entries)
     }
 
+    /// Reads a persisted scan tree page from one SQLite snapshot. Excluded rows
+    /// are materialized before matching, directory aggregation, counting, and
+    /// pagination. `query.limit` and `query.offset` are intentionally ignored:
+    /// this endpoint owns its own page window.
+    pub fn scan_tree_page(
+        &self,
+        scan_id: &str,
+        prefix: &str,
+        limit: Option<u32>,
+        offset: u32,
+        depth: u32,
+        query: Option<&FileSearchQuery>,
+    ) -> Result<TreePage> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        ensure_scan_exists(&tx, scan_id)?;
+
+        // Compute the cache status first. This touches the connection-local
+        // visibility table for its effective scope, so reload the precise tree
+        // scope immediately afterwards before reading tree rows.
+        let duplicate_cache = Self::current_duplicate_cache_status_for_conn(&tx)?;
+        let selected_location_id = scan_location_id(&tx, scan_id)?;
+        let mut visibility_scan_ids = vec![scan_id.to_string()];
+        visibility_scan_ids.extend(duplicate_scope_scan_ids(
+            &tx,
+            selected_location_id.as_deref(),
+        )?);
+        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
+
+        let normalized = normalize_tree_prefix(prefix);
+        let rows = scan_tree_source_rows(&tx, scan_id, &normalized)?;
+        let entries = build_tree_page_entries(rows, &normalized, depth, query.and_then(|q| q.filter.as_ref()))?;
+        let total = entries.len() as u64;
+        let limit = limit.unwrap_or(DEFAULT_TREE_PAGE_LIMIT).max(1);
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(entries.len());
+        let end = start
+            .saturating_add(usize::try_from(limit).unwrap_or(usize::MAX))
+            .min(entries.len());
+        let has_more = end < entries.len();
+        let next_offset = has_more.then(|| u32::try_from(end).unwrap_or(u32::MAX));
+        let page = TreePage {
+            entries: entries.into_iter().skip(start).take(end - start).collect(),
+            limit,
+            offset: u32::try_from(start).unwrap_or(u32::MAX),
+            total,
+            has_more,
+            next_offset,
+            duplicate_cache,
+        };
+        tx.commit()?;
+        Ok(page)
+    }
+
     pub fn delete_check(&self, scan_id: &str, prefix: &str) -> Result<DeleteCheckResult> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let normalized = normalize_tree_prefix(prefix);
         let include_all = normalized.is_empty();
         let selected_paths = if include_all {
@@ -987,12 +1657,15 @@ impl Database {
         } else {
             vec![normalized]
         };
-        prepare_selected_paths(&conn, &selected_paths)?;
-        delete_check_for_selection(&conn, scan_id, include_all, false)
+        prepare_selected_paths(&tx, &selected_paths)?;
+        let result = delete_check_for_selection(&tx, scan_id, include_all, false)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     pub fn delete_check_paths(&self, scan_id: &str, paths: &[String]) -> Result<DeleteCheckResult> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let mut selected_paths = paths
             .iter()
             .map(|path| normalize_file_path(path))
@@ -1000,45 +1673,209 @@ impl Database {
             .collect::<Vec<_>>();
         selected_paths.sort();
         selected_paths.dedup();
-        prepare_selected_paths(&conn, &selected_paths)?;
-        delete_check_for_selection(&conn, scan_id, false, true)
+        prepare_selected_paths(&tx, &selected_paths)?;
+        let result = delete_check_for_selection(&tx, scan_id, false, true)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     pub fn find_files(&self, query: &str, limit: u32) -> Result<Vec<FileRow>> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
-            FROM files f
-            JOIN scans s ON s.id = f.scan_id
-            JOIN locations l ON l.id = s.location_id
-            WHERE f.path LIKE ?1 ESCAPE '\' OR f.name LIKE ?1 ESCAPE '\'
-            ORDER BY s.started_at DESC, f.path
-            LIMIT ?2
-            "#,
-        )?;
-        let rows = stmt.query_map(params![like, limit], file_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let scan_ids = scan_ids_matching_file_query(&tx, &like)?;
+        prepare_excluded_file_ids(&tx, scan_ids)?;
+        let files = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                JOIN scans s ON s.id = f.scan_id
+                JOIN locations l ON l.id = s.location_id
+                WHERE excluded_f.id IS NULL
+                  AND (f.path LIKE ?1 ESCAPE '\' OR f.name LIKE ?1 ESCAPE '\')
+                ORDER BY s.started_at DESC, f.path
+                LIMIT ?2
+                "#,
+            )?;
+            stmt.query_map(params![like, limit], file_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(files)
+    }
+
+    /// Executes the structured `files.search` query against visible indexed
+    /// rows. Scope selection, exclude filtering, AST evaluation, offset, and
+    /// limit all happen inside one read transaction so a hidden row cannot
+    /// consume a page slot or leak through a concurrent exclude update.
+    pub fn search_files(&self, query: &FileSearchQuery) -> Result<Vec<FileRow>> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let scan_ids = search_scope_scan_ids(&tx, query)?;
+        if scan_ids.is_empty() {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+        prepare_search_scope(&tx, &scan_ids)?;
+        prepare_excluded_file_ids(&tx, scan_ids)?;
+        let rows = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256,
+                       f.ctime, f.mtime, f.mode, f.error
+                FROM files f
+                JOIN search_file_scope scope ON scope.scan_id = f.scan_id
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                JOIN scans s ON s.id = f.scan_id
+                JOIN locations l ON l.id = s.location_id
+                WHERE excluded_f.id IS NULL
+                ORDER BY s.started_at DESC, f.path
+                "#,
+            )?;
+            stmt.query_map([], file_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut matches = Vec::new();
+        for file in rows {
+            let matched = query
+                .filter
+                .as_ref()
+                .map(|filter| filter_matches(filter, &file))
+                .transpose()?
+                .unwrap_or(true);
+            if matched {
+                matches.push(file);
+            }
+        }
+        let offset = usize::try_from(query.effective_offset()).unwrap_or(usize::MAX);
+        let limit = usize::try_from(query.effective_limit()).unwrap_or(usize::MAX);
+        let results = matches.into_iter().skip(offset).take(limit).collect();
+        tx.commit()?;
+        Ok(results)
     }
 
     pub fn file_occurrences(&self, blake3: &str, size: u64) -> Result<Vec<FileOccurrence>> {
-        let conn = self.connect()?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT f.scan_id, s.started_at, s.finished_at, s.status, l.slug, l.name,
-                   f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
-            FROM files f
-            JOIN scans s ON s.id = f.scan_id
-            JOIN locations l ON l.id = s.location_id
-            WHERE f.kind = 'file' AND f.error IS NULL AND f.blake3 = ?1 AND f.size = ?2
-            ORDER BY l.slug, s.started_at DESC, f.path
-            "#,
-        )?;
-        let rows = stmt.query_map(params![blake3, size], occurrence_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let scan_ids = scan_ids_with_file_occurrence(&tx, blake3, size)?;
+        prepare_excluded_file_ids(&tx, scan_ids)?;
+        let occurrences = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT f.scan_id, s.started_at, s.finished_at, s.status, l.slug, l.name,
+                       f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                JOIN scans s ON s.id = f.scan_id
+                JOIN locations l ON l.id = s.location_id
+                WHERE excluded_f.id IS NULL
+                  AND f.kind = 'file' AND f.error IS NULL AND f.blake3 = ?1 AND f.size = ?2
+                ORDER BY l.slug, s.started_at DESC, f.path
+                "#,
+            )?;
+            stmt.query_map(params![blake3, size], occurrence_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(occurrences)
+    }
+
+    /// Validates a visible file origin and pages its visible content
+    /// occurrences in one consistent snapshot. This is the transport-safe
+    /// replacement for an origin visibility check followed by a separate
+    /// `file_occurrences` call.
+    pub fn visible_file_occurrences_page(
+        &self,
+        scan_id: &str,
+        path: &str,
+        blake3: &str,
+        size: u64,
+        requested_limit: u32,
+        requested_offset: u64,
+    ) -> Result<FileOccurrencePage> {
+        let path = normalize_file_path(path);
+        if path.is_empty() {
+            anyhow::bail!("file occurrence origin must not be the scan root");
+        }
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        ensure_scan_exists(&tx, scan_id)?;
+        let mut visibility_scan_ids = scan_ids_with_file_occurrence(&tx, blake3, size)?;
+        if !visibility_scan_ids.iter().any(|candidate| candidate == scan_id) {
+            visibility_scan_ids.push(scan_id.to_string());
+        }
+        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
+
+        let origin = tx
+            .query_row(
+                r#"
+                SELECT f.kind, f.blake3, f.size
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                WHERE excluded_f.id IS NULL
+                  AND f.scan_id = ?1
+                  AND f.path = ?2
+                  AND f.error IS NULL
+                "#,
+                params![scan_id, path],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u64>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| "file occurrence origin was not found or is excluded")?;
+        if origin.0 != "file" {
+            anyhow::bail!("file occurrence origin must be a file");
+        }
+        if origin.1 != blake3 || origin.2 != size {
+            anyhow::bail!("file occurrence origin does not match the requested content hash");
+        }
+
+        let occurrences = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT f.scan_id, s.started_at, s.finished_at, s.status, l.slug, l.name,
+                       f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                JOIN scans s ON s.id = f.scan_id
+                JOIN locations l ON l.id = s.location_id
+                WHERE excluded_f.id IS NULL
+                  AND f.kind = 'file'
+                  AND f.error IS NULL
+                  AND f.blake3 = ?1
+                  AND f.size = ?2
+                ORDER BY l.slug, s.started_at DESC, f.path
+                "#,
+            )?;
+            stmt.query_map(params![blake3, size], occurrence_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let total = occurrences.len();
+        let limit = requested_limit.max(1);
+        let start = usize::try_from(requested_offset)
+            .unwrap_or(usize::MAX)
+            .min(total);
+        let end = start
+            .saturating_add(usize::try_from(limit).unwrap_or(usize::MAX))
+            .min(total);
+        let has_more = end < total;
+        let page = FileOccurrencePage {
+            occurrences: occurrences.into_iter().skip(start).take(end - start).collect(),
+            total: u64::try_from(total).unwrap_or(u64::MAX),
+            limit,
+            offset: u64::try_from(start).unwrap_or(u64::MAX),
+            has_more,
+            next_offset: has_more.then(|| u64::try_from(end).unwrap_or(u64::MAX)),
+        };
+        tx.commit()?;
+        Ok(page)
     }
 
     pub fn thumbnail(&self, blake3: &str, size: u64) -> Result<Option<StoredThumbnail>> {
@@ -1098,39 +1935,46 @@ impl Database {
         prefix: &str,
         recursive: bool,
     ) -> Result<Vec<ThumbnailCandidate>> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        prepare_excluded_file_ids(&tx, [scan_id.to_string()])?;
         let normalized = normalize_tree_prefix(prefix);
         let like = if normalized.is_empty() {
             "%".to_string()
         } else {
             format!("{}%", normalized.replace('%', "\\%").replace('_', "\\_"))
         };
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT f.blake3, f.size, f.path
-            FROM files f
-            WHERE f.scan_id = ?1
-              AND f.kind = 'file'
-              AND f.error IS NULL
-              AND f.path LIKE ?2 ESCAPE '\'
-              AND (?3 OR instr(substr(f.path, length(?4) + 1), '/') = 0)
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM file_thumbnails t
-                  WHERE t.blake3 = f.blake3 AND t.size = f.size
-              )
-            ORDER BY f.path
-            "#,
-        )?;
-        let rows = stmt.query_map(params![scan_id, like, recursive, normalized], |row| {
-            Ok(ThumbnailCandidate {
-                blake3: row.get(0)?,
-                size: row.get(1)?,
-                path: row.get(2)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let candidates = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT f.blake3, f.size, f.path
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                WHERE excluded_f.id IS NULL
+                  AND f.scan_id = ?1
+                  AND f.kind = 'file'
+                  AND f.error IS NULL
+                  AND f.path LIKE ?2 ESCAPE '\'
+                  AND (?3 OR instr(substr(f.path, length(?4) + 1), '/') = 0)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM file_thumbnails t
+                      WHERE t.blake3 = f.blake3 AND t.size = f.size
+                  )
+                ORDER BY f.path
+                "#,
+            )?;
+            stmt.query_map(params![scan_id, like, recursive, normalized], |row| {
+                Ok(ThumbnailCandidate {
+                    blake3: row.get(0)?,
+                    size: row.get(1)?,
+                    path: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(candidates)
     }
 
     pub fn thumbnail_candidates_paths(
@@ -1139,7 +1983,9 @@ impl Database {
         paths: &[String],
         recursive: bool,
     ) -> Result<Vec<ThumbnailCandidate>> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        prepare_excluded_file_ids(&tx, [scan_id.to_string()])?;
         let mut selected_paths = paths
             .iter()
             .map(|path| normalize_file_path(path))
@@ -1147,140 +1993,149 @@ impl Database {
             .collect::<Vec<_>>();
         selected_paths.sort();
         selected_paths.dedup();
-        prepare_selected_paths(&conn, &selected_paths)?;
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT DISTINCT f.blake3, f.size, f.path
-            FROM files f
-            WHERE f.scan_id = ?1
-              AND f.kind = 'file'
-              AND f.error IS NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM selected_paths p
-                  WHERE f.path = p.path
-                     OR (
-                         substr(f.path, 1, length(p.path) + 1) = p.path || '/'
-                         AND (?2 OR instr(substr(f.path, length(p.path) + 2), '/') = 0)
-                     )
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM file_thumbnails t
-                  WHERE t.blake3 = f.blake3 AND t.size = f.size
-              )
-            ORDER BY f.path
-            "#,
-        )?;
-        let rows = stmt.query_map(params![scan_id, recursive], |row| {
-            Ok(ThumbnailCandidate {
-                blake3: row.get(0)?,
-                size: row.get(1)?,
-                path: row.get(2)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        prepare_selected_paths(&tx, &selected_paths)?;
+        let candidates = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT DISTINCT f.blake3, f.size, f.path
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                WHERE excluded_f.id IS NULL
+                  AND f.scan_id = ?1
+                  AND f.kind = 'file'
+                  AND f.error IS NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM selected_paths p
+                      WHERE f.path = p.path
+                         OR (
+                             substr(f.path, 1, length(p.path) + 1) = p.path || '/'
+                             AND (?2 OR instr(substr(f.path, length(p.path) + 2), '/') = 0)
+                         )
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM file_thumbnails t
+                      WHERE t.blake3 = f.blake3 AND t.size = f.size
+                  )
+                ORDER BY f.path
+                "#,
+            )?;
+            stmt.query_map(params![scan_id, recursive], |row| {
+                Ok(ThumbnailCandidate {
+                    blake3: row.get(0)?,
+                    size: row.get(1)?,
+                    path: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(candidates)
     }
 
     pub fn duplicate_groups(&self, limit: u32) -> Result<Vec<DuplicateGroup>> {
-        let conn = self.connect()?;
-        let mut stmt = conn.prepare(
-            r#"
-            WITH duplicate_scope AS (
-                SELECT l.id AS location_id,
-                       COALESCE(
-                           l.representative_scan_id,
-                           (
-                               SELECT s2.id
-                               FROM scans s2
-                               WHERE s2.location_id = l.id AND s2.status = 'complete'
-                               ORDER BY s2.started_at DESC
-                               LIMIT 1
-                           )
-                       ) AS scan_id
-                FROM locations l
-                WHERE l.disabled = 0
-            )
-            SELECT f.blake3, f.size, COUNT(DISTINCT ds.location_id) AS copies
-            FROM files f
-            JOIN duplicate_scope ds ON ds.scan_id = f.scan_id
-            WHERE f.kind = 'file' AND f.error IS NULL AND f.size > 0
-            GROUP BY f.blake3, f.size
-            HAVING COUNT(DISTINCT ds.location_id) > 1
-            ORDER BY size DESC
-            LIMIT ?1
-            "#,
-        )?;
-        let groups = stmt
-            .query_map([limit], |row| {
+        self.duplicate_groups_for_scans(limit, &[])
+    }
+
+    /// Returns duplicate groups from either an explicit scan selection or the
+    /// normal representative/latest-complete scan scope when no scans are
+    /// selected. A group requires files from at least two locations, even when
+    /// callers select multiple scans from the same location.
+    pub fn duplicate_groups_for_scans(
+        &self,
+        limit: u32,
+        scan_ids: &[String],
+    ) -> Result<Vec<DuplicateGroup>> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let visibility_scan_ids = prepare_duplicate_group_scope(&tx, scan_ids)?;
+        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
+        let groups = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT f.blake3, f.size, COUNT(DISTINCT scope.location_id) AS copies
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                JOIN duplicate_group_scope scope ON scope.scan_id = f.scan_id
+                WHERE excluded_f.id IS NULL
+                  AND f.kind = 'file' AND f.error IS NULL AND f.size > 0
+                GROUP BY f.blake3, f.size
+                HAVING COUNT(DISTINCT scope.location_id) > 1
+                ORDER BY size DESC
+                LIMIT ?1
+                "#,
+            )?;
+            stmt.query_map([limit], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, u64>(1)?,
                     row.get::<_, u64>(2)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
 
         let mut out = Vec::new();
         for (blake3, size, count) in groups {
-            let mut files_stmt = conn.prepare(
-                r#"
-                WITH duplicate_scope AS (
-                    SELECT l.id AS location_id,
-                           COALESCE(
-                               l.representative_scan_id,
-                               (
-                                   SELECT s2.id
-                                   FROM scans s2
-                                   WHERE s2.location_id = l.id AND s2.status = 'complete'
-                                   ORDER BY s2.started_at DESC
-                                   LIMIT 1
-                               )
-                           ) AS scan_id
-                    FROM locations l
-                    WHERE l.disabled = 0
-                )
-                SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
-                FROM files f
-                JOIN scans s ON s.id = f.scan_id
-                JOIN locations l ON l.id = s.location_id
-                JOIN duplicate_scope ds ON ds.scan_id = f.scan_id
-                WHERE f.kind = 'file' AND f.blake3 = ?1 AND f.size = ?2
-                  AND f.id IN (
-                    SELECT MIN(scoped.id)
-                    FROM files scoped
-                    JOIN duplicate_scope scoped_ds ON scoped_ds.scan_id = scoped.scan_id
-                    WHERE scoped.kind = 'file' AND scoped.blake3 = ?1 AND scoped.size = ?2 AND scoped.error IS NULL
-                    GROUP BY scoped.scan_id
-                  )
-                ORDER BY l.slug, f.path
-                "#,
-            )?;
-            let files = files_stmt
-                .query_map(params![blake3, size], file_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let files = {
+                let mut files_stmt = tx.prepare(
+                    r#"
+                    SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
+                    FROM files f
+                    LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                    JOIN scans s ON s.id = f.scan_id
+                    JOIN locations l ON l.id = s.location_id
+                    JOIN duplicate_group_scope scope ON scope.scan_id = f.scan_id
+                    WHERE excluded_f.id IS NULL
+                      AND f.kind = 'file' AND f.blake3 = ?1 AND f.size = ?2
+                      AND f.id IN (
+                        SELECT MIN(scoped.id)
+                        FROM files scoped
+                        LEFT JOIN excluded_file_ids excluded_scoped ON excluded_scoped.id = scoped.id
+                        JOIN duplicate_group_scope scoped_scope ON scoped_scope.scan_id = scoped.scan_id
+                        WHERE excluded_scoped.id IS NULL
+                          AND scoped.kind = 'file' AND scoped.blake3 = ?1 AND scoped.size = ?2 AND scoped.error IS NULL
+                        GROUP BY scoped.scan_id
+                      )
+                    ORDER BY l.slug, f.path
+                    "#,
+                )?;
+                files_stmt
+                    .query_map(params![blake3, size], file_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let file_kind =
+                duplicate_group_file_kind(files.iter().map(|file| file.file_kind.as_str()));
             out.push(DuplicateGroup {
                 blake3,
                 size,
                 count,
+                file_kind,
                 files,
             });
         }
+        tx.commit()?;
         Ok(out)
     }
 
     pub fn overview(&self) -> Result<Overview> {
-        let conn = self.connect()?;
-        let location_count = scalar_u64(&conn, "SELECT COUNT(*) FROM locations")?;
-        let scan_count = scalar_u64(&conn, "SELECT COUNT(*) FROM scans")?;
-        let file_count = scalar_u64(&conn, "SELECT COUNT(*) FROM files WHERE kind = 'file'")?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let visibility_scan_ids = duplicate_scope_scan_ids(&tx, None)?;
+        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
+        let location_count = scalar_u64(&tx, "SELECT COUNT(*) FROM locations")?;
+        let scan_count = scalar_u64(&tx, "SELECT COUNT(*) FROM scans")?;
+        // These inventory totals intentionally stay physical: excludes are
+        // non-destructive per-scan query filters, not a mutation of stored
+        // scan counts or indexed bytes.
+        let file_count = scalar_u64(&tx, "SELECT COUNT(*) FROM files WHERE kind = 'file'")?;
         let total_bytes = scalar_u64(
-            &conn,
+            &tx,
             "SELECT COALESCE(SUM(size), 0) FROM files WHERE kind = 'file' AND error IS NULL",
         )?;
         let duplicate_groups = scalar_u64(
-            &conn,
+            &tx,
             r#"
             WITH duplicate_scope AS (
                 SELECT l.id AS location_id,
@@ -1301,20 +2156,24 @@ impl Database {
             FROM (
                 SELECT 1
                 FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
                 JOIN duplicate_scope ds ON ds.scan_id = f.scan_id
-                WHERE f.kind = 'file' AND f.error IS NULL AND f.size > 0
+                WHERE excluded_f.id IS NULL
+                  AND f.kind = 'file' AND f.error IS NULL AND f.size > 0
                 GROUP BY f.blake3, f.size
                 HAVING COUNT(DISTINCT ds.location_id) > 1
             )
             "#,
         )?;
-        Ok(Overview {
+        let overview = Overview {
             location_count,
             scan_count,
             file_count,
             total_bytes,
             duplicate_groups,
-        })
+        };
+        tx.commit()?;
+        Ok(overview)
     }
 }
 
@@ -1329,6 +2188,98 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(columns.iter().any(|name| name == column))
+}
+
+/// SQLite cannot alter a CHECK constraint in place. Older databases accepted
+/// only local/disk/nas location types, so rebuild that one table when its
+/// stored DDL does not admit `unknown`. Foreign-key enforcement is disabled
+/// only for the table swap, then the rebuilt graph is checked before commit.
+fn migrate_locations_type_check(conn: &mut Connection) -> Result<()> {
+    if locations_type_check_supports_unknown(conn)? {
+        return Ok(());
+    }
+
+    let foreign_keys_enabled = conn.query_row("PRAGMA foreign_keys", [], |row| {
+        row.get::<_, i64>(0)
+    })? != 0;
+    if foreign_keys_enabled {
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+    }
+
+    let migration_result = (|| -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            r#"
+            CREATE TABLE locations__type_unknown_migration (
+                id TEXT PRIMARY KEY,
+                slug TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL CHECK (type IN ('unknown', 'local', 'disk', 'nas')),
+                root_path TEXT NOT NULL,
+                notes TEXT,
+                representative_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL,
+                disabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            INSERT INTO locations__type_unknown_migration (
+                id, slug, name, type, root_path, notes, representative_scan_id, disabled,
+                created_at
+            )
+            SELECT id, slug, name, type, root_path, notes, representative_scan_id, disabled,
+                   created_at
+            FROM locations;
+
+            DROP TABLE locations;
+            ALTER TABLE locations__type_unknown_migration RENAME TO locations;
+            CREATE INDEX idx_locations_slug ON locations(slug);
+            "#,
+        )?;
+        ensure_foreign_keys_valid(&tx)?;
+        tx.commit()?;
+        Ok(())
+    })();
+
+    let restore_foreign_keys_result = if foreign_keys_enabled {
+        conn.pragma_update(None, "foreign_keys", "ON")
+    } else {
+        Ok(())
+    };
+
+    match migration_result {
+        Ok(()) => {
+            restore_foreign_keys_result?;
+            Ok(())
+        }
+        Err(error) => {
+            restore_foreign_keys_result?;
+            Err(error)
+        }
+    }
+}
+
+fn locations_type_check_supports_unknown(conn: &Connection) -> Result<bool> {
+    let schema: String = conn.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'locations'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(schema.to_ascii_lowercase().contains("'unknown'"))
+}
+
+fn ensure_foreign_keys_valid(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = statement.query([])?;
+    if let Some(row) = rows.next()? {
+        let table: String = row.get(0)?;
+        let rowid: Option<i64> = row.get(1)?;
+        let parent: String = row.get(2)?;
+        anyhow::bail!(
+            "foreign-key check failed after locations type migration: table={table}, rowid={}, parent={parent}",
+            rowid.map_or_else(|| "unknown".to_string(), |value| value.to_string())
+        );
+    }
+    Ok(())
 }
 
 fn normalize_tree_prefix(prefix: &str) -> String {
@@ -1460,6 +2411,837 @@ fn scan_exclude_patterns_from_conn(conn: &Connection, scan_id: &str) -> Result<V
         .map_err(Into::into)
 }
 
+/// Builds the connection-local exclusion set for a public query.
+///
+/// The raw `files` table stays authoritative for ingestion, scan reuse, and
+/// stored counts. Public query methods anti-join this temporary table only
+/// after this function has applied every involved scan's matcher in Rust.
+fn prepare_excluded_file_ids<I>(conn: &Connection, scan_ids: I) -> Result<()>
+where
+    I: IntoIterator<Item = String>,
+{
+    let visibility = ScanVisibility::load(conn, scan_ids)?;
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS excluded_file_ids (id INTEGER PRIMARY KEY)",
+        [],
+    )?;
+    conn.execute("DELETE FROM excluded_file_ids", [])?;
+
+    let mut files_stmt = conn.prepare("SELECT id, path, kind FROM files WHERE scan_id = ?1")?;
+    let mut insert_stmt =
+        conn.prepare("INSERT OR IGNORE INTO excluded_file_ids (id) VALUES (?1)")?;
+
+    for (scan_id, matcher) in &visibility.matchers {
+        let Some(matcher) = matcher else {
+            continue;
+        };
+        let rows = files_stmt.query_map([scan_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, path, kind) = row?;
+            if scan_path_is_excluded(matcher, &path, kind == "dir") {
+                insert_stmt.execute([id])?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn scan_tree_source_rows(
+    conn: &Connection,
+    scan_id: &str,
+    normalized_prefix: &str,
+) -> Result<Vec<TreeSourceRow>> {
+    let like = if normalized_prefix.is_empty() {
+        "%".to_string()
+    } else {
+        format!(
+            "{}%",
+            normalized_prefix.replace('%', "\\%").replace('_', "\\_")
+        )
+    };
+    let mut stmt = conn.prepare(
+        r#"
+        WITH selected_scan AS (
+            SELECT location_id FROM scans WHERE id = ?1
+        ),
+        duplicate_scope AS (
+            SELECT COALESCE(
+                l.representative_scan_id,
+                (
+                    SELECT s2.id
+                    FROM scans s2
+                    WHERE s2.location_id = l.id AND s2.status = 'complete'
+                    ORDER BY s2.started_at DESC
+                    LIMIT 1
+                )
+            ) AS scan_id
+            FROM locations l
+            WHERE l.disabled = 0
+              AND l.id != (SELECT location_id FROM selected_scan)
+        )
+        SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256,
+               f.ctime, f.mtime, f.mode, f.error,
+               (
+                   SELECT COUNT(DISTINCT s2.location_id)
+                   FROM files f2
+                   LEFT JOIN excluded_file_ids excluded_f2 ON excluded_f2.id = f2.id
+                   JOIN scans s2 ON s2.id = f2.scan_id
+                   WHERE excluded_f2.id IS NULL
+                     AND f.kind = 'file'
+                     AND f2.kind = 'file'
+                     AND f2.error IS NULL
+                     AND f2.blake3 = f.blake3
+                     AND f2.size = f.size
+                     AND f2.scan_id IN (SELECT scan_id FROM duplicate_scope WHERE scan_id IS NOT NULL)
+               ) AS other_location_count,
+               (
+                   SELECT COUNT(*)
+                   FROM files same_scan
+                   LEFT JOIN excluded_file_ids excluded_same_scan ON excluded_same_scan.id = same_scan.id
+                   WHERE excluded_same_scan.id IS NULL
+                     AND f.kind = 'file'
+                     AND same_scan.scan_id = f.scan_id
+                     AND same_scan.kind = 'file'
+                     AND same_scan.error IS NULL
+                     AND same_scan.blake3 = f.blake3
+                     AND same_scan.size = f.size
+               ) AS same_scan_count
+        FROM files f
+        LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+        JOIN scans s ON s.id = f.scan_id
+        JOIN locations l ON l.id = s.location_id
+        WHERE excluded_f.id IS NULL
+          AND f.scan_id = ?1
+          AND f.error IS NULL
+          AND f.path LIKE ?2 ESCAPE '\\'
+        ORDER BY f.path
+        "#,
+    )?;
+    let rows = stmt.query_map(params![scan_id, like], |row| {
+        let name: String = row.get(5)?;
+        Ok(TreeSourceRow {
+            file: FileRow {
+                scan_id: row.get(0)?,
+                location_slug: row.get(1)?,
+                location_name: row.get(2)?,
+                file_kind: semantic_file_kind(&name).to_string(),
+                kind: row.get(3)?,
+                path: row.get(4)?,
+                name,
+                size: row.get(6)?,
+                blake3: row.get(7)?,
+                sha256: row.get(8)?,
+                ctime: row.get(9)?,
+                mtime: row.get(10)?,
+                mode: row.get(11)?,
+                error: row.get(12)?,
+            },
+            other_location_count: row.get(13)?,
+            same_scan_count: row.get(14)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn build_tree_page_entries(
+    rows: Vec<TreeSourceRow>,
+    normalized_prefix: &str,
+    depth: u32,
+    filter: Option<&FileSearchFilter>,
+) -> Result<Vec<TreeEntry>> {
+    let mut directories = BTreeMap::<String, TreeEntry>::new();
+    let mut files = BTreeMap::<String, TreeEntry>::new();
+
+    for row in rows {
+        let matches = filter
+            .map(|filter| filter_matches(filter, &row.file))
+            .transpose()?
+            .unwrap_or(true);
+        if !matches {
+            continue;
+        }
+        let Some(relative) = row.file.path.strip_prefix(normalized_prefix) else {
+            continue;
+        };
+        if relative.is_empty() {
+            continue;
+        }
+        let parts = relative
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let is_file = row.file.kind == "file";
+        let directory_parts = if is_file {
+            parts.len().saturating_sub(1)
+        } else {
+            parts.len()
+        };
+        let duplicate_file_count = u64::from(is_file && row.other_location_count > 0);
+        let original_file_count = u64::from(is_file && row.other_location_count == 0);
+        let same_scan_duplicate_file_count = u64::from(is_file && row.same_scan_count > 1);
+
+        for index in 1..=directory_parts {
+            if depth != 0 && index > depth as usize {
+                break;
+            }
+            let path = format!("{}{}", normalized_prefix, parts[..index].join("/"));
+            let entry = directories.entry(path.clone()).or_insert_with(|| TreeEntry {
+                name: parts[index - 1].to_string(),
+                path,
+                kind: "dir".to_string(),
+                size: 0,
+                file_count: 0,
+                blake3: None,
+                sha256: None,
+                ctime: None,
+                mtime: None,
+                mode: None,
+                duplicate_file_count: 0,
+                original_file_count: 0,
+                same_scan_duplicate_file_count: 0,
+            });
+            if !is_file && index == directory_parts {
+                entry.ctime = row.file.ctime.clone();
+                entry.mtime = row.file.mtime.clone();
+                entry.mode = row.file.mode;
+            }
+            if is_file {
+                entry.size = entry.size.saturating_add(row.file.size);
+                entry.file_count = entry.file_count.saturating_add(1);
+                entry.duplicate_file_count = entry
+                    .duplicate_file_count
+                    .saturating_add(duplicate_file_count);
+                entry.original_file_count = entry
+                    .original_file_count
+                    .saturating_add(original_file_count);
+                entry.same_scan_duplicate_file_count = entry
+                    .same_scan_duplicate_file_count
+                    .saturating_add(same_scan_duplicate_file_count);
+            }
+        }
+
+        if is_file && (depth == 0 || parts.len() <= depth as usize) {
+            let name = parts
+                .last()
+                .copied()
+                .unwrap_or(row.file.name.as_str())
+                .to_string();
+            files.insert(
+                row.file.path.clone(),
+                TreeEntry {
+                    name,
+                    path: row.file.path,
+                    kind: "file".to_string(),
+                    size: row.file.size,
+                    file_count: 1,
+                    blake3: Some(row.file.blake3),
+                    sha256: Some(row.file.sha256),
+                    ctime: row.file.ctime,
+                    mtime: row.file.mtime,
+                    mode: row.file.mode,
+                    duplicate_file_count,
+                    original_file_count,
+                    same_scan_duplicate_file_count,
+                },
+            );
+        }
+    }
+
+    directories.extend(files);
+    Ok(directories.into_values().collect())
+}
+
+fn prepare_search_scope(conn: &Connection, scan_ids: &[String]) -> Result<()> {
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS search_file_scope (scan_id TEXT PRIMARY KEY)",
+        [],
+    )?;
+    conn.execute("DELETE FROM search_file_scope", [])?;
+    let mut insert = conn.prepare("INSERT OR IGNORE INTO search_file_scope (scan_id) VALUES (?1)")?;
+    for scan_id in scan_ids {
+        insert.execute([scan_id])?;
+    }
+    Ok(())
+}
+
+fn search_scope_scan_ids(conn: &Connection, query: &FileSearchQuery) -> Result<Vec<String>> {
+    if let Some(requested) = query.scan_ids.as_ref().filter(|ids| !ids.is_empty()) {
+        let mut stmt = conn.prepare("SELECT id FROM scans WHERE id = ?1")?;
+        let mut scan_ids = Vec::new();
+        let mut seen = HashSet::new();
+        for requested_id in requested {
+            if !seen.insert(requested_id) {
+                continue;
+            }
+            if let Some(scan_id) = stmt
+                .query_row([requested_id], |row| row.get::<_, String>(0))
+                .optional()?
+            {
+                scan_ids.push(scan_id);
+            }
+        }
+        return Ok(scan_ids);
+    }
+
+    if query.representative_only == Some(false) {
+        let mut stmt = conn.prepare("SELECT id FROM scans ORDER BY started_at DESC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        return rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into);
+    }
+
+    duplicate_scope_scan_ids(conn, None)
+}
+
+fn scan_path_has_excluded_descendants_in_conn(
+    conn: &Connection,
+    scan_id: &str,
+    path: &str,
+) -> Result<bool> {
+    let visibility = ScanVisibility::load(conn, [scan_id.to_string()])?;
+    let Some(Some(matcher)) = visibility.matchers.get(scan_id) else {
+        return Ok(false);
+    };
+    let descendant_like = format!("{}/%", path.replace('%', "\\%").replace('_', "\\_"));
+    let mut stmt = conn.prepare(
+        "SELECT path, kind FROM files WHERE scan_id = ?1 AND path LIKE ?2 ESCAPE '\\'",
+    )?;
+    let rows = stmt.query_map(params![scan_id, descendant_like], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (child_path, kind) = row?;
+        let normalized_child = normalize_file_path(&child_path);
+        if !normalized_child.is_empty()
+            && matcher
+                .matched_path_or_any_parents(Path::new(&normalized_child), kind == "dir")
+                .is_ignore()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn scan_location_id(conn: &Connection, scan_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT location_id FROM scans WHERE id = ?1",
+        [scan_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Materializes the scan/location pairs used by duplicate grouping.
+///
+/// Explicit selections retain every existing selected scan. An empty selection
+/// retains the long-standing enabled-location representative/latest-complete
+/// scope used by `duplicate_groups`.
+fn prepare_duplicate_group_scope(
+    conn: &Connection,
+    requested_scan_ids: &[String],
+) -> Result<Vec<String>> {
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS duplicate_group_scope (scan_id TEXT PRIMARY KEY, location_id TEXT NOT NULL)",
+        [],
+    )?;
+    conn.execute("DELETE FROM duplicate_group_scope", [])?;
+
+    let mut insert_stmt = conn.prepare(
+        "INSERT OR IGNORE INTO duplicate_group_scope (scan_id, location_id) VALUES (?1, ?2)",
+    )?;
+    let mut scope_scan_ids = Vec::new();
+
+    if requested_scan_ids.is_empty() {
+        let mut scope_stmt = conn.prepare(
+            r#"
+            SELECT l.id,
+                   COALESCE(
+                       l.representative_scan_id,
+                       (
+                           SELECT s2.id
+                           FROM scans s2
+                           WHERE s2.location_id = l.id AND s2.status = 'complete'
+                           ORDER BY s2.started_at DESC
+                           LIMIT 1
+                       )
+                   ) AS scan_id
+            FROM locations l
+            WHERE l.disabled = 0
+            "#,
+        )?;
+        let rows = scope_stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (location_id, scan_id) = row?;
+            if let Some(scan_id) = scan_id {
+                insert_stmt.execute(params![&scan_id, &location_id])?;
+                scope_scan_ids.push(scan_id);
+            }
+        }
+    } else {
+        let mut scan_stmt = conn.prepare("SELECT id, location_id FROM scans WHERE id = ?1")?;
+        let mut seen = HashSet::new();
+        for scan_id in requested_scan_ids {
+            if !seen.insert(scan_id) {
+                continue;
+            }
+            let scan = scan_stmt
+                .query_row([scan_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .optional()?;
+            if let Some((scan_id, location_id)) = scan {
+                insert_stmt.execute(params![&scan_id, &location_id])?;
+                scope_scan_ids.push(scan_id);
+            }
+        }
+    }
+
+    Ok(scope_scan_ids)
+}
+
+fn duplicate_scope_scan_ids(
+    conn: &Connection,
+    excluded_location_id: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT COALESCE(
+            l.representative_scan_id,
+            (
+                SELECT s2.id
+                FROM scans s2
+                WHERE s2.location_id = l.id AND s2.status = 'complete'
+                ORDER BY s2.started_at DESC
+                LIMIT 1
+            )
+        )
+        FROM locations l
+        WHERE l.disabled = 0
+          AND (?1 IS NULL OR l.id != ?1)
+        "#,
+    )?;
+    let rows = stmt.query_map([excluded_location_id], |row| row.get::<_, Option<String>>(0))?;
+    let mut scan_ids = Vec::new();
+    for row in rows {
+        if let Some(scan_id) = row? {
+            scan_ids.push(scan_id);
+        }
+    }
+    Ok(scan_ids)
+}
+
+#[derive(Clone, Debug)]
+struct DuplicateScope {
+    fingerprint: String,
+    payload_json: String,
+    scans: Vec<DuplicateScopeScan>,
+    total_visible_files: u64,
+}
+
+#[derive(Clone, Debug)]
+struct DuplicateScopeScan {
+    location_id: String,
+    location_slug: String,
+    scan_id: String,
+    started_at: String,
+    finished_at: Option<String>,
+    file_count: u64,
+    dir_count: u64,
+    error_count: u64,
+    total_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+struct DuplicateScopeLocationRow {
+    location_id: String,
+    location_slug: String,
+    representative_scan_id: Option<String>,
+    scan_id: Option<String>,
+    status: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    file_count: Option<u64>,
+    dir_count: Option<u64>,
+    error_count: Option<u64>,
+    total_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DuplicateScopePayload {
+    version: u8,
+    locations: Vec<DuplicateScopeLocationPayload>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DuplicateScopeLocationPayload {
+    location_id: String,
+    location_slug: String,
+    representative_scan_id: Option<String>,
+    effective_scan: Option<DuplicateScopeScanPayload>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DuplicateScopeScanPayload {
+    scan_id: String,
+    status: String,
+    started_at: String,
+    finished_at: Option<String>,
+    file_count: u64,
+    dir_count: u64,
+    error_count: u64,
+    total_bytes: u64,
+    visible_file_count: u64,
+    visible_total_bytes: u64,
+    exclude_patterns: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct DuplicateCacheFile {
+    scan_id: String,
+    location_id: String,
+    path: String,
+    blake3: String,
+    size: u64,
+}
+
+#[derive(Clone, Debug)]
+struct DuplicatePathCounts {
+    kind: String,
+    duplicate_file_count: u64,
+    original_file_count: u64,
+    same_scan_duplicate_file_count: u64,
+}
+
+fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> {
+    let mut stmt = conn.prepare(
+        r#"
+        WITH effective_locations AS (
+            SELECT l.id AS location_id,
+                   l.slug AS location_slug,
+                   l.representative_scan_id,
+                   COALESCE(
+                       l.representative_scan_id,
+                       (
+                           SELECT s2.id
+                           FROM scans s2
+                           WHERE s2.location_id = l.id AND s2.status = 'complete'
+                           ORDER BY s2.started_at DESC
+                           LIMIT 1
+                       )
+                   ) AS effective_scan_id
+            FROM locations l
+            WHERE l.disabled = 0
+        )
+        SELECT e.location_id, e.location_slug, e.representative_scan_id,
+               s.id, s.status, s.started_at, s.finished_at,
+               s.file_count, s.dir_count, s.error_count, s.total_bytes
+        FROM effective_locations e
+        LEFT JOIN scans s ON s.id = e.effective_scan_id
+        ORDER BY e.location_slug, e.location_id
+        "#,
+    )?;
+    let location_rows = stmt
+        .query_map([], |row| {
+            Ok(DuplicateScopeLocationRow {
+                location_id: row.get(0)?,
+                location_slug: row.get(1)?,
+                representative_scan_id: row.get(2)?,
+                scan_id: row.get(3)?,
+                status: row.get(4)?,
+                started_at: row.get(5)?,
+                finished_at: row.get(6)?,
+                file_count: row.get(7)?,
+                dir_count: row.get(8)?,
+                error_count: row.get(9)?,
+                total_bytes: row.get(10)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if location_rows.is_empty() {
+        return Ok(None);
+    }
+
+    let scan_ids = location_rows
+        .iter()
+        .filter_map(|row| row.scan_id.clone())
+        .collect::<Vec<_>>();
+    prepare_excluded_file_ids(conn, scan_ids.clone())?;
+
+    let mut locations = Vec::with_capacity(location_rows.len());
+    let mut scans = Vec::with_capacity(scan_ids.len());
+    let mut total_visible_files = 0;
+    for row in location_rows {
+        let effective_scan = if let Some(scan_id) = row.scan_id {
+            let (visible_file_count, visible_total_bytes) = visible_scan_file_totals(conn, &scan_id)?;
+            total_visible_files = total_visible_files.saturating_add(visible_file_count);
+            let exclude_patterns = scan_exclude_patterns_from_conn(conn, &scan_id)?;
+            let status = row.status.unwrap_or_default();
+            let started_at = row.started_at.unwrap_or_default();
+            let file_count = row.file_count.unwrap_or(0);
+            let dir_count = row.dir_count.unwrap_or(0);
+            let error_count = row.error_count.unwrap_or(0);
+            let total_bytes = row.total_bytes.unwrap_or(0);
+            scans.push(DuplicateScopeScan {
+                location_id: row.location_id.clone(),
+                location_slug: row.location_slug.clone(),
+                scan_id: scan_id.clone(),
+                started_at: started_at.clone(),
+                finished_at: row.finished_at.clone(),
+                file_count,
+                dir_count,
+                error_count,
+                total_bytes,
+            });
+            Some(DuplicateScopeScanPayload {
+                scan_id,
+                status,
+                started_at,
+                finished_at: row.finished_at,
+                file_count,
+                dir_count,
+                error_count,
+                total_bytes,
+                visible_file_count,
+                visible_total_bytes,
+                exclude_patterns,
+            })
+        } else {
+            None
+        };
+        locations.push(DuplicateScopeLocationPayload {
+            location_id: row.location_id,
+            location_slug: row.location_slug,
+            representative_scan_id: row.representative_scan_id,
+            effective_scan,
+        });
+    }
+
+    let payload_json = serde_json::to_string(&DuplicateScopePayload {
+        version: 2,
+        locations,
+    })?;
+    let fingerprint = blake3::hash(payload_json.as_bytes()).to_hex().to_string();
+    Ok(Some(DuplicateScope {
+        fingerprint,
+        payload_json,
+        scans,
+        total_visible_files,
+    }))
+}
+
+fn visible_scan_file_totals(conn: &Connection, scan_id: &str) -> Result<(u64, u64)> {
+    conn.query_row(
+        r#"
+        SELECT COUNT(*), COALESCE(SUM(f.size), 0)
+        FROM files f
+        LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+        WHERE excluded_f.id IS NULL
+          AND f.scan_id = ?1
+          AND f.kind = 'file'
+          AND f.error IS NULL
+        "#,
+        [scan_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(Into::into)
+}
+
+fn duplicate_cache_scope_files(
+    conn: &Connection,
+    scans: &[DuplicateScopeScan],
+) -> Result<Vec<DuplicateCacheFile>> {
+    if scans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scan_ids = scans
+        .iter()
+        .map(|scan| scan.scan_id.clone())
+        .collect::<Vec<_>>();
+    prepare_excluded_file_ids(conn, scan_ids.clone())?;
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS duplicate_cache_file_scope (scan_id TEXT PRIMARY KEY)",
+        [],
+    )?;
+    conn.execute("DELETE FROM duplicate_cache_file_scope", [])?;
+    let mut insert = conn.prepare(
+        "INSERT OR IGNORE INTO duplicate_cache_file_scope (scan_id) VALUES (?1)",
+    )?;
+    for scan_id in &scan_ids {
+        insert.execute([scan_id])?;
+    }
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT f.scan_id, s.location_id, f.path, f.blake3, f.size
+        FROM files f
+        JOIN duplicate_cache_file_scope scope ON scope.scan_id = f.scan_id
+        LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+        JOIN scans s ON s.id = f.scan_id
+        WHERE excluded_f.id IS NULL
+          AND f.kind = 'file'
+          AND f.error IS NULL
+        ORDER BY f.scan_id, f.path
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DuplicateCacheFile {
+            scan_id: row.get(0)?,
+            location_id: row.get(1)?,
+            path: row.get(2)?,
+            blake3: row.get(3)?,
+            size: row.get(4)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn duplicate_cache_path_counts(
+    files: &[DuplicateCacheFile],
+) -> BTreeMap<(String, String), DuplicatePathCounts> {
+    let mut locations_by_hash = HashMap::<(String, u64), HashSet<String>>::new();
+    let mut same_scan_counts = HashMap::<(String, String, u64), u64>::new();
+    for file in files {
+        locations_by_hash
+            .entry((file.blake3.clone(), file.size))
+            .or_default()
+            .insert(file.location_id.clone());
+        *same_scan_counts
+            .entry((file.scan_id.clone(), file.blake3.clone(), file.size))
+            .or_default() += 1;
+    }
+
+    let mut path_counts = BTreeMap::<(String, String), DuplicatePathCounts>::new();
+    for file in files {
+        let hash_key = (file.blake3.clone(), file.size);
+        let duplicate_file_count = u64::from(
+            locations_by_hash
+                .get(&hash_key)
+                .is_some_and(|locations| locations.iter().any(|id| id != &file.location_id)),
+        );
+        let original_file_count = u64::from(duplicate_file_count == 0);
+        let same_scan_duplicate_file_count = u64::from(
+            same_scan_counts
+                .get(&(file.scan_id.clone(), file.blake3.clone(), file.size))
+                .copied()
+                .unwrap_or(0)
+                > 1,
+        );
+        increment_duplicate_path_counts(
+            &mut path_counts,
+            &file.scan_id,
+            &file.path,
+            "file",
+            duplicate_file_count,
+            original_file_count,
+            same_scan_duplicate_file_count,
+        );
+        for ancestor in duplicate_cache_ancestor_paths(&file.path) {
+            increment_duplicate_path_counts(
+                &mut path_counts,
+                &file.scan_id,
+                &ancestor,
+                "dir",
+                duplicate_file_count,
+                original_file_count,
+                same_scan_duplicate_file_count,
+            );
+        }
+    }
+    path_counts
+}
+
+fn increment_duplicate_path_counts(
+    path_counts: &mut BTreeMap<(String, String), DuplicatePathCounts>,
+    scan_id: &str,
+    path: &str,
+    kind: &str,
+    duplicate_file_count: u64,
+    original_file_count: u64,
+    same_scan_duplicate_file_count: u64,
+) {
+    let counts = path_counts
+        .entry((scan_id.to_string(), path.to_string()))
+        .or_insert_with(|| DuplicatePathCounts {
+            kind: kind.to_string(),
+            duplicate_file_count: 0,
+            original_file_count: 0,
+            same_scan_duplicate_file_count: 0,
+        });
+    if counts.kind != "file" {
+        counts.kind = kind.to_string();
+    }
+    counts.duplicate_file_count = counts
+        .duplicate_file_count
+        .saturating_add(duplicate_file_count);
+    counts.original_file_count = counts
+        .original_file_count
+        .saturating_add(original_file_count);
+    counts.same_scan_duplicate_file_count = counts
+        .same_scan_duplicate_file_count
+        .saturating_add(same_scan_duplicate_file_count);
+}
+
+fn duplicate_cache_ancestor_paths(path: &str) -> Vec<String> {
+    let parts = path.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    if parts.len() <= 1 {
+        return Vec::new();
+    }
+    (1..parts.len()).map(|index| parts[..index].join("/")).collect()
+}
+
+fn invalidate_duplicate_cache_conn(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM duplicate_cache_runs", [])?;
+    Ok(())
+}
+
+fn scan_ids_matching_file_query(conn: &Connection, like: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT DISTINCT scan_id
+        FROM files
+        WHERE path LIKE ?1 ESCAPE '\' OR name LIKE ?1 ESCAPE '\'
+        "#,
+    )?;
+    let rows = stmt.query_map([like], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn scan_ids_with_file_occurrence(
+    conn: &Connection,
+    blake3: &str,
+    size: u64,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT DISTINCT scan_id
+        FROM files
+        WHERE kind = 'file' AND error IS NULL AND blake3 = ?1 AND size = ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![blake3, size], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 fn refresh_scan_file_counts(conn: &Connection, scan_id: &str) -> Result<()> {
     let (file_count, error_count, total_bytes): (u64, u64, u64) = conn.query_row(
         r#"
@@ -1499,11 +3281,18 @@ fn delete_check_for_selection(
     include_all: bool,
     paths_mode: bool,
 ) -> Result<DeleteCheckResult> {
+    let selected_location_id = scan_location_id(conn, scan_id)?;
+    let mut visibility_scan_ids = vec![scan_id.to_string()];
+    visibility_scan_ids.extend(duplicate_scope_scan_ids(conn, selected_location_id.as_deref())?);
+    prepare_excluded_file_ids(conn, visibility_scan_ids)?;
+
     let total_count = conn.query_row(
         r#"
         SELECT COUNT(*)
         FROM files f
-        WHERE f.scan_id = ?1
+        LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+        WHERE excluded_f.id IS NULL
+          AND f.scan_id = ?1
           AND f.kind = 'file'
           AND f.error IS NULL
           AND (
@@ -1529,7 +3318,9 @@ fn delete_check_for_selection(
         r#"
         SELECT f.name, f.path, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode
         FROM files f
-        WHERE f.scan_id = ?1
+        LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+        WHERE excluded_f.id IS NULL
+          AND f.scan_id = ?1
           AND f.kind = 'file'
           AND f.error IS NULL
           AND (
@@ -1580,7 +3371,9 @@ fn delete_check_for_selection(
         )
         SELECT f.name, f.path, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode
         FROM files f
-        WHERE f.scan_id = ?1
+        LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+        WHERE excluded_f.id IS NULL
+          AND f.scan_id = ?1
           AND f.kind = 'file'
           AND f.error IS NULL
           AND (
@@ -1601,8 +3394,10 @@ fn delete_check_for_selection(
           AND NOT EXISTS (
               SELECT 1
               FROM files other
+              LEFT JOIN excluded_file_ids excluded_other ON excluded_other.id = other.id
               JOIN duplicate_scope ds ON ds.scan_id = other.scan_id
-              WHERE other.kind = 'file'
+              WHERE excluded_other.id IS NULL
+                AND other.kind = 'file'
                 AND other.error IS NULL
                 AND other.size = f.size
                 AND other.blake3 = f.blake3
@@ -1625,6 +3420,249 @@ fn delete_check_for_selection(
         checked_files,
         missing_files,
     })
+}
+
+fn filter_matches(filter: &FileSearchFilter, file: &FileRow) -> Result<bool> {
+    match &filter.term {
+        FileSearchTerm::Filter => match &filter.operator {
+            FileSearchOperator::And => Ok(filter_expression_list(filter)?
+                .iter()
+                .map(|item| filter_matches(item, file))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .all(|matched| matched)),
+            FileSearchOperator::Or => Ok(filter_expression_list(filter)?
+                .iter()
+                .map(|item| filter_matches(item, file))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .any(|matched| matched)),
+            FileSearchOperator::Not => Ok(!filter_matches(filter_expression_one(filter)?, file)?),
+            _ => anyhow::bail!("filter term only supports and, or, and not operators"),
+        },
+        FileSearchTerm::Ctime | FileSearchTerm::Mtime => date_filter_matches(filter, file),
+        _ => string_filter_matches(filter, file),
+    }
+}
+
+fn string_filter_matches(filter: &FileSearchFilter, file: &FileRow) -> Result<bool> {
+    let expression = search_expression_string("string", &filter.expression)?;
+    let normalized_extension;
+    let expression = if matches!(&filter.term, FileSearchTerm::Extension) {
+        normalized_extension = normalize_extension_expression(expression)?;
+        normalized_extension.as_str()
+    } else {
+        expression
+    };
+    let values = string_values_for_term(&filter.term, file)?;
+    match &filter.operator {
+        FileSearchOperator::Equal => Ok(values.iter().any(|value| value == expression)),
+        FileSearchOperator::NotEqual => Ok(values.iter().all(|value| value != expression)),
+        FileSearchOperator::Substring => Ok(values
+            .iter()
+            .any(|value| contains_case_insensitive(value, expression))),
+        FileSearchOperator::NotSubstring => Ok(values
+            .iter()
+            .all(|value| !contains_case_insensitive(value, expression))),
+        FileSearchOperator::Regex => {
+            let regex = Regex::new(expression).context("invalid regex search expression")?;
+            Ok(values.iter().any(|value| regex.is_match(value)))
+        }
+        FileSearchOperator::NotRegex => {
+            let regex = Regex::new(expression).context("invalid regex search expression")?;
+            Ok(values.iter().all(|value| !regex.is_match(value)))
+        }
+        FileSearchOperator::Fuzzy => Ok(values.iter().any(|value| fuzzy_matches(value, expression))),
+        FileSearchOperator::NotFuzzy => Ok(values
+            .iter()
+            .all(|value| !fuzzy_matches(value, expression))),
+        _ => anyhow::bail!("string term does not support this operator"),
+    }
+}
+
+fn date_filter_matches(filter: &FileSearchFilter, file: &FileRow) -> Result<bool> {
+    let value = match &filter.term {
+        FileSearchTerm::Ctime => file.ctime.as_deref(),
+        FileSearchTerm::Mtime => file.mtime.as_deref(),
+        _ => None,
+    };
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    let value = DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .ok();
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    match &filter.operator {
+        FileSearchOperator::After => Ok(value >= search_timestamp(
+            "date after",
+            search_expression_string("date", &filter.expression)?,
+        )?),
+        FileSearchOperator::Before => Ok(value <= search_timestamp(
+            "date before",
+            search_expression_string("date", &filter.expression)?,
+        )?),
+        FileSearchOperator::Between => {
+            let (from, to) = search_expression_range("date between", &filter.expression)?;
+            let from = search_timestamp("date between from", from)?;
+            let to = search_timestamp("date between to", to)?;
+            if from > to {
+                anyhow::bail!("date between from must be before to");
+            }
+            Ok(value >= from && value <= to)
+        }
+        _ => anyhow::bail!("date term supports after, before, and between operators"),
+    }
+}
+
+fn string_values_for_term(term: &FileSearchTerm, file: &FileRow) -> Result<Vec<String>> {
+    Ok(match term {
+        FileSearchTerm::Text => vec![file.path.clone(), file.name.clone()],
+        FileSearchTerm::Name => vec![file.name.clone()],
+        FileSearchTerm::Path => vec![file.path.clone()],
+        FileSearchTerm::Extension => vec![file_extension(&file.name).unwrap_or_default()],
+        FileSearchTerm::LocationSlug => vec![file.location_slug.clone()],
+        FileSearchTerm::LocationName => vec![file.location_name.clone()],
+        FileSearchTerm::Kind => vec![file.kind.clone()],
+        FileSearchTerm::Filter | FileSearchTerm::Ctime | FileSearchTerm::Mtime => {
+            anyhow::bail!("unsupported string term")
+        }
+    })
+}
+
+fn filter_expression_list(filter: &FileSearchFilter) -> Result<&[FileSearchFilter]> {
+    match &filter.expression {
+        FileSearchExpression::Filters(items) => Ok(items),
+        _ => anyhow::bail!("and/or operator requires a list expression"),
+    }
+}
+
+fn filter_expression_one(filter: &FileSearchFilter) -> Result<&FileSearchFilter> {
+    match &filter.expression {
+        FileSearchExpression::Filter(item) => Ok(item),
+        _ => anyhow::bail!("not operator requires one filter expression"),
+    }
+}
+
+fn search_expression_string<'a>(
+    label: &str,
+    expression: &'a FileSearchExpression,
+) -> Result<&'a str> {
+    match expression {
+        FileSearchExpression::String(value) if !value.trim().is_empty() => Ok(value.trim()),
+        FileSearchExpression::String(_) => anyhow::bail!("{label} filter requires a value"),
+        _ => anyhow::bail!("{label} filter requires a string expression"),
+    }
+}
+
+fn search_expression_range<'a>(
+    label: &str,
+    expression: &'a FileSearchExpression,
+) -> Result<(&'a str, &'a str)> {
+    match expression {
+        FileSearchExpression::Range { from, to } if !from.trim().is_empty() && !to.trim().is_empty() => {
+            Ok((from.trim(), to.trim()))
+        }
+        FileSearchExpression::Range { .. } => anyhow::bail!("{label} filter requires both range bounds"),
+        _ => anyhow::bail!("{label} filter requires a range expression"),
+    }
+}
+
+fn search_timestamp(label: &str, value: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .with_context(|| format!("{label} must be an RFC3339 timestamp"))
+}
+
+fn normalize_extension_expression(value: &str) -> Result<String> {
+    let extension = value.trim().trim_start_matches('.').to_lowercase();
+    if extension.is_empty() {
+        anyhow::bail!("extension filter requires a value");
+    }
+    if extension.contains('/') || extension.contains('\\') {
+        anyhow::bail!("extension filter only accepts a filename extension");
+    }
+    Ok(extension)
+}
+
+fn file_extension(name: &str) -> Option<String> {
+    let filename = name.rsplit('/').next().unwrap_or(name);
+    let (_, extension) = filename.rsplit_once('.')?;
+    (!extension.is_empty()).then(|| extension.to_lowercase())
+}
+
+fn contains_case_insensitive(value: &str, needle: &str) -> bool {
+    value.to_lowercase().contains(&needle.to_lowercase())
+}
+
+fn fuzzy_matches(value: &str, pattern: &str) -> bool {
+    let mut value_chars = value.chars().flat_map(char::to_lowercase);
+    for needle in pattern.chars().flat_map(char::to_lowercase) {
+        if !value_chars.any(|candidate| candidate == needle) {
+            return false;
+        }
+    }
+    true
+}
+
+fn scan_by_id_from_conn(conn: &Connection, scan_id: &str) -> Result<Option<Scan>> {
+    conn.query_row(
+        r#"
+        SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
+               s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
+               COALESCE(l.representative_scan_id = s.id, 0), s.notes
+        FROM scans s
+        JOIN locations l ON l.id = s.location_id
+        WHERE s.id = ?1
+        "#,
+        [scan_id],
+        scan_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn location_by_id_from_conn(conn: &Connection, id: &str) -> Result<Option<Location>> {
+    conn.query_row(
+        "SELECT id, slug, name, type, root_path, notes, representative_scan_id, disabled, created_at FROM locations WHERE id = ?1",
+        [id],
+        location_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn reusable_files_for_scan_conn(
+    conn: &Connection,
+    scan_id: &str,
+) -> Result<HashMap<String, ReusableFile>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT path, name, size, blake3, sha256, ctime, mtime, mode
+        FROM files
+        WHERE scan_id = ?1 AND kind = 'file' AND error IS NULL
+        "#,
+    )?;
+    let rows = stmt.query_map([scan_id], |row| {
+        Ok(ReusableFile {
+            path: row.get(0)?,
+            name: row.get(1)?,
+            size: row.get(2)?,
+            blake3: row.get(3)?,
+            sha256: row.get(4)?,
+            ctime: row.get(5)?,
+            mtime: row.get(6)?,
+            mode: row.get(7)?,
+        })
+    })?;
+    let mut files = HashMap::new();
+    for file in rows {
+        let file = file?;
+        files.insert(file.path.clone(), file);
+    }
+    Ok(files)
 }
 
 fn location_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Location> {
@@ -1683,13 +3721,15 @@ fn tree_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeEntry> {
 }
 
 fn file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
+    let name: String = row.get(5)?;
     Ok(FileRow {
         scan_id: row.get(0)?,
         location_slug: row.get(1)?,
         location_name: row.get(2)?,
+        file_kind: semantic_file_kind(&name).to_string(),
         kind: row.get(3)?,
         path: row.get(4)?,
-        name: row.get(5)?,
+        name,
         size: row.get(6)?,
         blake3: row.get(7)?,
         sha256: row.get(8)?,
@@ -1700,9 +3740,198 @@ fn file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     })
 }
 
+/// Returns the compact semantic category used by the UI and CLI duplicate
+/// surfaces. This deliberately derives from a response filename only: the
+/// persisted `files.kind` remains the filesystem topology (`file` or `dir`).
+fn semantic_file_kind(name: &str) -> &'static str {
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_ascii_lowercase);
+    let Some(extension) = extension.as_deref() else {
+        return "other";
+    };
+
+    match extension {
+        "avif" | "bmp" | "cr2" | "cr3" | "dng" | "gif" | "heic" | "heif" | "jpe"
+        | "jpeg" | "jpg" | "jxl" | "nef" | "orf" | "png" | "raf" | "raw" | "rw2"
+        | "svg" | "tif" | "tiff" | "webp" => "image",
+        "3g2" | "3gp" | "asf" | "avi" | "flv" | "m2ts" | "m4v" | "mkv" | "mov"
+        | "mp4" | "mpeg" | "mpg" | "mts" | "ogv" | "ts" | "vob" | "webm" | "wmv" => {
+            "video"
+        }
+        "c" | "cc" | "cfg" | "conf" | "cpp" | "css" | "csv" | "go" | "h" | "hpp"
+        | "htm" | "html" | "ini" | "java" | "js" | "json" | "jsx" | "kt" | "kts"
+        | "log" | "markdown" | "md" | "mjs" | "php" | "py" | "r" | "rb" | "rs" | "rst"
+        | "rtf" | "sh" | "sql" | "swift" | "tex" | "toml" | "ts" | "tsx" | "txt"
+        | "xml" | "yaml" | "yml" | "zsh" => "text",
+        _ => "other",
+    }
+}
+
+fn duplicate_group_file_kind<'a>(file_kinds: impl IntoIterator<Item = &'a str>) -> String {
+    let mut file_kinds = file_kinds.into_iter();
+    let Some(first) = file_kinds.next() else {
+        return "other".to_string();
+    };
+    if file_kinds.all(|file_kind| file_kind == first) {
+        first.to_string()
+    } else {
+        "mixed".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn location_type_unknown_round_trips() {
+        assert_eq!(LocationType::Unknown.to_string(), "unknown");
+        assert_eq!(
+            LocationType::try_from("unknown".to_string()).unwrap(),
+            LocationType::Unknown
+        );
+    }
+
+    #[test]
+    fn date_derived_scan_ids_use_supplied_time_and_collision_suffixes() {
+        let root = test_root("date-derived-scan-id");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Unknown,
+                name: "Archive".to_string(),
+                slug: "archive-volume".to_string(),
+                root_path: root.join("archive"),
+                notes: None,
+            })
+            .unwrap();
+        let started_at = DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let first = db
+            .start_scan_with_started_at(&location, Path::new("/"), started_at.clone())
+            .unwrap();
+        let second = db
+            .start_scan_with_started_at(&location, Path::new("/"), started_at.clone())
+            .unwrap();
+        let third = db
+            .start_scan_with_started_at(&location, Path::new("/"), started_at.clone())
+            .unwrap();
+
+        assert_eq!(first, "20260715T123456Z--archive-volume");
+        assert_eq!(second, "20260715T123456Z--archive-volume--2");
+        assert_eq!(third, "20260715T123456Z--archive-volume--3");
+        for scan_id in [&first, &second, &third] {
+            let scan = db.scan_by_id(scan_id).unwrap().unwrap();
+            assert_eq!(scan.started_at, started_at.to_rfc3339());
+            assert_eq!(scan.status, "running");
+        }
+    }
+
+    #[test]
+    fn legacy_locations_type_check_migrates_without_losing_rows_or_foreign_keys() {
+        let root = test_root("legacy-location-type-check");
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("state.db");
+
+        let legacy = Connection::open(&db_path).unwrap();
+        legacy.pragma_update(None, "foreign_keys", "ON").unwrap();
+        legacy
+            .execute_batch(
+                r#"
+                CREATE TABLE locations (
+                    id TEXT PRIMARY KEY,
+                    slug TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL CHECK (type IN ('local', 'disk', 'nas')),
+                    root_path TEXT NOT NULL,
+                    notes TEXT,
+                    representative_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL,
+                    disabled INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE scans (
+                    id TEXT PRIMARY KEY,
+                    location_id TEXT NOT NULL REFERENCES locations(id),
+                    offset_path TEXT NOT NULL DEFAULT '/',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    file_count INTEGER NOT NULL DEFAULT 0,
+                    dir_count INTEGER NOT NULL DEFAULT 0,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    notes TEXT
+                );
+
+                INSERT INTO locations (
+                    id, slug, name, type, root_path, notes, disabled, created_at
+                ) VALUES (
+                    'location-legacy', 'archive', 'Archive', 'disk', '/Volumes/archive',
+                    'preserve me', 1, '2026-07-14T00:00:00Z'
+                );
+                INSERT INTO scans (id, location_id, started_at, status, notes) VALUES (
+                    'scan-legacy', 'location-legacy', '2026-07-14T00:00:00Z', 'complete',
+                    'preserve scan'
+                );
+                UPDATE locations
+                SET representative_scan_id = 'scan-legacy'
+                WHERE id = 'location-legacy';
+                "#,
+            )
+            .unwrap();
+        drop(legacy);
+
+        let db = Database::open(&db_path).unwrap();
+        let locations = db.locations().unwrap();
+        assert_eq!(locations.len(), 1);
+        let location = &locations[0];
+        assert_eq!(location.id, "location-legacy");
+        assert_eq!(location.slug, "archive");
+        assert_eq!(location.kind, LocationType::Disk);
+        assert_eq!(location.notes.as_deref(), Some("preserve me"));
+        assert_eq!(location.representative_scan_id.as_deref(), Some("scan-legacy"));
+        assert!(location.disabled);
+        assert_eq!(
+            db.scan_by_id("scan-legacy")
+                .unwrap()
+                .unwrap()
+                .location_slug,
+            "archive"
+        );
+
+        let unknown = db
+            .add_location(LocationInput {
+                kind: LocationType::Unknown,
+                name: "Unclassified".to_string(),
+                slug: "unclassified".to_string(),
+                root_path: root.join("unclassified"),
+                notes: None,
+            })
+            .unwrap();
+        assert_eq!(unknown.kind, LocationType::Unknown);
+
+        let conn = db.connect().unwrap();
+        assert!(locations_type_check_supports_unknown(&conn).unwrap());
+        ensure_foreign_keys_valid(&conn).unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE locations SET representative_scan_id = 'missing-scan' WHERE id = 'location-legacy'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO scans (id, location_id, started_at) VALUES ('orphan-scan', 'missing-location', '2026-07-14T00:00:00Z')",
+                [],
+            )
+            .is_err());
+    }
 
     #[test]
     fn clear_representative_scan_only_clears_when_scan_is_current_representative() {
@@ -1852,6 +4081,285 @@ mod tests {
                 .map(|candidate| candidate.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["folder/direct.jpg", "folder/sub/nested.jpg"]
+        );
+    }
+
+    #[test]
+    fn scan_excludes_filter_public_queries_without_mutating_physical_files() {
+        let root = test_root("scan-exclude-visibility");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let source = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "source".to_string(),
+                root_path: root.join("source"),
+                notes: None,
+            })
+            .unwrap();
+        let copy = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Copy".to_string(),
+                slug: "copy".to_string(),
+                root_path: root.join("copy"),
+                notes: None,
+            })
+            .unwrap();
+        let source_scan_id = db.start_scan(&source, Path::new("/")).unwrap();
+        let copy_scan_id = db.start_scan(&copy, Path::new("/")).unwrap();
+        db.insert_file_batch(&[
+            test_file(&source_scan_id, "visible.txt", 1, "hash-visible"),
+            test_file(&source_scan_id, "hidden.txt", 2, "hash-hidden"),
+            NewFile {
+                scan_id: source_scan_id.clone(),
+                kind: "dir".to_string(),
+                path: "hidden-dir".to_string(),
+                name: "hidden-dir".to_string(),
+                size: 0,
+                blake3: String::new(),
+                sha256: String::new(),
+                ctime: None,
+                mtime: None,
+                mode: None,
+                error: None,
+            },
+            test_file(
+                &source_scan_id,
+                "hidden-dir/nested.txt",
+                3,
+                "hash-nested",
+            ),
+            test_file(&copy_scan_id, "visible.txt", 1, "hash-visible"),
+            test_file(&copy_scan_id, "hidden.txt", 2, "hash-hidden"),
+            test_file(&copy_scan_id, "hidden-dir/nested.txt", 3, "hash-nested"),
+        ])
+        .unwrap();
+        db.finish_scan(&source_scan_id, 3, 1, 0, 6, "complete")
+            .unwrap();
+        db.finish_scan(&copy_scan_id, 3, 0, 0, 6, "complete")
+            .unwrap();
+        db.set_scan_excludes(
+            &source_scan_id,
+            vec!["/hidden.txt".to_string(), "/hidden-dir/".to_string()],
+        )
+        .unwrap();
+
+        assert!(db
+            .scan_path_is_visible(&source_scan_id, "visible.txt", false)
+            .unwrap());
+        assert!(!db
+            .scan_path_is_visible(&source_scan_id, "hidden.txt", false)
+            .unwrap());
+        assert!(!db
+            .scan_path_is_visible(&source_scan_id, "hidden-dir", true)
+            .unwrap());
+        assert!(!db
+            .scan_path_is_visible(&source_scan_id, "hidden-dir/nested.txt", false)
+            .unwrap());
+
+        // Raw reuse and stored counts remain physical; excludes are query-only.
+        assert_eq!(db.reusable_files_for_scan(&source_scan_id).unwrap().len(), 3);
+        assert_eq!(
+            db.scan_by_id(&source_scan_id).unwrap().unwrap().file_count,
+            3
+        );
+
+        // The raw newest row is hidden, so this also proves the visible limit
+        // is applied after Rust visibility filtering.
+        let visible_files = db.scan_files(&source_scan_id, 1).unwrap();
+        assert_eq!(
+            visible_files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible.txt"]
+        );
+        assert_eq!(visible_files[0].kind, "file");
+        assert_eq!(visible_files[0].file_kind, "text");
+
+        let tree = db.scan_tree(&source_scan_id, "").unwrap();
+        assert_eq!(
+            tree.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
+            vec!["visible.txt"]
+        );
+        assert_eq!(tree[0].duplicate_file_count, 1);
+
+        let found_hidden = db.find_files("hidden", 20).unwrap();
+        assert_eq!(found_hidden.len(), 2);
+        assert!(found_hidden
+            .iter()
+            .all(|file| file.scan_id == copy_scan_id));
+        assert_eq!(
+            db.file_occurrences("hash-hidden", 2)
+                .unwrap()
+                .iter()
+                .map(|file| file.scan_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![copy_scan_id.as_str()]
+        );
+
+        let delete_check = db.delete_check(&source_scan_id, "").unwrap();
+        assert!(delete_check.safe);
+        assert_eq!(delete_check.total_count, 1);
+        assert_eq!(delete_check.checked_files[0].path, "visible.txt");
+        assert_eq!(
+            db.delete_check_paths(&source_scan_id, &["hidden-dir".to_string()])
+                .unwrap()
+                .total_count,
+            0
+        );
+
+        assert_eq!(
+            db.thumbnail_candidates(&source_scan_id, "", true)
+                .unwrap()
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible.txt"]
+        );
+        assert!(db
+            .thumbnail_candidates_paths(&source_scan_id, &["hidden-dir".to_string()], true)
+            .unwrap()
+            .is_empty());
+
+        let duplicate_groups = db.duplicate_groups(20).unwrap();
+        assert_eq!(duplicate_groups.len(), 1);
+        assert_eq!(duplicate_groups[0].blake3, "hash-visible");
+        assert_eq!(duplicate_groups[0].file_kind, "text");
+        assert!(duplicate_groups[0]
+            .files
+            .iter()
+            .all(|file| file.file_kind == "text"));
+        assert_eq!(db.duplicate_groups_for_scans(20, &[]).unwrap().len(), 1);
+        assert!(db
+            .duplicate_groups_for_scans(20, std::slice::from_ref(&source_scan_id))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.duplicate_groups_for_scans(
+                20,
+                &[source_scan_id.clone(), copy_scan_id.clone()],
+            )
+            .unwrap()[0]
+                .blake3,
+            "hash-visible"
+        );
+        assert_eq!(db.overview().unwrap().duplicate_groups, 1);
+        assert_eq!(db.overview().unwrap().file_count, 6);
+
+        // Cache scope metadata follows the same visible-file boundary as the
+        // public duplicate query, while physical overview counts stay raw.
+        assert!(db.current_duplicate_scope_fingerprint().unwrap().is_some());
+        assert_eq!(db.current_duplicate_cache_status().unwrap().total_files, 4);
+    }
+
+    #[test]
+    fn visible_tree_search_and_delete_share_the_exclude_boundary() {
+        let root = test_root("visible-tree-search-delete");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "source".to_string(),
+                root_path: root.join("source"),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+        db.insert_file_batch(&[
+            NewFile {
+                scan_id: scan_id.clone(),
+                kind: "dir".to_string(),
+                path: "folder".to_string(),
+                name: "folder".to_string(),
+                size: 0,
+                blake3: String::new(),
+                sha256: String::new(),
+                ctime: None,
+                mtime: None,
+                mode: None,
+                error: None,
+            },
+            test_file(&scan_id, "folder/visible.txt", 1, "visible-hash"),
+            test_file(&scan_id, "folder/hidden.txt", 2, "hidden-hash"),
+        ])
+        .unwrap();
+        db.finish_scan(&scan_id, 2, 1, 0, 3, "complete")
+            .unwrap();
+        db.set_scan_excludes(&scan_id, vec!["/folder/hidden.txt".to_string()])
+            .unwrap();
+
+        let page = db
+            .scan_tree_page(&scan_id, "", Some(20), 0, 1, None)
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.entries[0].path, "folder");
+        assert_eq!(page.entries[0].file_count, 1);
+        assert_eq!(page.entries[0].size, 1);
+
+        let matches = db
+            .search_files(&FileSearchQuery {
+                filter: Some(FileSearchFilter {
+                    term: FileSearchTerm::Text,
+                    operator: FileSearchOperator::Substring,
+                    expression: FileSearchExpression::String("hidden".to_string()),
+                }),
+                limit: Some(20),
+                offset: None,
+                representative_only: None,
+                scan_ids: Some(vec![scan_id.clone()]),
+            })
+            .unwrap();
+        assert!(matches.is_empty());
+
+        assert!(db
+            .scan_path_has_excluded_descendants(&scan_id, "folder")
+            .unwrap());
+        assert!(db.delete_visible_scan_path(&scan_id, "folder").is_err());
+        assert_eq!(db.reusable_files_for_scan(&scan_id).unwrap().len(), 2);
+
+        let occurrences = db
+            .visible_file_occurrences_page(
+                &scan_id,
+                "folder/visible.txt",
+                "visible-hash",
+                1,
+                20,
+                0,
+            )
+            .unwrap();
+        assert_eq!(occurrences.total, 1);
+        assert!(db
+            .visible_file_occurrences_page(
+                &scan_id,
+                "folder/hidden.txt",
+                "hidden-hash",
+                2,
+                20,
+                0,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn filename_categories_cover_duplicate_ui_contracts() {
+        assert_eq!(semantic_file_kind("beach.JPG"), "image");
+        assert_eq!(semantic_file_kind("archive.MOV"), "video");
+        assert_eq!(semantic_file_kind("notes.md"), "text");
+        assert_eq!(semantic_file_kind("payload.bin"), "other");
+        assert_eq!(
+            duplicate_group_file_kind(["image", "image"].iter().copied()),
+            "image"
+        );
+        assert_eq!(
+            duplicate_group_file_kind(["image", "video"].iter().copied()),
+            "mixed"
+        );
+        assert_eq!(
+            duplicate_group_file_kind(std::iter::empty::<&str>()),
+            "other"
         );
     }
 

@@ -6,8 +6,39 @@ import {
   useReactTable
 } from '@tanstack/react-table';
 import { Icon } from './Icon.jsx';
-import { Menu, MenuContent, MenuItem, MenuTrigger } from './ui/index.jsx';
+import {
+  fileGridActionsClassName,
+  fileGridCellClassName,
+  fileGridCellContentClassName,
+  fileGridCheckboxClassName,
+  fileGridClassName,
+  fileGridHeaderButtonClassName,
+  fileGridHeaderCellClassName,
+  fileGridNumericClassName,
+  fileGridResizerClassName,
+  fileGridRowActionMenuClassName,
+  fileGridRowActionPanelClassName,
+  fileGridRowActionTriggerClassName,
+  fileGridRowClassName,
+  fileGridSelectClassName,
+  fileGridSortClassName,
+  fileGridTableClassName,
+  fileKindIconClassName,
+  fileNameCellClassName,
+  fileNameLabelClassName,
+  Menu,
+  MenuContent,
+  MenuItem,
+  MenuTrigger
+} from './ui/index.jsx';
 import { bytes, shortHash } from '../utils/format.js';
+
+const numericColumnMeta = { align: 'right', className: fileGridNumericClassName };
+const centeredControlColumnMeta = {
+  align: 'center',
+  contentOverflowVisible: true,
+  className: fileGridSelectClassName
+};
 
 export default function FileGrid({
   rows = [],
@@ -56,46 +87,51 @@ export default function FileGrid({
   });
 
   return (
-    <div className="file-grid">
-      <table className="file-grid-table" style={{ width: table.getTotalSize() }}>
+    <div className={fileGridClassName}>
+      <table className={fileGridTableClassName} style={{ width: table.getTotalSize() }}>
         <thead>
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id}>
-              {headerGroup.headers.map((header) => (
-                <th
-                  key={header.id}
-                  className={[
-                    header.column.getCanSort() ? 'sortable' : '',
-                    header.column.columnDef.meta?.className || ''
-                  ].filter(Boolean).join(' ')}
-                  style={{ width: header.getSize() }}
-                >
-                  {header.isPlaceholder ? null : (
-                    <button
-                      type="button"
-                      className="file-grid-header"
-                      disabled={!header.column.getCanSort()}
-                      onClick={header.column.getToggleSortingHandler()}
-                    >
-                      {flexRender(header.column.columnDef.header, header.getContext())}
-                      <span className="file-grid-sort">{sortIndicator(header.column.getIsSorted())}</span>
-                    </button>
-                  )}
-                  {header.column.getCanResize() && (
-                    <span
-                      className={`file-grid-resizer${header.column.getIsResizing() ? ' resizing' : ''}`}
-                      onMouseDown={header.getResizeHandler()}
-                      onTouchStart={header.getResizeHandler()}
-                      onDoubleClick={(event) => {
-                        event.stopPropagation();
-                        header.column.resetSize();
-                      }}
-                      role="separator"
-                      aria-label={`Resize ${header.column.columnDef.header || header.id}`}
-                    />
-                  )}
-                </th>
-              ))}
+              {headerGroup.headers.map((header) => {
+                const sortable = header.column.getCanSort();
+                const headerAlign = header.column.columnDef.meta?.align;
+
+                return (
+                  <th
+                    key={header.id}
+                    className={fileGridHeaderCellClassName({
+                      sortable,
+                      className: header.column.columnDef.meta?.className
+                    })}
+                    style={{ width: header.getSize() }}
+                  >
+                    {header.isPlaceholder ? null : (
+                      <button
+                        type="button"
+                        className={fileGridHeaderButtonClassName({ align: headerAlign })}
+                        disabled={!sortable}
+                        onClick={header.column.getToggleSortingHandler()}
+                      >
+                        {flexRender(header.column.columnDef.header, header.getContext())}
+                        <span className={fileGridSortClassName}>{sortIndicator(header.column.getIsSorted())}</span>
+                      </button>
+                    )}
+                    {header.column.getCanResize() && (
+                      <span
+                        className={fileGridResizerClassName({ resizing: header.column.getIsResizing() })}
+                        onMouseDown={header.getResizeHandler()}
+                        onTouchStart={header.getResizeHandler()}
+                        onDoubleClick={(event) => {
+                          event.stopPropagation();
+                          header.column.resetSize();
+                        }}
+                        role="separator"
+                        aria-label={`Resize ${header.column.columnDef.header || header.id}`}
+                      />
+                    )}
+                  </th>
+                );
+              })}
             </tr>
           ))}
         </thead>
@@ -103,13 +139,12 @@ export default function FileGrid({
           {table.getRowModel().rows.map((row, index) => (
             <tr
               key={row.id}
-              className={[
-                'file-grid-row',
-                index % 2 === 1 ? 'file-grid-row-odd' : 'file-grid-row-even',
-                row.original.kind === 'dir' || row.original.kind === 'parent' ? 'folder-row' : '',
-                isActionableRow(row.original) ? 'is-actionable' : '',
-                selectedSet.has(row.original.path) ? 'is-selected' : ''
-              ].filter(Boolean).join(' ')}
+              className={fileGridRowClassName({
+                index,
+                kind: row.original.kind,
+                actionable: isActionableRow(row.original),
+                selected: selectedSet.has(row.original.path)
+              })}
               onDoubleClick={() => {
                 if (row.original.kind === 'file') onInspect?.(row.original);
                 if (row.original.kind === 'dir' || row.original.kind === 'parent') onOpen?.(row.original);
@@ -118,10 +153,10 @@ export default function FileGrid({
               {row.getVisibleCells().map((cell) => (
                 <td
                   key={cell.id}
-                  className={cell.column.columnDef.meta?.className}
+                  className={fileGridCellClassName({ className: cell.column.columnDef.meta?.className })}
                   style={{ width: cell.column.getSize() }}
                 >
-                  <span className="file-grid-cell-content">
+                  <span className={fileGridCellContentClassName({ overflowVisible: cell.column.columnDef.meta?.contentOverflowVisible })}>
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </span>
                 </td>
@@ -157,6 +192,7 @@ function baseColumns(options) {
         <input
           aria-label="Select all visible rows"
           checked={allSelected}
+          className={fileGridCheckboxClassName}
           disabled={!selectableRows.length}
           type="checkbox"
           onChange={() => onSetSelection?.(allSelected ? [] : selectableRows)}
@@ -167,13 +203,14 @@ function baseColumns(options) {
       maxSize: 42,
       enableSorting: false,
       enableResizing: false,
-      meta: { className: 'row-select' },
+      meta: centeredControlColumnMeta,
       cell: ({ row }) => {
         if (!isSelectableRow(row.original)) return '';
         return (
           <input
             aria-label={`Select ${row.original.name}`}
             checked={selectedSet.has(row.original.path)}
+            className={fileGridCheckboxClassName}
             type="checkbox"
             onChange={() => onToggleSelection?.(row.original)}
             onClick={(event) => event.stopPropagation()}
@@ -197,7 +234,7 @@ function baseColumns(options) {
       header: 'Size',
       size: 96,
       minSize: 72,
-      meta: { className: 'numeric' },
+      meta: numericColumnMeta,
       cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : bytes(getValue())
     },
     {
@@ -205,7 +242,7 @@ function baseColumns(options) {
       header: 'Dup',
       size: 68,
       minSize: 56,
-      meta: { className: 'numeric' },
+      meta: numericColumnMeta,
       cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
     },
     {
@@ -213,7 +250,7 @@ function baseColumns(options) {
       header: 'Uniq',
       size: 68,
       minSize: 56,
-      meta: { className: 'numeric' },
+      meta: numericColumnMeta,
       cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
     },
     {
@@ -221,7 +258,7 @@ function baseColumns(options) {
       header: 'Scan Dup',
       size: 94,
       minSize: 74,
-      meta: { className: 'numeric' },
+      meta: numericColumnMeta,
       cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
     },
     { accessorKey: 'blake3', header: 'BLAKE3', size: 126, minSize: 90, cell: ({ getValue }) => shortHash(getValue()) },
@@ -241,20 +278,23 @@ function baseColumns(options) {
       maxSize: 54,
       enableSorting: false,
       enableResizing: false,
-      meta: { className: 'row-actions' },
+      meta: {
+        ...centeredControlColumnMeta,
+        className: fileGridActionsClassName
+      },
       cell: ({ row }) => {
         if (!row.original || row.original.kind === 'parent') return '';
         return (
-          <Menu className="file-row-action-menu" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+          <Menu className={fileGridRowActionMenuClassName} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
             <MenuTrigger
               aria-label={`Actions for ${row.original.name}`}
               title="Row actions"
               variant="ghost"
               size="sm"
-              className="file-row-action-trigger"
+              className={fileGridRowActionTriggerClassName}
               icon={<Icon name="rowActions" />}
             />
-            <MenuContent align="end" className="file-row-action-panel">
+            <MenuContent align="end" className={fileGridRowActionPanelClassName}>
               {onBuildThumbnails && (
                 <MenuItem
                   disabled={!canBuildThumbnails}
@@ -302,9 +342,9 @@ function NameCell({ fullPathName, row, value }) {
         : value;
   const iconName = entry.kind === 'file' ? 'file' : entry.kind === 'parent' ? 'parent' : 'folder';
   return (
-    <span className={`file-name-cell ${entry.kind}`}>
-      <Icon name={iconName} className="file-kind-icon" />
-      <span>{label}</span>
+    <span className={fileNameCellClassName({ kind: entry.kind })}>
+      <Icon name={iconName} className={fileKindIconClassName} />
+      <span className={fileNameLabelClassName}>{label}</span>
     </span>
   );
 }
