@@ -39,6 +39,15 @@ The original visual reference image and prototype commit are missing. Build real
 8. [ ] Build Duplicates, Tasks, Search, Options, and cross-route accessibility/destructive-flow safety.
 9. [ ] Run the complete validation/browser/native/design-QA matrix after reference recovery; resolve all P0/P1/P2 findings and obtain explicit approval.
 
+## Non-Destructive Scan Excludes
+
+1. [ ] Add scan-owned pattern persistence, normalization/deduplication, matcher helpers, and explicit physical-versus-visible record types without deleting `files` rows.
+2. [ ] Change scan/update ingestion so every discovered row remains indexed while per-scan patterns are copied and applied only at query/action visibility boundaries.
+3. [ ] Apply one shared visibility rule to scan tree/files, search/occurrences/details, duplicates, delete check, thumbnails, reuse, and guarded path actions.
+4. [ ] Add identical browser and native RPC handlers for get/set/append plus `scan_excludes_updated`; retain active-scan semantics explicitly rather than silently changing scan contents.
+5. [ ] Keep Exclude in the main workspace action menu, correct destructive modal copy, and prove sidebar/tree navigation remains directory-only.
+6. [ ] Add migration, DB, scanner, CLI, RPC, and UI regression evidence that patterns persist and rows remain physically indexed.
+
 # Learning Log
 
 - Disk cleanup deleted the old checkout and its Git database. A new repository was initialized at the original path; source and verification must be rebuilt from requirements.
@@ -67,6 +76,7 @@ The original visual reference image and prototype commit are missing. Build real
 - The checkout currently has no `flake.nix`, `flake.lock`, `shell.nix`, or historical `.gitignore` hierarchy, even though the historical `Justfile` expects `nix develop -c cargo`. The user raised these as likely deleted source artifacts; recovery is now searching only direct pre-deletion evidence before any replacement is considered.
 - Exact direct evidence restored root `flake.nix` (53 lines, SHA-256 `67e971487a4c253bdd71bf1a5b390fff0f09ab8eefb9e3b47783a0668a9b7752`) and root `.gitignore` (11 lines, SHA-256 `4e8ceb4b4ae47e01a6e8c1da7e6f81cd61e14b1580ae41bceb8a81aa3774ba55`). `flake.lock` is only known to have been generated/staged, so it remains absent; no nested ignore or alternate shell file is claimed without further evidence.
 - Strict `db.rs` horizon replay reached a nonpromotable 2,950-line prefix containing both scanner exclusion helpers, then stopped at the first missing SQL hunk context (`call_2j26Fjedn29G65Du27p2pQDI`, 2026-06-14 02:40). The prefix is evidence only; no fuzzy patch or helper extraction may be applied to the promoted database snapshot.
+- The exact helper fragment compiles gitignore-style patterns rooted at `/` and prunes matched directories. Its adjacent historical persistence code deletes matching indexed file rows, which conflicts with the explicit product invariant that excludes are non-destructive per-scan filters for every operation. Rebuild the matcher, persistence, and query predicates intentionally; do not transplant that cleanup behavior.
 
 # Work Log
 
@@ -88,6 +98,7 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-15 01:11 - Materialized and promoted the later exact 1,385-line `scanner.rs` seed, byte-verified it, and identified the two missing exclusion helpers required from a compatible `db.rs` horizon.
 - [x] 2026-07-15 01:20 - Recovered and byte-verified exact root `flake.nix` and `.gitignore` blobs from direct successful evidence; left unrecoverable `flake.lock` and unproven nested artifacts absent.
 - [x] 2026-07-15 01:25 - Ran a temp-only strict `db.rs` horizon replay: it found both exclusion helpers in a 2,950-line partial prefix but stopped at the first exact SQL-context mismatch, so no database source was promoted.
+- [x] 2026-07-15 01:27 - Extracted the exact matcher contract and rejected the historical destructive cleanup semantics; retained the user-required non-destructive per-scan filter model.
 - [ ] 2026-07-15 00:22 - Resolve the remaining `cli.rs` source horizon, compatible database exclusion helpers, native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
