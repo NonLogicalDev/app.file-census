@@ -32,7 +32,41 @@ TRUSTED_SOURCE_READS = {
   "call_ZIRBMkg1IyOMiyTu0gl4L36p" => { path: "ui/src/App.svelte", kind: :sed, max_lines: 280 },
   "call_chEiTJKaZUa8lD3fYJY9VuBj" => { path: "src/db.rs", kind: :sed, max_lines: 320 },
   "call_ut9ZUNDDe37PG4YgGQ4yEPLT" => { path: "ui/src/style.css", kind: :sed, max_lines: 240 },
+  "call_DHQxEiP3sbicvVIBsjNUUAg9" => { path: "src/web.rs", kind: :sed, max_lines: 280 },
+  "call_zikbU94Tq1zIPSmer8nFsQgK" => { path: "ui/src/App.svelte", kind: :sed, max_lines: 360 },
+  "call_H7JbyzG4R1B7OSCo7giL4JPA" => { path: "ui/src/main.jsx", kind: :sed },
+  "call_yTACncaaw4xj01W4mhN5XbvW" => { path: "ui/src/components/Shell.jsx", kind: :sed },
+  "call_93Y00JB75AnkHCLtxCt51NYz" => { path: "ui/src/components/FileExplorer.jsx", kind: :sed },
+  "call_nWqWClgB5psPamM5lXSpa4oj" => { path: "ui/src/components/FileGrid.jsx", kind: :sed },
+  "call_4ITVx1bR5B9pwOg4cjcFs7NT" => { path: "ui/src/components/AppModals.jsx", kind: :sed },
+  "call_qtJTNlDuemMmKIoZ5OzS3ajL" => { path: "ui/src/components/ui/index.jsx", kind: :sed },
+  "call_mucT6DTjSHsAHeF6ZptkghHT" => { path: "ui/src/components/ui/Menu.jsx", kind: :sed },
+  "call_oqvNr8vL3z88fDL5zX8hKIhT" => { path: "ui/src/components/ui/Button.jsx", kind: :sed },
+  "call_0LXJW3vOkNEmxagW25JET6j2" => { path: "ui/src/pages/LocationsPage.jsx", kind: :sed },
+  "call_AKqbNNRfmOPjSFYeZ2ufhIJK" => { path: "ui/src/pages/SearchPage.jsx", kind: :sed },
+  "call_xBEyk8wb5N7Ymw7sZLSVFQd9" => { path: "ui/src/pages/DuplicatesPage.jsx", kind: :sed },
+  "call_56XKfsbsT5bFhliXaGzVln0w" => { path: "ui/src/pages/TasksPage.jsx", kind: :sed },
+  "call_icZcuhzC5P1ifGbNZzbtQMNZ" => { path: "src/backend/src/app.rs", kind: :sed },
+  "call_21LylkIDBDRCEChYb9Q21pju" => { path: "src/backend/src/media.rs", kind: :sed },
+  "call_TonMSZ8rBHIpQDwXJtH3UiIr" => { path: "src/backend/src/search.rs", kind: :sed },
+  "call_kPO0BLFDCsB7m8Z4S58LaIqB" => { path: "src/backend/src/events.rs", kind: :sed },
+  "call_c9QUWv72RXap0yDVK3r3b3Me" => { path: "src/backend/src/duplicate_cache.rs", kind: :sed },
+  "call_X2AySBUzA08GP8hKoWL13Btl" => { path: "src/backend/src/main.rs", kind: :sed },
+  "call_upuYXZVzDQzD6ql75lLxDcve" => { path: "src/backend/src/lib.rs", kind: :sed },
+  "call_h44kRiE6J50VSa6kJvpshw9O" => { path: "src/backend/Cargo.toml", kind: :sed },
+  "call_D2nvI6yZbeefvgn9XIZZX79F" => { path: "src/backend/build.rs", kind: :sed },
+  "call_YO8YfZzms44GuK6adhja8RVR" => { path: "Cargo.toml", kind: :sed },
+  "call_P0JtXFd7w8Gd97kLBYEdo5F8" => { path: "ui/vite.config.js", kind: :sed },
+  "call_mT3SWzWPz5KznWEoqUe4Bdqi" => { path: "Justfile", kind: :sed },
+  "call_96ohr5mbX4ZXwrSUjivkyrqN" => { path: "ui/src/prototypes/redesign/screens/LocationScreen.jsx", kind: :sed },
+  "call_Sao8nwv5rHy3V7N95bzL9Pfv" => {
+    path: "ui/package.json",
+    kind: :json_before_diff,
+    tool: :custom_exec,
+    command: "cat ui/package.json && git diff --check && git diff -- ui/src/App.jsx ui/src/App.structure.test.js",
+  },
 }.freeze
+TRUSTED_SOURCE_READ_PATTERN = Regexp.union(TRUSTED_SOURCE_READS.keys).freeze
 
 class RecoveryError < StandardError; end
 
@@ -43,6 +77,8 @@ Options = Struct.new(
   :output,
   :keep_partial,
   :include_generated,
+  :snapshot_horizons,
+  :snapshot_only,
   keyword_init: true,
 )
 
@@ -54,6 +90,8 @@ def options_from(argv)
     output: nil,
     keep_partial: false,
     include_generated: false,
+    snapshot_horizons: false,
+    snapshot_only: false,
   )
 
   parser = OptionParser.new do |opts|
@@ -70,6 +108,8 @@ def options_from(argv)
     opts.on("--output PATH", "New directory for a recovered temporary tree") { |value| options.output = value }
     opts.on("--keep-partial", "Write a clearly partial tree after the first strict conflict") { options.keep_partial = true }
     opts.on("--include-generated", "Include target/, node_modules/, and ui/dist/ records") { options.include_generated = true }
+    opts.on("--snapshot-horizons", "Use the newest verified source snapshot per path, then exact later changes") { options.snapshot_horizons = true }
+    opts.on("--snapshot-only", "Write only the newest verified source snapshot per path") { options.snapshot_only = true }
     opts.on("-h", "--help", "Show this help") { puts opts; exit }
   end
   parser.parse!(argv)
@@ -135,40 +175,72 @@ def command_relative_path(raw_path, historical_root)
   safe_relative_path(absolute, historical_root)
 end
 
-def source_read_request(payload, historical_root)
-  return nil unless payload["type"] == "function_call" && payload["name"] == "exec_command"
-  trusted = TRUSTED_SOURCE_READS[payload["call_id"]]
-  return nil unless trusted
-
-  arguments = JSON.parse(payload["arguments"])
+def source_read_request_from_arguments(arguments, trusted, historical_root)
   return nil unless arguments["workdir"] == historical_root
 
   command = arguments["cmd"].to_s
+  return trusted.dup if trusted[:command] && command == trusted[:command]
+
   if (match = command.match(/\Acat ([A-Za-z0-9_.\/-]+)\z/))
     path = command_relative_path(match[1], historical_root)
     return path == trusted[:path] && trusted.dup
   end
   if (match = command.match(/\Ased -n '1,(\d+)p' ([A-Za-z0-9_.\/-]+)\z/))
     path = command_relative_path(match[2], historical_root)
-    return path == trusted[:path] && trusted.dup if match[1].to_i == trusted[:max_lines]
+    return nil unless path == trusted[:path]
+    return nil if trusted[:max_lines] && match[1].to_i != trusted[:max_lines]
+
+    return trusted.merge(max_lines: match[1].to_i)
+  end
+  nil
+end
+
+def source_read_request(payload, historical_root)
+  trusted = TRUSTED_SOURCE_READS[payload["call_id"]]
+  return nil unless trusted
+
+  if payload["type"] == "function_call" && payload["name"] == "exec_command"
+    return source_read_request_from_arguments(JSON.parse(payload["arguments"]), trusted, historical_root)
+  end
+  if payload["type"] == "custom_tool_call" && payload["name"] == "exec"
+    match = payload["input"].to_s.match(/tools\.exec_command\((\{.*?\})\)/m)
+    return nil unless match
+
+    return source_read_request_from_arguments(JSON.parse(match[1]), trusted, historical_root)
   end
   nil
 rescue JSON::ParserError
   nil
 end
 
+def output_text(output)
+  return output if output.is_a?(String)
+  return nil unless output.is_a?(Array)
+
+  output.each_with_object(String.new) do |block, text|
+    text << block["text"].to_s if block.is_a?(Hash) && block["type"] == "input_text"
+  end
+end
+
 def snapshot_content(output, request)
-  return nil unless output.is_a?(String)
-  return nil if output.include?("Warning: truncated") || output.include?("...truncated...")
+  text = output_text(output)
+  return nil unless text
+  return nil if text.include?("Warning: truncated") || text.include?("...truncated...")
 
   marker = "Output:\n"
-  offset = output.index(marker)
+  offset = text.index(marker)
   return nil unless offset
 
-  content = output[(offset + marker.length)..]
-  return nil if request[:kind] == :sed && content.lines.count >= request[:max_lines]
+  content = text[(offset + marker.length)..]
+  if request[:kind] == :json_before_diff
+    content = content.split(/\ndiff --git /, 2).first
+    JSON.parse(content)
+  end
+  return nil if request[:kind] == :sed && request[:max_lines] && content.lines.count >= request[:max_lines]
 
   content
+rescue JSON::ParserError
+  nil
 end
 
 def parse_patch(patch, historical_root:, include_generated:)
@@ -241,7 +313,7 @@ def collect_records(options)
     File.foreach(session_file).with_index(1) do |line, line_number|
       scanned_lines += 1
       next if line[0, 14] == '{"timestamp":"' && line[14, 24] >= options.cutoff
-      next unless line.include?(BEGIN_PATCH) || TRUSTED_SOURCE_READS.keys.any? { |call_id| line.include?(call_id) }
+      next unless line.include?(BEGIN_PATCH) || TRUSTED_SOURCE_READ_PATTERN.match?(line)
 
       event = JSON.parse(line)
       payload = event["payload"] || {}
@@ -257,7 +329,7 @@ def collect_records(options)
         next
       end
 
-      if payload["type"] == "function_call_output"
+      if %w[function_call_output custom_tool_call_output].include?(payload["type"])
         request = read_requests[payload["call_id"]]
         next unless request && request[:source_file] == session_file
         content = snapshot_content(payload["output"], request)
@@ -413,6 +485,45 @@ def apply_record(state, record)
   trial
 end
 
+def record_sort_key(record)
+  [record[:timestamp], record[:source_file], record[:source_line], record[:ordinal], record.fetch(:change_index, 0)]
+end
+
+def later_record?(candidate, baseline)
+  (record_sort_key(candidate) <=> record_sort_key(baseline)) == 1
+end
+
+def change_paths(change)
+  [change[:path], change[:move_to]].compact.uniq
+end
+
+def snapshot_horizon_replay(records)
+  horizons = {}
+  records.select { |record| record[:kind] == "snapshot" }.each do |record|
+    path = record[:changes].fetch(0).fetch(:path)
+    current = horizons[path]
+    horizons[path] = record if current.nil? || later_record?(record, current)
+  end
+
+  replay = horizons.values.dup
+  skipped_changes = 0
+  records.reject { |record| record[:kind] == "snapshot" }.each do |record|
+    record[:changes].each_with_index do |change, change_index|
+      needs_replay = change_paths(change).any? do |path|
+        horizon = horizons[path]
+        horizon.nil? || later_record?(record, horizon)
+      end
+      if needs_replay
+        replay << record.merge(changes: [change], change_index: change_index)
+      else
+        skipped_changes += 1
+      end
+    end
+  end
+
+  [replay.sort_by { |record| record_sort_key(record) }, horizons, skipped_changes]
+end
+
 def write_tree(output, state, report)
   raise RecoveryError, "output already exists: #{output}" if File.exist?(output)
 
@@ -448,6 +559,18 @@ begin
   options = options_from(ARGV)
   records, ignored, scanned_files, scanned_lines, = collect_records(options)
   summary = manifest(records, ignored, scanned_files, scanned_lines, options)
+  replay_records = records
+  if options.snapshot_horizons || options.snapshot_only
+    replay_records, horizons, skipped_changes = snapshot_horizon_replay(records)
+    replay_records = horizons.values.sort_by { |record| record_sort_key(record) } if options.snapshot_only
+    summary.merge!(
+      recovery_mode: options.snapshot_only ? "latest-verified-snapshots" : "snapshot-horizons-plus-exact-patches",
+      snapshot_horizon_paths: horizons.keys.sort,
+      snapshot_horizon_count: horizons.length,
+      replay_calls_after_horizons: replay_records.length,
+      skipped_pre_horizon_changes: skipped_changes,
+    )
+  end
 
   unless options.output
     puts JSON.pretty_generate(summary)
@@ -457,7 +580,7 @@ begin
   state = {}
   applied = 0
   conflict = nil
-  records.each do |record|
+  replay_records.each do |record|
     state = apply_record(state, record)
     applied += 1
   rescue RecoveryError => error
