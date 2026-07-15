@@ -21,6 +21,11 @@ export default {
         'danger-soft': 'var(--danger-soft)',
         warning: 'var(--warning)',
         'warning-soft': 'var(--warning-soft)',
+        success: 'var(--success)',
+        'success-soft': 'var(--success-soft)',
+        info: 'var(--info)',
+        'info-soft': 'var(--info-soft)',
+        'text-tertiary': 'var(--text-tertiary)',
         sidebar: {
           bg: 'var(--sidebar-bg)',
           surface: 'var(--sidebar-surface)',
