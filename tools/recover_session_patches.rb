@@ -101,12 +101,13 @@ def complete_read_seeds
   data.fetch("seeds").map.with_index do |entry, index|
     segments = entry.fetch("segments")
     raise RecoveryError, "complete read seed has no segments: #{entry.fetch("path")}" if segments.empty?
+    seed_source_log = entry.fetch("source_log", source_log)
 
     {
       id: entry.fetch("id", "seed-#{index}"),
       path: entry.fetch("path"),
       timestamp: entry.fetch("timestamp"),
-      source_log: entry.fetch("source_log", source_log),
+      source_log: seed_source_log,
       bytes: entry.fetch("bytes"),
       lines: entry.fetch("lines"),
       sha256: entry.fetch("sha256"),
@@ -116,6 +117,7 @@ def complete_read_seeds
           command: segment.fetch("command"),
           request_line: segment.fetch("request_line"),
           output_line: segment.fetch("output_line"),
+          source_log: segment.fetch("source_log", seed_source_log),
         }
       end,
     }
@@ -134,7 +136,7 @@ def complete_read_seed_requests
         path: seed[:path],
         kind: :complete_read_segment,
         command: segment[:command],
-        expected_source_log: seed[:source_log],
+        expected_source_log: segment[:source_log],
         expected_source_line: segment[:request_line],
         expected_output_line: segment[:output_line],
         complete_seed: seed,
@@ -415,16 +417,38 @@ def merge_complete_read_segments(seed, segments)
     content
   end
 
+  multiple_segments = ordered.length > 1
   content = ordered.shift.dup
+  if multiple_segments
+    first_from, covered_to = complete_read_segment_range(seed, seed[:segments].fetch(0), content, 1)
+    unless first_from == 1
+      raise RecoveryError, "complete-read first segment does not start at line 1 for #{seed[:path]}"
+    end
+  end
+
   ordered.each_with_index do |segment, index|
+    segment_number = index + 2
     previous_lines = content.lines
     next_lines = segment.lines
-    raise RecoveryError, "empty complete-read segment #{index + 2} for #{seed[:path]}" if next_lines.empty?
-    unless previous_lines.last == next_lines.first
-      raise RecoveryError, "complete-read boundary mismatch at segment #{index + 2} for #{seed[:path]}"
+    next_from, next_to = complete_read_segment_range(seed, seed[:segments].fetch(index + 1), segment, segment_number)
+    if next_from > covered_to + 1
+      raise RecoveryError, "complete-read gap before segment #{segment_number} for #{seed[:path]}"
+    end
+    if next_to <= covered_to
+      raise RecoveryError, "complete-read segment #{segment_number} does not advance #{seed[:path]}"
     end
 
-    content = previous_lines.join + next_lines.drop(1).join
+    overlap = [covered_to - next_from + 1, 0].max
+    if overlap.positive? && previous_lines.last(overlap) != next_lines.first(overlap)
+      raise RecoveryError, "complete-read overlap mismatch at segment #{segment_number} for #{seed[:path]}"
+    end
+
+    content = previous_lines.join + next_lines.drop(overlap).join
+    covered_to = next_to
+  end
+
+  if multiple_segments && covered_to != seed[:lines]
+    raise RecoveryError, "complete-read coverage mismatch for #{seed[:path]}"
   end
 
   raise RecoveryError, "complete-read byte mismatch for #{seed[:path]}" unless content.bytesize == seed[:bytes]
@@ -432,6 +456,25 @@ def merge_complete_read_segments(seed, segments)
   raise RecoveryError, "complete-read hash mismatch for #{seed[:path]}" unless Digest::SHA256.hexdigest(content) == seed[:sha256]
 
   content
+end
+
+def complete_read_segment_range(seed, segment, content, segment_number)
+  match = segment[:command].match(/\Ased -n '(\d+),(\d+)p' #{Regexp.escape(seed[:path])}\z/)
+  unless match
+    raise RecoveryError, "complete-read segment #{segment_number} needs a numbered sed range for #{seed[:path]}"
+  end
+
+  from = match[1].to_i
+  requested_to = match[2].to_i
+  lines = content.lines
+  raise RecoveryError, "empty complete-read segment #{segment_number} for #{seed[:path]}" if lines.empty?
+
+  expected_lines = [requested_to, seed[:lines]].min - from + 1
+  if expected_lines <= 0 || lines.length != expected_lines
+    raise RecoveryError, "complete-read range length mismatch at segment #{segment_number} for #{seed[:path]}"
+  end
+
+  [from, from + lines.length - 1]
 end
 
 def complete_read_snapshot_records(seed_segments)

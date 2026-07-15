@@ -15,6 +15,21 @@
       ]
     },
     {
+      "id": "react-app-2026-06-14-2331",
+      "path": "ui/src/App.jsx",
+      "timestamp": "2026-06-14T23:31:52.680Z",
+      "bytes": 69800,
+      "lines": 1737,
+      "sha256": "2b15df6cfc1d9c16df27e375450293e20b5eed4ba09dc7a3c94131f8bd0395db",
+      "segments": [
+        { "call_id": "call_tGDKqtwEfHRmr34S1mMKoNtT", "command": "sed -n '1,260p' ui/src/App.jsx", "request_line": 33269, "output_line": 33273 },
+        { "call_id": "call_BOhWGTu1wFtURZMNgOSn1iFF", "command": "sed -n '220,520p' ui/src/App.jsx", "request_line": 33298, "output_line": 33299 },
+        { "call_id": "call_Dq2EmgLehhlZMWIuWjhVCBk1", "command": "sed -n '520,1040p' ui/src/App.jsx", "request_line": 33303, "output_line": 33304 },
+        { "call_id": "call_Y1IuJJoxWzaX8YlilJdnSWGr", "command": "sed -n '1040,1400p' ui/src/App.jsx", "request_line": 33306, "output_line": 33307 },
+        { "call_id": "call_hXm1QNen2sUDOZJkMxqybdZE", "command": "sed -n '1400,1780p' ui/src/App.jsx", "request_line": 33412, "output_line": 33413 }
+      ]
+    },
+    {
       "id": "backend-db-2026-06-13",
       "path": "src/backend/src/db.rs",
       "timestamp": "2026-06-13T00:28:01.877Z",
