@@ -61,6 +61,12 @@ test('stop scan acknowledgements immediately mark scans as stopping', () => {
   assert.match(fileExplorerSource, /statusLabel\(activeScan\.status\)/);
 });
 
+test('folder browsing is scan-scoped rather than location-root-relative', () => {
+  assert.match(appSource, /async function browseCurrentFolder\(location\) \{[\s\S]*?const scanId = latest\.current\.selectedScanId/);
+  assert.match(appSource, /rpc\('scans\.open_folder', \{[\s\S]*?scan_id: scanId,[\s\S]*?path: latest\.current\.selectedPath \|\| null/);
+  assert.doesNotMatch(appSource, /rpc\('locations\.open_folder'/);
+});
+
 test('recovery UI does not invent an unsupported file-extra-info transport', () => {
   // The recovered backend has no file-extra-info RPC; exposing one would lie about its progress.
   assert.doesNotMatch(appSource, /file_extra_info\.scan/);

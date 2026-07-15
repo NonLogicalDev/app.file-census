@@ -463,6 +463,42 @@ pub fn prepare_scan_with_started_at(
     })
 }
 
+/// Prepares the shorthand bootstrap form without leaving behind a location
+/// when the source or offset is invalid. Filesystem validation happens before
+/// the database transaction; location creation and date-derived scan
+/// reservation then happen together inside that transaction.
+pub fn prepare_bootstrap_scan_with_started_at(
+    db: &Database,
+    source_path: &Path,
+    volume_slug: &str,
+    offset_path: &Path,
+    started_at: DateTime<Utc>,
+) -> Result<PreparedScan> {
+    if source_path.to_string_lossy().trim().is_empty() {
+        anyhow::bail!("source path must not be blank");
+    }
+    if volume_slug.trim().is_empty() {
+        anyhow::bail!("volume slug must not be blank");
+    }
+
+    let canonical_source = canonical_directory(source_path, "source path")?;
+    let scan_root = resolve_contained_scan_root(&canonical_source, offset_path)?;
+    let reservation = db.bootstrap_location_and_start_scan(
+        volume_slug,
+        &canonical_source,
+        offset_path,
+        started_at,
+    )?;
+
+    Ok(PreparedScan {
+        scan_id: reservation.scan_id,
+        location: reservation.location,
+        scan_root,
+        reuse_from_scan_id: None,
+        reusable_files: HashMap::new(),
+    })
+}
+
 fn prepare_scan_with_start(
     db: &Database,
     slug: &str,
@@ -1249,6 +1285,16 @@ fn sidecar_path(path: &Path, suffix: &str) -> Option<PathBuf> {
     Some(PathBuf::from(format!("{}-{suffix}", path.to_str()?)))
 }
 
+fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {label} {}", path.display()))?;
+    if !canonical.is_dir() {
+        anyhow::bail!("{label} {} is not a directory", path.display());
+    }
+    Ok(canonical)
+}
+
 fn resolve_contained_scan_root(location_root: &Path, offset: &Path) -> Result<PathBuf> {
     let canonical_location_root = location_root
         .canonicalize()
@@ -1451,6 +1497,85 @@ mod tests {
         assert_eq!(prepared.scan_id, "20260715T123456Z--archive-volume");
         let scan = db.scan_by_id(&prepared.scan_id).unwrap().unwrap();
         assert_eq!(scan.started_at, started_at.to_rfc3339());
+    }
+
+    #[test]
+    fn prepare_bootstrap_scan_creates_unknown_location_and_date_derived_scan() {
+        let root = test_root("bootstrap-scan");
+        let source_root = root.join("source");
+        std::fs::create_dir_all(source_root.join("nested")).unwrap();
+        let db = Database::open(root.join("state.db")).unwrap();
+        let started_at = DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let prepared = prepare_bootstrap_scan_with_started_at(
+            &db,
+            &source_root,
+            "archive-volume",
+            Path::new("/nested"),
+            started_at.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.scan_id, "20260715T123456Z--archive-volume");
+        assert_eq!(prepared.location.kind, LocationType::Unknown);
+        assert_eq!(prepared.location.name, "archive-volume");
+        assert_eq!(
+            prepared.scan_root,
+            source_root.join("nested").canonicalize().unwrap()
+        );
+        let scan = db.scan_by_id(&prepared.scan_id).unwrap().unwrap();
+        assert_eq!(scan.started_at, started_at.to_rfc3339());
+        assert_eq!(scan.offset_path, "/nested");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepare_bootstrap_scan_rejects_invalid_setup_without_creating_a_location() {
+        let root = test_root("bootstrap-scan-invalid-setup");
+        let source_root = root.join("source");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        let db = Database::open(root.join("state.db")).unwrap();
+        let started_at = DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        for (offset, message) in [
+            (Path::new("/missing"), "resolving scan offset /missing beneath location root"),
+            (
+                Path::new("../outside"),
+                "resolves outside canonical location root",
+            ),
+        ] {
+            let error = prepare_bootstrap_scan_with_started_at(
+                &db,
+                &source_root,
+                "archive-volume",
+                offset,
+                started_at.clone(),
+            )
+            .expect_err("invalid bootstrap setup must be rejected before mutation");
+            assert!(error.to_string().contains(message), "{error:#}");
+            assert!(db.locations().unwrap().is_empty());
+            assert!(db.scans().unwrap().is_empty());
+        }
+
+        let error = prepare_bootstrap_scan_with_started_at(
+            &db,
+            &source_root,
+            "",
+            Path::new("/"),
+            started_at,
+        )
+        .expect_err("blank bootstrap slug must be rejected before mutation");
+        assert!(error.to_string().contains("volume slug must not be blank"));
+        assert!(db.locations().unwrap().is_empty());
+        assert!(db.scans().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

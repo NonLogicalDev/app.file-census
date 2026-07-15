@@ -66,7 +66,6 @@ export default function App() {
   const [dupes, setDupes] = useState([]);
   const [selectedDuplicateScanIds, setSelectedDuplicateScanIds] = useState([]);
   const [duplicateView, setDuplicateViewState] = useState('flat');
-  const [searchView, setSearchViewState] = useState('flat');
   const [searchAllScans, setSearchAllScans] = useState(false);
   const [selectedSearchScanIds, setSelectedSearchScanIds] = useState([]);
   const [results, setResults] = useState([]);
@@ -138,7 +137,7 @@ export default function App() {
   const scanExcludeRefreshes = useRef(new Map());
   const reconcilingExcludeTrees = useRef(new Set());
 
-  Object.assign(latest.current, { locations, scans, dupes, selectedDuplicateScanIds, duplicateView, searchView, searchAllScans, selectedSearchScanIds, scanProgress, selectedLocationSlug, selectedScanId, selectedPath, scanSubview, activeTab, query, searchFilters, pathHistory, pathHistoryIndex, deleteCheck, deleteCheckPath, selectedGridPaths, buildThumbnailRequest, confirmDeletePath, fileInfo });
+  Object.assign(latest.current, { locations, scans, dupes, selectedDuplicateScanIds, duplicateView, searchAllScans, selectedSearchScanIds, scanProgress, selectedLocationSlug, selectedScanId, selectedPath, scanSubview, activeTab, query, searchFilters, pathHistory, pathHistoryIndex, deleteCheck, deleteCheckPath, selectedGridPaths, buildThumbnailRequest, confirmDeletePath, fileInfo });
 
   const mergeProgress = useCallback((items) => {
     const validItems = (items || []).filter(Boolean);
@@ -362,7 +361,6 @@ export default function App() {
       if (encodedFilters) params.set('filters', encodedFilters);
     } else if (state.activeTab === 'search') {
       path = '/search';
-      if (state.searchView && state.searchView !== 'flat') params.set('view', state.searchView);
       if (state.selectedSearchScanIds?.length) {
         params.set('scope', 'explicit');
         params.set('scans', state.selectedSearchScanIds.join(','));
@@ -437,7 +435,6 @@ export default function App() {
       setActiveTab('search');
       const nextQuery = url.searchParams.get('q') || '';
       const nextSearchFilters = decodeSearchFilters(url.searchParams.get('filters'));
-      const nextSearchView = url.searchParams.get('view') === 'tree' ? 'tree' : 'flat';
       const nextSearchScope = url.searchParams.get('scope');
       const requestedSearchScanIds = parseScanIds(url.searchParams.get('scans'));
       const nextSearchScanIds = nextSearchScope === 'explicit' || (!nextSearchScope && requestedSearchScanIds.length)
@@ -446,10 +443,9 @@ export default function App() {
       const nextSearchAllScans = !nextSearchScanIds.length && nextSearchScope === 'all';
       setQuery(nextQuery);
       setSearchFilters(nextSearchFilters);
-      setSearchViewState(nextSearchView);
       setSearchAllScans(nextSearchAllScans);
       setSelectedSearchScanIds(nextSearchScanIds);
-      Object.assign(latest.current, { activeTab: 'search', query: nextQuery, searchFilters: nextSearchFilters, searchView: nextSearchView, searchAllScans: nextSearchAllScans, selectedSearchScanIds: nextSearchScanIds });
+      Object.assign(latest.current, { activeTab: 'search', query: nextQuery, searchFilters: nextSearchFilters, searchAllScans: nextSearchAllScans, selectedSearchScanIds: nextSearchScanIds });
       pendingRouteSearch.current = Boolean(nextQuery.trim() || nextSearchFilters.length);
       return;
     }
@@ -1145,10 +1141,14 @@ export default function App() {
   }
 
   async function browseCurrentFolder(location) {
-    if (!location?.connected) return;
+    const scanId = latest.current.selectedScanId;
+    if (!location?.connected || !scanId) return;
     setBusy(true);
     try {
-      await rpc('locations.open_folder', { slug: location.slug, path: latest.current.selectedPath });
+      await rpc('scans.open_folder', {
+        scan_id: scanId,
+        path: latest.current.selectedPath || null
+      });
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -1710,13 +1710,6 @@ export default function App() {
     const nextView = view === 'tree' ? 'tree' : 'flat';
     setDuplicateViewState(nextView);
     latest.current.duplicateView = nextView;
-    routeTo(true);
-  }
-
-  function setSearchView(view) {
-    const nextView = view === 'tree' ? 'tree' : 'flat';
-    setSearchViewState(nextView);
-    latest.current.searchView = nextView;
     routeTo(true);
   }
 
@@ -2376,11 +2369,9 @@ export default function App() {
           results={results}
           busy={busy}
           loading={searchLoading}
-          searchView={searchView}
           searchAllScans={searchAllScans}
           selectedScanIds={selectedSearchScanIds}
           onSearch={search}
-          onSetSearchView={setSearchView}
           onSetSearchAllScans={setSearchAllScanScope}
           onSetSelectedScanIds={setSearchScanSelection}
           onAddFilter={addSearchFilterForCurrentView}

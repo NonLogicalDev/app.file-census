@@ -9,12 +9,11 @@ default:
 
 # Build the embedded React UI and Rust browser-server binary.
 build:
-    npm --prefix ui run build
-    {{dev}} cargo build -p file-census-backend
+    {{dev}} /bin/sh -c 'npm --prefix ui run build && cargo build -p file-census-backend'
 
 # Run isolated React component previews.
 ui-preview:
-    npm --prefix ui run preview
+    {{dev}} npm --prefix ui run preview
 
 # Build and run a fresh compiled instance.
 run: build
@@ -30,8 +29,7 @@ run-no-open: build
 
 # Build an optimized single binary.
 release:
-    npm --prefix ui run build
-    {{dev}} cargo build -p file-census-backend --release
+    {{dev}} /bin/sh -c 'npm --prefix ui run build && cargo build -p file-census-backend --release'
 
 # Run the Tauri desktop app in development mode.
 desktop-dev:
@@ -39,8 +37,7 @@ desktop-dev:
 
 # Build and run a fresh compiled native desktop app.
 desktop-run:
-    npm --prefix ui run build
-    {{dev}} cargo run -p file-census-native-app
+    {{dev}} /bin/sh -c 'npm --prefix ui run build && cargo run -p file-census-native-app'
 
 # Build the Tauri desktop app bundle for the current platform.
 desktop-build:
@@ -56,8 +53,7 @@ desktop-build-appimage:
 
 # Build the Tauri desktop Rust crate without packaging.
 desktop-check:
-    npm --prefix ui run build
-    {{dev}} cargo build -p file-census-native-app
+    {{dev}} /bin/sh -c 'npm --prefix ui run build && cargo build -p file-census-native-app'
 
 # Run explicit ignored performance gates for scan/tree/delete hot paths.
 perf-gates:

@@ -103,6 +103,17 @@ pub struct Scan {
     pub notes: Option<String>,
 }
 
+/// The location and running scan reserved by a compatible bootstrap request.
+///
+/// The database transaction either verifies an existing compatible location or
+/// creates the missing location before reserving this scan, so a failed setup
+/// never leaves behind a partially-created location.
+#[derive(Clone, Debug)]
+pub struct BootstrapScan {
+    pub location: Location,
+    pub scan_id: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ScanExclude {
     pub id: i64,
@@ -149,6 +160,17 @@ pub struct FileOccurrence {
     pub mtime: Option<String>,
     pub mode: Option<u32>,
     pub error: Option<String>,
+}
+
+/// A filesystem target that was authorized against one scan's current
+/// non-destructive visibility boundary.
+///
+/// Callers must launch the returned path directly rather than reading the
+/// scan or location again, which would reintroduce a visibility TOCTOU gap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisibleScanActionTarget {
+    pub filesystem_path: PathBuf,
+    pub kind: String,
 }
 
 /// A source-validated page of visible content occurrences. The origin check
@@ -731,6 +753,96 @@ impl Database {
         Ok(id)
     }
 
+    /// Atomically creates a missing Unknown location and reserves a running
+    /// date-derived scan for it.
+    ///
+    /// Callers must supply a canonical, validated source root and a validated
+    /// offset. For an existing location, this transaction canonicalizes its
+    /// stored root and requires it to match, preserving the legacy
+    /// path-equivalence behavior without repointing the location. The location
+    /// insertion, scan ID reservation, and scan insertion share one
+    /// `BEGIN IMMEDIATE` transaction.
+    pub fn bootstrap_location_and_start_scan(
+        &self,
+        slug: &str,
+        canonical_root: &Path,
+        offset_path: &Path,
+        started_at: DateTime<Utc>,
+    ) -> Result<BootstrapScan> {
+        if slug.trim().is_empty() {
+            anyhow::bail!("volume slug must not be blank");
+        }
+        if canonical_root.as_os_str().is_empty() {
+            anyhow::bail!("source path must not be blank");
+        }
+
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let location = match location_by_slug_from_conn(&tx, slug)? {
+            Some(location) => {
+                let existing_root = location.root_path.canonicalize().with_context(|| {
+                    format!(
+                        "canonicalizing existing location {slug} root {}",
+                        location.root_path.display()
+                    )
+                })?;
+                if !existing_root.is_dir() {
+                    anyhow::bail!(
+                        "existing location {slug} root {} is not a directory",
+                        location.root_path.display()
+                    );
+                }
+                if existing_root.as_path() != canonical_root {
+                    anyhow::bail!(
+                        "existing location {slug} root {} does not match source path {}",
+                        existing_root.display(),
+                        canonical_root.display()
+                    );
+                }
+                location
+            }
+            None => {
+                let location = Location {
+                    id: Uuid::new_v4().to_string(),
+                    slug: slug.to_string(),
+                    name: slug.to_string(),
+                    kind: LocationType::Unknown,
+                    root_path: canonical_root.to_path_buf(),
+                    notes: None,
+                    representative_scan_id: None,
+                    disabled: false,
+                    created_at: Utc::now().to_rfc3339(),
+                };
+                tx.execute(
+                    "INSERT INTO locations (id, slug, name, type, root_path, notes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        location.id,
+                        location.slug,
+                        location.name,
+                        location.kind.to_string(),
+                        location.root_path.to_string_lossy(),
+                        location.notes,
+                        location.created_at,
+                    ],
+                )?;
+                location
+            }
+        };
+        let scan_id = Self::next_date_derived_scan_id(&tx, &started_at, &location.slug)?;
+        tx.execute(
+            "INSERT INTO scans (id, location_id, offset_path, started_at, status) VALUES (?1, ?2, ?3, ?4, 'running')",
+            params![
+                scan_id,
+                location.id,
+                offset_path.to_string_lossy(),
+                started_at.to_rfc3339(),
+            ],
+        )?;
+        invalidate_duplicate_cache_conn(&tx)?;
+        tx.commit()?;
+        Ok(BootstrapScan { location, scan_id })
+    }
+
     /// Atomically inserts a running scan with an ID derived from the supplied
     /// UTC start time and the stored location slug. Collisions use `--2`,
     /// `--3`, and so on, chosen and inserted inside one write transaction.
@@ -1036,6 +1148,87 @@ impl Database {
         }
         tx.commit()?;
         Ok(deleted)
+    }
+
+    /// Resolves an OS action target from one coherent scan visibility state.
+    ///
+    /// The short immediate transaction is the linearization point between an
+    /// action request and a concurrent scan-exclude update: an exclude update
+    /// either commits before this method and hides the path, or commits after
+    /// this method has authorized and returned the target. The transaction is
+    /// intentionally committed before the caller launches the external OS
+    /// action, so a slow launcher never holds the database writer lock.
+    pub fn resolve_visible_scan_action_target(
+        &self,
+        scan_id: &str,
+        path: &str,
+    ) -> Result<VisibleScanActionTarget> {
+        let path = normalize_scan_action_path(path)?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (root_path, offset_path): (String, String) = tx
+            .query_row(
+                r#"
+                SELECT l.root_path, s.offset_path
+                FROM scans s
+                JOIN locations l ON l.id = s.location_id
+                WHERE s.id = ?1
+                "#,
+                [scan_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .with_context(|| format!("scan or location not found: {scan_id}"))?;
+        let offset_path = normalized_scan_action_offset_path(&offset_path)?;
+
+        prepare_excluded_file_ids(&tx, [scan_id.to_string()])?;
+        let direct_kind: Option<String> = tx
+            .query_row(
+                r#"
+                SELECT f.kind
+                FROM files f
+                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                WHERE f.scan_id = ?1
+                  AND f.path = ?2
+                  AND f.error IS NULL
+                  AND excluded_f.id IS NULL
+                "#,
+                params![scan_id, &path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let kind = match direct_kind {
+            Some(kind) => kind,
+            None => {
+                let descendant_like = scan_path_descendant_like(&path);
+                let has_visible_descendants: bool = tx.query_row(
+                    r#"
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM files f
+                        LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                        WHERE f.scan_id = ?1
+                          AND f.path LIKE ?2 ESCAPE '\'
+                          AND f.error IS NULL
+                          AND excluded_f.id IS NULL
+                    )
+                    "#,
+                    params![scan_id, descendant_like],
+                    |row| row.get(0),
+                )?;
+                if !has_visible_descendants {
+                    anyhow::bail!("path not found or excluded from scan: {path}");
+                }
+                "dir".to_string()
+            }
+        };
+
+        let target = VisibleScanActionTarget {
+            filesystem_path: PathBuf::from(root_path).join(offset_path).join(&path),
+            kind,
+        };
+        tx.commit()?;
+        Ok(target)
     }
 
     pub fn scan_excludes(&self, scan_id: &str) -> Result<Vec<ScanExclude>> {
@@ -2297,6 +2490,70 @@ fn normalize_file_path(path: &str) -> String {
         .filter(|part| !part.is_empty() && *part != "." && *part != "..")
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Normalizes an untrusted action path without allowing it to escape the
+/// scan's stored root. Both separator styles are parsed so Windows-form input
+/// cannot regain traversal semantics after validation.
+fn normalize_scan_action_path(path: &str) -> Result<String> {
+    let path = normalize_scan_action_relative_path(path, "scan path")?;
+    if path.is_empty() {
+        anyhow::bail!("path must not be the scan root");
+    }
+    Ok(path)
+}
+
+/// Converts the persisted scan offset into a safe location-relative action
+/// root. Existing malformed rows fail closed instead of being silently
+/// rewritten before an OS action is launched.
+fn normalized_scan_action_offset_path(offset_path: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(normalize_scan_action_relative_path(
+        offset_path,
+        "scan offset path",
+    )?))
+}
+
+fn normalize_scan_action_relative_path(path: &str, label: &str) -> Result<String> {
+    if path.contains('\0') {
+        anyhow::bail!("{label} may not contain a NUL byte");
+    }
+
+    let mut prefix = path.chars();
+    if prefix.next().is_some_and(is_scan_action_path_separator)
+        && prefix.next().is_some_and(is_scan_action_path_separator)
+    {
+        anyhow::bail!("{label} may not contain a UNC or device prefix");
+    }
+
+    let mut normalized = Vec::new();
+    for part in path.split(is_scan_action_path_separator) {
+        match part {
+            "" | "." => {}
+            ".." => anyhow::bail!("{label} may not contain traversal"),
+            _ if looks_like_windows_drive_prefix(part) => {
+                anyhow::bail!("{label} may not contain a Windows drive prefix")
+            }
+            _ => normalized.push(part),
+        }
+    }
+    Ok(normalized.join("/"))
+}
+
+fn is_scan_action_path_separator(character: char) -> bool {
+    character == '/' || character == '\\'
+}
+
+fn looks_like_windows_drive_prefix(part: &str) -> bool {
+    let bytes = part.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+fn scan_path_descendant_like(path: &str) -> String {
+    let escaped = path
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("{escaped}/%")
 }
 
 pub fn exact_scan_exclude_pattern(path: &str, kind: &str) -> Result<String> {
@@ -3634,6 +3891,16 @@ fn location_by_id_from_conn(conn: &Connection, id: &str) -> Result<Option<Locati
     .map_err(Into::into)
 }
 
+fn location_by_slug_from_conn(conn: &Connection, slug: &str) -> Result<Option<Location>> {
+    conn.query_row(
+        "SELECT id, slug, name, type, root_path, notes, representative_scan_id, disabled, created_at FROM locations WHERE slug = ?1",
+        [slug],
+        location_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn reusable_files_for_scan_conn(
     conn: &Connection,
     scan_id: &str,
@@ -3830,6 +4097,137 @@ mod tests {
             assert_eq!(scan.started_at, started_at.to_rfc3339());
             assert_eq!(scan.status, "running");
         }
+    }
+
+    #[test]
+    fn bootstrap_location_and_scan_reserves_date_ids_without_repointing_locations() {
+        let root = test_root("bootstrap-location-and-scan");
+        let source_root = root.join("source");
+        std::fs::create_dir_all(&source_root).unwrap();
+        let canonical_source = source_root.canonicalize().unwrap();
+        let db = Database::open(root.join("state.db")).unwrap();
+        let started_at = DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let first = db
+            .bootstrap_location_and_start_scan(
+                "archive-volume",
+                &canonical_source,
+                Path::new("/"),
+                started_at.clone(),
+            )
+            .unwrap();
+        assert_eq!(first.scan_id, "20260715T123456Z--archive-volume");
+        assert_eq!(first.location.kind, LocationType::Unknown);
+        assert_eq!(first.location.name, "archive-volume");
+        assert_eq!(first.location.root_path, canonical_source);
+
+        let second = db
+            .bootstrap_location_and_start_scan(
+                "archive-volume",
+                &canonical_source,
+                Path::new("/"),
+                started_at.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            second.scan_id,
+            "20260715T123456Z--archive-volume--2"
+        );
+        assert_eq!(db.locations().unwrap().len(), 1);
+        assert_eq!(db.scans().unwrap().len(), 2);
+
+        let other_source = root.join("other-source");
+        std::fs::create_dir_all(&other_source).unwrap();
+        let error = db
+            .bootstrap_location_and_start_scan(
+                "archive-volume",
+                &other_source.canonicalize().unwrap(),
+                Path::new("/"),
+                started_at,
+            )
+            .expect_err("mismatched existing roots must not create a scan");
+        assert!(error.to_string().contains("does not match source path"));
+        assert_eq!(db.locations().unwrap().len(), 1);
+        assert_eq!(db.scans().unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bootstrap_location_and_scan_rolls_back_location_when_scan_insert_fails() {
+        let root = test_root("bootstrap-scan-rollback");
+        let source_root = root.join("source");
+        std::fs::create_dir_all(&source_root).unwrap();
+        let canonical_source = source_root.canonicalize().unwrap();
+        let db = Database::open(root.join("state.db")).unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER force_bootstrap_scan_failure
+            BEFORE INSERT ON scans
+            BEGIN
+                SELECT RAISE(ABORT, 'forced bootstrap scan failure');
+            END;
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let started_at = DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let error = db
+            .bootstrap_location_and_start_scan(
+                "archive-volume",
+                &canonical_source,
+                Path::new("/"),
+                started_at,
+            )
+            .expect_err("forced scan insert failure must roll back the location");
+        assert!(error.to_string().contains("forced bootstrap scan failure"));
+        assert!(db.locations().unwrap().is_empty());
+        assert!(db.scans().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bootstrap_location_and_scan_accepts_equivalent_noncanonical_existing_root() {
+        let root = test_root("bootstrap-noncanonical-existing-root");
+        let source_root = root.join("source");
+        std::fs::create_dir_all(&source_root).unwrap();
+        let stored_root = root.join("source/../source");
+        let canonical_source = source_root.canonicalize().unwrap();
+        let db = Database::open(root.join("state.db")).unwrap();
+        let existing = db
+            .add_location(LocationInput {
+                kind: LocationType::Disk,
+                name: "Archive".to_string(),
+                slug: "archive-volume".to_string(),
+                root_path: stored_root.clone(),
+                notes: None,
+            })
+            .unwrap();
+        let started_at = DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let reservation = db
+            .bootstrap_location_and_start_scan(
+                "archive-volume",
+                &canonical_source,
+                Path::new("/"),
+                started_at,
+            )
+            .unwrap();
+        assert_eq!(reservation.location.id, existing.id);
+        assert_eq!(reservation.location.root_path, stored_root);
+        assert_eq!(db.locations().unwrap().len(), 1);
+        assert_eq!(db.scans().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4340,6 +4738,187 @@ mod tests {
                 20,
                 0,
             )
+            .is_err());
+    }
+
+    #[test]
+    fn visible_scan_action_target_resolves_visible_file_and_direct_or_synthetic_directory() {
+        let root = test_root("visible-scan-action-target");
+        let location_root = root.join("location");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "source".to_string(),
+                root_path: location_root.clone(),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db
+            .start_scan(&location, Path::new("/scan-subdirectory"))
+            .unwrap();
+        db.insert_file_batch(&[
+            test_file(&scan_id, "visible.txt", 1, "visible-hash"),
+            NewFile {
+                scan_id: scan_id.clone(),
+                kind: "dir".to_string(),
+                path: "empty-dir".to_string(),
+                name: "empty-dir".to_string(),
+                size: 0,
+                blake3: String::new(),
+                sha256: String::new(),
+                ctime: None,
+                mtime: None,
+                mode: None,
+                error: None,
+            },
+            test_file(&scan_id, "synthetic-dir/child.txt", 2, "child-hash"),
+        ])
+        .unwrap();
+
+        let file = db
+            .resolve_visible_scan_action_target(&scan_id, "/visible.txt")
+            .unwrap();
+        assert_eq!(file.kind, "file");
+        assert_eq!(
+            file.filesystem_path,
+            location_root.join("scan-subdirectory").join("visible.txt")
+        );
+
+        let direct_dir = db
+            .resolve_visible_scan_action_target(&scan_id, "empty-dir")
+            .unwrap();
+        assert_eq!(direct_dir.kind, "dir");
+        assert_eq!(
+            direct_dir.filesystem_path,
+            location_root.join("scan-subdirectory").join("empty-dir")
+        );
+
+        let synthetic_dir = db
+            .resolve_visible_scan_action_target(&scan_id, "synthetic-dir")
+            .unwrap();
+        assert_eq!(synthetic_dir.kind, "dir");
+        assert_eq!(
+            synthetic_dir.filesystem_path,
+            location_root.join("scan-subdirectory").join("synthetic-dir")
+        );
+    }
+
+    #[test]
+    fn visible_scan_action_target_rejects_excluded_error_missing_and_unsafe_paths() {
+        let root = test_root("visible-scan-action-target-rejections");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "source".to_string(),
+                root_path: root.join("location"),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+        db.insert_file_batch(&[
+            test_file(&scan_id, "visible.txt", 1, "visible-hash"),
+            test_file(&scan_id, "hidden.txt", 2, "hidden-hash"),
+            test_file(&scan_id, "hidden-dir/child.txt", 3, "hidden-child-hash"),
+            test_file(&scan_id, "literalXdir/child.txt", 4, "literal-child-hash"),
+            NewFile {
+                scan_id: scan_id.clone(),
+                kind: "file".to_string(),
+                path: "failed.txt".to_string(),
+                name: "failed.txt".to_string(),
+                size: 0,
+                blake3: String::new(),
+                sha256: String::new(),
+                ctime: None,
+                mtime: None,
+                mode: None,
+                error: Some("permission denied".to_string()),
+            },
+        ])
+        .unwrap();
+        db.set_scan_excludes(
+            &scan_id,
+            vec!["/hidden.txt".to_string(), "/hidden-dir/".to_string()],
+        )
+        .unwrap();
+        let excludes_before = db.scan_exclude_patterns(&scan_id).unwrap();
+
+        for path in [
+            "hidden.txt",
+            "hidden-dir",
+            "failed.txt",
+            "missing.txt",
+            // The percent must remain literal in the descendant LIKE query.
+            "literal%dir",
+        ] {
+            assert!(
+                db.resolve_visible_scan_action_target(&scan_id, path)
+                    .is_err(),
+                "{path} must not resolve to an action target"
+            );
+        }
+        for path in [
+            "",
+            "/",
+            ".",
+            "..",
+            "../visible.txt",
+            r"..\visible.txt",
+            r"\\server\share",
+            "//server/share",
+            r"C:\visible.txt",
+            "C:visible.txt",
+            "nul\0byte",
+        ] {
+            assert!(
+                db.resolve_visible_scan_action_target(&scan_id, path)
+                    .is_err(),
+                "unsafe path {path:?} must not resolve"
+            );
+        }
+
+        assert_eq!(db.scan_exclude_patterns(&scan_id).unwrap(), excludes_before);
+        let raw_file_count: u64 = db
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE scan_id = ?1",
+                [&scan_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_file_count, 5);
+    }
+
+    #[test]
+    fn visible_scan_action_target_fails_closed_for_an_unsafe_stored_offset() {
+        let root = test_root("visible-scan-action-target-offset");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "source".to_string(),
+                root_path: root.join("location"),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+        db.insert_file_batch(&[test_file(&scan_id, "visible.txt", 1, "visible-hash")])
+            .unwrap();
+        db.connect()
+            .unwrap()
+            .execute(
+                "UPDATE scans SET offset_path = ?1 WHERE id = ?2",
+                params!["../outside", &scan_id],
+            )
+            .unwrap();
+
+        assert!(db
+            .resolve_visible_scan_action_target(&scan_id, "visible.txt")
             .is_err());
     }
 

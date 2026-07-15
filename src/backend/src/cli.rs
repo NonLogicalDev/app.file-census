@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use file_census_backend::app;
-use file_census_backend::db::{Database, LocationInput, LocationType, LocationUpdate, TreeEntry};
+use file_census_backend::db::{Database, LocationInput, LocationType, LocationUpdate};
 use file_census_backend::events::{AppEvent, EventHub};
 use file_census_backend::search::{
     FileSearchExpression, FileSearchFilter, FileSearchOperator, FileSearchQuery, FileSearchTerm,
@@ -646,72 +646,31 @@ pub fn run_cli(cli: Cli, db_path: PathBuf) -> Result<RunOutcome> {
 }
 
 /// Preserves `scan <LOCATION_SLUG>` while supporting the documented bootstrap
-/// form: `scan <SOURCE_PATH> <VOLUME_SLUG>`. The latter validates both roots
-/// before mutating the database and never repoints an existing location.
+/// form: `scan <SOURCE_PATH> <VOLUME_SLUG>`.
 fn prepare_compatible_scan(db: &Database, args: ScanArgs) -> Result<scanner::PreparedScan> {
+    prepare_compatible_scan_with_started_at(db, args, Utc::now())
+}
+
+fn prepare_compatible_scan_with_started_at(
+    db: &Database,
+    args: ScanArgs,
+    started_at: DateTime<Utc>,
+) -> Result<scanner::PreparedScan> {
     let ScanArgs {
         location_or_source,
         volume_slug,
         offset,
     } = args;
     match volume_slug {
-        Some(volume_slug) => {
-            let location_slug =
-                resolve_or_create_bootstrap_location(db, &location_or_source, &volume_slug)?;
-            scanner::prepare_scan_with_started_at(db, &location_slug, &offset, Utc::now())
-        }
+        Some(volume_slug) => scanner::prepare_bootstrap_scan_with_started_at(
+            db,
+            Path::new(&location_or_source),
+            &volume_slug,
+            &offset,
+            started_at,
+        ),
         None => scanner::prepare_scan(db, &location_or_source, &offset),
     }
-}
-
-fn resolve_or_create_bootstrap_location(
-    db: &Database,
-    source_path: &str,
-    volume_slug: &str,
-) -> Result<String> {
-    if source_path.trim().is_empty() {
-        anyhow::bail!("source path must not be blank")
-    }
-    if volume_slug.trim().is_empty() {
-        anyhow::bail!("volume slug must not be blank")
-    }
-
-    let canonical_source = canonical_directory(Path::new(source_path), "source path")?;
-    match db.location_by_slug(volume_slug)? {
-        Some(location) => {
-            let existing_root = canonical_directory(
-                &location.root_path,
-                &format!("existing location {volume_slug} root"),
-            )?;
-            if existing_root != canonical_source {
-                anyhow::bail!(
-                    "existing location {volume_slug} root {} does not match source path {}",
-                    existing_root.display(),
-                    canonical_source.display()
-                )
-            }
-        }
-        None => {
-            db.add_location(LocationInput {
-                kind: LocationType::Unknown,
-                name: volume_slug.to_string(),
-                slug: volume_slug.to_string(),
-                root_path: canonical_source,
-                notes: None,
-            })?;
-        }
-    }
-    Ok(volume_slug.to_string())
-}
-
-fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf> {
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("canonicalizing {label} {}", path.display()))?;
-    if !canonical.is_dir() {
-        anyhow::bail!("{label} {} is not a directory", path.display())
-    }
-    Ok(canonical)
 }
 
 fn command_path(command: &Command) -> &'static str {
@@ -1662,17 +1621,9 @@ fn location_child_path_from_relative(
 }
 
 fn scan_child_path(db: &Database, scan_id: &str, relative_path: &str) -> Result<PathBuf> {
-    let scan = db
-        .scan_by_id(scan_id)?
-        .with_context(|| format!("scan not found: {scan_id}"))?;
-    let entry = visible_scan_entry(db, scan_id, relative_path)?;
-    let location = db
-        .location_by_slug(&scan.location_slug)?
-        .with_context(|| format!("location not found: {}", scan.location_slug))?;
-    let scan_root = location
-        .root_path
-        .join(normalized_scan_offset_path(&scan.offset_path)?);
-    Ok(scan_root.join(PathBuf::from(normalized_scan_path(&entry.path)?)))
+    Ok(db
+        .resolve_visible_scan_action_target(scan_id, relative_path)?
+        .filesystem_path)
 }
 
 fn resolve_action_scan_id(db: &Database, scan_id: &str) -> Result<String> {
@@ -1688,32 +1639,6 @@ fn resolve_action_scan_id(db: &Database, scan_id: &str) -> Result<String> {
             "location {scan_id} has multiple scans; files open/reveal require a scan id"
         ),
     }
-}
-
-fn visible_scan_entry(db: &Database, scan_id: &str, path: &str) -> Result<TreeEntry> {
-    db.scan_by_id(scan_id)?
-        .with_context(|| format!("scan not found: {scan_id}"))?;
-    let path = normalized_scan_path(path)?;
-    let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
-    let entry = db
-        .scan_tree(scan_id, parent)?
-        .into_iter()
-        .find(|entry| entry.path == path)
-        .with_context(|| format!("path not found or excluded from scan: {path}"))?;
-    ensure_visible_scan_path(db, scan_id, &entry.path, entry.kind == "dir")?;
-    Ok(entry)
-}
-
-fn ensure_visible_scan_path(
-    db: &Database,
-    scan_id: &str,
-    path: &str,
-    is_dir: bool,
-) -> Result<()> {
-    if !db.scan_path_is_visible(scan_id, path, is_dir)? {
-        anyhow::bail!("path is excluded from scan")
-    }
-    Ok(())
 }
 
 fn file_details_page(
@@ -1784,13 +1709,6 @@ fn is_path_separator(character: char) -> bool {
 fn looks_like_windows_drive_prefix(part: &str) -> bool {
     let bytes = part.as_bytes();
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
-}
-
-fn normalized_scan_offset_path(offset_path: &str) -> Result<PathBuf> {
-    Ok(PathBuf::from(normalized_relative_scan_path(
-        offset_path,
-        "scan offset path",
-    )?))
 }
 
 fn open_in_system(path: &Path) -> Result<()> {
@@ -2146,6 +2064,7 @@ fn print_duplicate_groups(groups: &[file_census_backend::db::DuplicateGroup]) ->
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use file_census_backend::db::NewFile;
 
     use super::*;
 
@@ -2195,5 +2114,128 @@ mod tests {
         };
 
         assert_eq!(args.into_location_input().kind, LocationType::Unknown);
+    }
+
+    #[test]
+    fn scan_bootstrap_shorthand_is_deterministic_and_legacy_scan_stays_supported() {
+        let root = std::env::temp_dir().join(format!(
+            "file-census-cli-bootstrap-scan-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source_root = root.join("source");
+        let legacy_root = root.join("legacy");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        let db_path = root.join("state.db");
+        let db = Database::open(&db_path).unwrap();
+        let started_at = DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let cli = Cli::try_parse_from([
+            "file-census",
+            "--db",
+            db_path.to_str().unwrap(),
+            "scan",
+            source_root.to_str().unwrap(),
+            "archive-volume",
+        ])
+        .unwrap();
+        assert_eq!(cli.db.as_deref(), Some(db_path.as_path()));
+        let Some(Command::Scan(args)) = cli.command else {
+            panic!("expected scan command");
+        };
+        let bootstrap = prepare_compatible_scan_with_started_at(&db, args, started_at).unwrap();
+        assert_eq!(bootstrap.scan_id, "20260715T123456Z--archive-volume");
+        assert_eq!(bootstrap.location.slug, "archive-volume");
+
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Legacy".to_string(),
+            slug: "legacy".to_string(),
+            root_path: legacy_root,
+            notes: None,
+        })
+        .unwrap();
+        let legacy = prepare_compatible_scan_with_started_at(
+            &db,
+            ScanArgs {
+                location_or_source: "legacy".to_string(),
+                volume_slug: None,
+                offset: PathBuf::from("/"),
+            },
+            DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+        .unwrap();
+        assert_eq!(legacy.location.slug, "legacy");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_action_scan_id_preserves_legacy_location_slug_ambiguity() {
+        let root = std::env::temp_dir().join(format!(
+            "file-census-cli-action-scan-id-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Database::open(root.join("state.db")).unwrap();
+        let single_location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Single".to_string(),
+                slug: "single".to_string(),
+                root_path: root.join("single"),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db
+            .start_scan(&single_location, std::path::Path::new("/"))
+            .unwrap();
+        let entry = |path: &str| NewFile {
+            scan_id: scan_id.clone(),
+            kind: "file".to_string(),
+            path: path.to_string(),
+            name: path.to_string(),
+            size: 0,
+            blake3: String::new(),
+            sha256: String::new(),
+            ctime: None,
+            mtime: None,
+            mode: None,
+            error: None,
+        };
+        db.insert_file_batch(&[entry("visible.txt"), entry("hidden.txt")])
+            .unwrap();
+        db.set_scan_excludes(&scan_id, vec!["/hidden.txt".to_string()])
+            .unwrap();
+
+        assert_eq!(resolve_action_scan_id(&db, &scan_id).unwrap(), scan_id);
+        assert_eq!(resolve_action_scan_id(&db, "single").unwrap(), scan_id);
+        assert_eq!(
+            scan_child_path(&db, &scan_id, "visible.txt").unwrap(),
+            root.join("single/visible.txt")
+        );
+        assert!(scan_child_path(&db, &scan_id, "hidden.txt").is_err());
+
+        let multiple_location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Multiple".to_string(),
+                slug: "multiple".to_string(),
+                root_path: root.join("multiple"),
+                notes: None,
+            })
+            .unwrap();
+        db.start_scan(&multiple_location, std::path::Path::new("/"))
+            .unwrap();
+        db.start_scan(&multiple_location, std::path::Path::new("/other"))
+            .unwrap();
+
+        let error = resolve_action_scan_id(&db, "multiple").unwrap_err();
+        assert!(error.to_string().contains("multiple scans"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -14,6 +14,7 @@ test('search page uses one shared flat FileGrid workspace', () => {
   assert.match(searchSource, /Flat results across the selected scan scope/);
   assert.match(searchSource, /Use Locations to browse a scan/);
   assert.doesNotMatch(searchSource, /buildSearchTree|hierarchical|columnOrder|showLocationColumns|<SegmentedTabs/);
+  assert.doesNotMatch(appSource, /searchView|setSearchView|onSetSearchView/);
 });
 
 test('search flat results keep file name and full path as separate columns', () => {

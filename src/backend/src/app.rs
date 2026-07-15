@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::db::{
-    Database, Location, LocationInput, LocationType, LocationUpdate, TreeEntry,
+    Database, Location, LocationInput, LocationType, LocationUpdate,
 };
 use crate::events::{AppEvent, EventHub};
 use crate::media;
@@ -100,6 +100,16 @@ impl AppCore {
             }
             "scans.list" => Ok(serde_json::to_value(self.db.scans()?)?),
             "scans.running" => Ok(serde_json::to_value(self.progress.running())?),
+            "scans.open_folder" => {
+                let params: ScanFolderParams = decode_params(params)?;
+                let path = scan_folder_path(
+                    &self.db,
+                    &params.scan_id,
+                    params.path.as_deref(),
+                )?;
+                open_in_system(&path)?;
+                Ok(serde_json::json!({ "opened": true }))
+            }
             "scans.start" => {
                 let params: StartScanParams = decode_params(params)?;
                 Ok(serde_json::to_value(
@@ -388,31 +398,39 @@ fn location_child_path(db: &Database, slug: &str, relative_path: &str) -> Result
 }
 
 fn scan_child_path(db: &Database, scan_id: &str, relative_path: &str) -> Result<PathBuf> {
+    Ok(db
+        .resolve_visible_scan_action_target(scan_id, relative_path)?
+        .filesystem_path)
+}
+
+fn scan_folder_path(
+    db: &Database,
+    scan_id: &str,
+    relative_path: Option<&str>,
+) -> Result<PathBuf> {
+    let relative_path = normalized_scan_folder_path(relative_path)?;
+    if relative_path.is_empty() {
+        return scan_root_path(db, scan_id);
+    }
+
+    let target = db.resolve_visible_scan_action_target(scan_id, &relative_path)?;
+    if target.kind != "dir" {
+        anyhow::bail!("scan folder path must be a visible directory")
+    }
+
+    Ok(target.filesystem_path)
+}
+
+fn scan_root_path(db: &Database, scan_id: &str) -> Result<PathBuf> {
     let scan = db
         .scan_by_id(scan_id)?
         .with_context(|| format!("scan not found: {scan_id}"))?;
-    let entry = visible_scan_entry(db, scan_id, relative_path)?;
     let location = db
         .location_by_slug(&scan.location_slug)?
         .with_context(|| format!("location not found: {}", scan.location_slug))?;
-    let scan_root = location
+    Ok(location
         .root_path
-        .join(normalized_scan_offset_path(&scan.offset_path)?);
-    Ok(scan_root.join(PathBuf::from(normalized_scan_path(&entry.path)?)))
-}
-
-fn visible_scan_entry(db: &Database, scan_id: &str, path: &str) -> Result<TreeEntry> {
-    db.scan_by_id(scan_id)?
-        .with_context(|| format!("scan not found: {scan_id}"))?;
-    let path = normalized_scan_path(path)?;
-    let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
-    let entry = db
-        .scan_tree(scan_id, parent)?
-        .into_iter()
-        .find(|entry| entry.path == path)
-        .with_context(|| format!("path not found or excluded from scan: {path}"))?;
-    ensure_visible_scan_path(db, scan_id, &entry.path, entry.kind == "dir")?;
-    Ok(entry)
+        .join(normalized_scan_offset_path(&scan.offset_path)?))
 }
 
 fn normalized_scan_path(path: &str) -> Result<String> {
@@ -423,16 +441,11 @@ fn normalized_scan_path(path: &str) -> Result<String> {
     Ok(path)
 }
 
-fn ensure_visible_scan_path(
-    db: &Database,
-    scan_id: &str,
-    path: &str,
-    is_dir: bool,
-) -> Result<()> {
-    if !db.scan_path_is_visible(scan_id, path, is_dir)? {
-        anyhow::bail!("path is excluded from scan")
+fn normalized_scan_folder_path(path: Option<&str>) -> Result<String> {
+    match path {
+        Some(path) => normalized_relative_scan_path(path, "scan folder path"),
+        None => Ok(String::new()),
     }
-    Ok(())
 }
 
 fn file_details_page(db: &Database, params: &FileOccurrencesParams) -> Result<Value> {
@@ -579,6 +592,11 @@ struct LocationFolderParams {
     path: Option<String>,
 }
 #[derive(Deserialize)]
+struct ScanFolderParams {
+    scan_id: String,
+    path: Option<String>,
+}
+#[derive(Deserialize)]
 struct LocationSlugParams {
     slug: String,
 }
@@ -658,6 +676,7 @@ struct FilePathActionParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::NewFile;
 
     #[test]
     fn scan_action_path_keeps_indexed_entry_under_nested_offset() {
@@ -666,9 +685,83 @@ mod tests {
             .join(normalized_scan_offset_path("/nested/album").unwrap());
 
         assert_eq!(
+            scan_root,
+            PathBuf::from("location-root/nested/album")
+        );
+        assert_eq!(
             scan_root.join(PathBuf::from(normalized_scan_path("cover.jpg").unwrap())),
             PathBuf::from("location-root/nested/album/cover.jpg")
         );
+    }
+
+    #[test]
+    fn scan_folder_path_permits_root_and_normalizes_relative_path() {
+        assert_eq!(normalized_scan_folder_path(None).unwrap(), "");
+        assert_eq!(normalized_scan_folder_path(Some("")).unwrap(), "");
+        assert_eq!(normalized_scan_folder_path(Some("/")).unwrap(), "");
+        assert_eq!(
+            normalized_scan_folder_path(Some(r"/nested\album/")).unwrap(),
+            "nested/album"
+        );
+    }
+
+    #[test]
+    fn scan_folder_path_uses_scan_root_and_visible_directories_only() {
+        let root = std::env::temp_dir().join(format!(
+            "file-census-app-folder-path-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let location_root = root.join("location-root");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "source".to_string(),
+                root_path: location_root.clone(),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db
+            .start_scan(&location, std::path::Path::new("/nested/album"))
+            .unwrap();
+        let entry = |kind: &str, path: &str| NewFile {
+            scan_id: scan_id.clone(),
+            kind: kind.to_string(),
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            size: 0,
+            blake3: String::new(),
+            sha256: String::new(),
+            ctime: None,
+            mtime: None,
+            mode: None,
+            error: None,
+        };
+        db.insert_file_batch(&[
+            entry("dir", "visible-dir"),
+            entry("file", "visible-file.txt"),
+            entry("dir", "hidden-dir"),
+        ])
+        .unwrap();
+        db.set_scan_excludes(&scan_id, vec!["/hidden-dir/".to_string()])
+            .unwrap();
+
+        let scan_root = location_root.join("nested/album");
+        assert_eq!(scan_folder_path(&db, &scan_id, None).unwrap(), scan_root);
+        assert_eq!(
+            scan_folder_path(&db, &scan_id, Some("visible-dir")).unwrap(),
+            location_root.join("nested/album/visible-dir")
+        );
+        assert_eq!(
+            scan_child_path(&db, &scan_id, "visible-file.txt").unwrap(),
+            location_root.join("nested/album/visible-file.txt")
+        );
+        assert!(scan_folder_path(&db, &scan_id, Some("visible-file.txt")).is_err());
+        assert!(scan_folder_path(&db, &scan_id, Some("hidden-dir")).is_err());
+        assert!(scan_child_path(&db, &scan_id, "hidden-dir").is_err());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -687,6 +780,7 @@ mod tests {
             r"\\?\C:\elsewhere",
         ] {
             assert!(normalized_scan_path(path).is_err(), "{path}");
+            assert!(normalized_scan_folder_path(Some(path)).is_err(), "{path}");
         }
         assert_eq!(
             normalized_scan_path(r"nested\cover.jpg").unwrap(),

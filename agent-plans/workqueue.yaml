@@ -4,7 +4,7 @@ queue:
   subject: file-census production rebuild and acceptance
   coordinator: root
   created_at: 2026-07-15T05:45:00Z
-  updated_at: 2026-07-15T11:30:00Z
+  updated_at: 2026-07-15T12:18:00Z
 tasks:
   - id: rebuild-requirements-ledger
     work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
@@ -60,7 +60,7 @@ tasks:
       - native-bundle-icon-assets
     priority: 96
     created_at: 2026-07-15T08:45:00Z
-    outcome: Exact PostCSS and Tailwind source configs are restored. The remaining gate is an empty ui/dist, an incomplete ignored ui/node_modules store with no executable Vite links, no canonical frontend lockfile, no ambient Node/Rust toolchain, and an external untracked Cargo.lock. An unproven working-tree flake.lock is present but is not yet canonical evidence; preserve it without staging and verify its provenance under explicit build-input approval. This work needs explicit approval before network or high-disk writes.
+    outcome: Exact PostCSS and Tailwind source configs are restored, and root Justfile recipes now enter the declared Nix shell for both frontend and Rust commands. The remaining gate is an empty ui/dist, an incomplete ignored ui/node_modules store with no executable Vite links, no canonical frontend lockfile, no ambient Node/Rust toolchain, and an external untracked Cargo.lock. An unproven working-tree flake.lock is present but is not yet canonical evidence; preserve it without staging and verify its provenance under explicit build-input approval. Full macOS app packaging also needs full Xcode rather than Command Line Tools. This work needs explicit approval before network or high-disk writes.
     resources:
       - user-approval-for-network-and-build-artifacts
 
@@ -75,7 +75,7 @@ tasks:
     claim:
       owner: root
       started_at: 2026-07-15T08:41:00Z
-    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, and a legacy-safe Unknown location-kind migration. Browser/native details use visible media sources and WebSocket lag is recoverable. Remaining work is compile proof plus real scanner controls/dashboard/shell contracts, not an implied runtime success.
+    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, a legacy-safe Unknown location-kind migration, scan-aware folder authorization, and one DB-level visible action resolver for open/reveal. Browser/native details use visible media sources and WebSocket lag is recoverable. Remaining work is Rust compile proof, thumbnail revalidation/parity P2s, plus real scanner controls/dashboard/shell contracts; none imply runtime success.
 
   - id: production-shell-and-routing
     work: Build the real dark application shell, routing, persisted collapsible sidebar, and main-top-bar Cmd-K foundation.
@@ -108,7 +108,7 @@ tasks:
       - structured-source-recovery
     priority: 100
     created_at: 2026-07-15T10:45:00Z
-    outcome: Static export P0s, exact prototype/routing recovery, directory-only File tree behavior, shell/grid class coverage, and preview build entry are repaired. The full source-only UI suite now passes 137/137 using the bundled Node runtime. Repaired behavior includes authoritative event-lag recovery, stale-result invalidation, immediate real stop acknowledgement, sidebar-only scan selection, a flat truthful Search workspace, and fixture-backed component preview routes. Assertions were re-baselined only for retired/fake contracts (unsupported file-extra-info cancellation, obsolete scan metadata RPC, abandoned hierarchy props), with product-specific evidence. Runtime/build validation remains with reproducible-build-inputs and browser/native acceptance tasks.
+    outcome: Static export P0s, exact prototype/routing recovery, directory-only File tree behavior, shell/grid class coverage, and preview build entry are repaired. The full source-only UI suite now passes 138/138 using the bundled Node runtime. Repaired behavior includes authoritative event-lag recovery, stale-result invalidation, immediate real stop acknowledgement, sidebar-only scan selection, scan-scoped folder browsing, a flat truthful Search workspace, and fixture-backed component preview routes. Assertions were re-baselined only for retired/fake contracts (unsupported file-extra-info cancellation, obsolete scan metadata RPC, abandoned hierarchy props), with product-specific evidence. Runtime/build validation remains with reproducible-build-inputs and browser/native acceptance tasks.
 
   - id: scan-workspace-and-directory-navigation
     work: Build the scan-relative Files/File tree workspace, directory-only side navigation, file table, inspector, and safe actions.
@@ -148,7 +148,7 @@ tasks:
     claim:
       owner: root
       started_at: 2026-07-15T11:18:00Z
-    outcome: Static implementation now canonicalizes the source, creates only a compatible Unknown location, uses the real scanner lifecycle, reserves UTC date IDs atomically with deterministic collisions, and preserves legacy CLI forms. Toolchain-backed integration proof remains pending.
+    outcome: Source implementation now validates source/offset before a one-transaction compatible-location bootstrap, UTC date-ID reservation with deterministic collisions, and scan insertion while preserving legacy CLI forms. Deterministic source tests cover mismatch, rollback, collision, and invalid setup. Toolchain-backed CLI/integration proof remains pending.
 
   - id: scanner-progress-tui
     work: Implement and prove opt-in Ratatui progress with bounded active-operation telemetry, truthful queue/pool bars, duration ordering, terminal restoration, and non-TTY fallback.
