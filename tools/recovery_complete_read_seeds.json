@@ -56,6 +56,23 @@
       ]
     },
     {
+      "id": "backend-scanner-2026-06-13-0141",
+      "path": "src/backend/src/scanner.rs",
+      "timestamp": "2026-06-13T01:41:44.267Z",
+      "bytes": 44905,
+      "lines": 1385,
+      "sha256": "c4f329308c5cf95cbfef88c335289cc1cc6d313842a1de48af793ea0dd674579",
+      "segments": [
+        { "call_id": "call_jBj5cKF5DedWsVmct7uHcIjz", "command": "sed -n '1,140p' src/backend/src/scanner.rs", "request_line": 12641, "output_line": 12645 },
+        { "call_id": "call_PlAqdgWz4ib2dD60XkZjxW5x", "command": "sed -n '140,320p' src/backend/src/scanner.rs", "request_line": 12642, "output_line": 12646 },
+        { "call_id": "call_DkLXbuXuSsYAKNh9tElQTfmo", "command": "sed -n '305,430p' src/backend/src/scanner.rs", "request_line": 12643, "output_line": 12647 },
+        { "call_id": "call_BLLBjJtCJn8UcaE2oBK5pn4a", "command": "sed -n '400,760p' src/backend/src/scanner.rs", "request_line": 12644, "output_line": 12648 },
+        { "call_id": "call_wrqoSrVLjtFAsu0sB5fMO8oe", "command": "sed -n '760,1060p' src/backend/src/scanner.rs", "request_line": 12650, "output_line": 12653 },
+        { "call_id": "call_P2UMMTkbbomNZQvO2wqiCglh", "command": "sed -n '1060,1225p' src/backend/src/scanner.rs", "request_line": 12651, "output_line": 12654 },
+        { "call_id": "call_3KHzJEM3PXLBTHXgyI2V4V5s", "command": "sed -n '1225,1395p' src/backend/src/scanner.rs", "request_line": 12652, "output_line": 12655 }
+      ]
+    },
+    {
       "id": "backend-web-2026-06-13",
       "path": "src/backend/src/web.rs",
       "timestamp": "2026-06-13T00:28:12.120Z",
