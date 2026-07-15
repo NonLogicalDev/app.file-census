@@ -1,10 +1,11 @@
 import { statusLabel, when } from '../utils/format.js';
+import { locationLedClassName } from './ui/index.jsx';
 
 export default function LocationCard({ location, selected, onSelect }) {
   return (
     <button type="button" className={`location-card${selected ? ' selected' : ''}${location.disabled ? ' disabled-location' : ''}`} onClick={onSelect}>
       <div>
-        <strong><span className={`location-led${location.connected ? ' connected' : ''}`} title={livenessTitle(location)} />{location.slug}</strong>
+        <strong><span className={locationLedClassName({ connected: location.connected })} title={livenessTitle(location)} />{location.slug}</strong>
         <span>{location.name}</span>
       </div>
       <code>{location.root_path}</code>

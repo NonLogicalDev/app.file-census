@@ -9,6 +9,7 @@ const pageSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'L
 test('location overview keeps scan selection and scan start actions out of the page body', () => {
   assert.doesNotMatch(pageSource, /onStartScan/);
   assert.doesNotMatch(pageSource, /onSelect\(scan\.id\)/);
+  assert.doesNotMatch(pageSource, /ScanSummaryCard/);
   assert.doesNotMatch(pageSource, />\s*Scan now\s*</);
 });
 
@@ -18,4 +19,5 @@ test('location overview exposes root, connection, and distinct scan facts', () =
   assert.match(pageSource, /Representative scan/);
   assert.match(pageSource, /Last successful scan/);
   assert.match(pageSource, /showScanActions=\{false\}/);
+  assert.match(pageSource, /Select a scan from the sidebar/);
 });

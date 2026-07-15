@@ -38,16 +38,17 @@ test('lag recovery invalidates stale file-facing state before authoritative relo
 
   assert.match(source, /void recoverFromEventLag\(\);/);
   assert.match(source, /function clearFileFacingStateAfterLag\(\) \{[\s\S]*?invalidateSearchRequest\(\);/);
-  assert.match(source, /clearSearchResultState\(\);/);
-  assert.match(source, /invalidateScanTreeCache\(\);/);
+  assert.match(source, /treeRequestId\.current \+= 1;/);
+  assert.match(source, /treeAbortController\.current\?\.abort\(\);/);
+  assert.match(source, /setTreeEntries\(\[\]\);/);
+  assert.match(source, /clearDirectoryTree\(\);/);
   assert.match(source, /setDeleteCheck\(null\);/);
   assert.match(source, /setDeleteCheckPath\(''\);/);
-  assert.match(source, /setDeleteCheckPathsByScan\(\{\}\);/);
   assert.match(source, /setSelectedGridPaths\(\[\]\);/);
   assert.match(source, /setFileInfo\(null\);/);
   assert.match(source, /setShowFileInfo\(false\);/);
   assert.match(source, /setShowBuildThumbnails\(false\);/);
-  assert.match(source, /deleteCheck: null,[\s\S]*?deleteCheckPathsByScan: \{\},[\s\S]*?selectedGridPaths: \[\]/);
+  assert.match(source, /deleteCheck: null,[\s\S]*?deleteCheckPath: '',[\s\S]*?selectedGridPaths: \[\]/);
 });
 
 test('lag recovery reloads only the active search route with its live query and scope', () => {
@@ -56,6 +57,13 @@ test('lag recovery reloads only the active search route with its live query and 
   assert.match(source, /async function recoverFromEventLag\(\) \{[\s\S]*?clearFileFacingStateAfterLag\(\);[\s\S]*?await refreshAuthoritativelyAfterEventLag\(\(\) => refreshRef\.current\?\.\(\), refreshPromise\);/);
   assert.match(source, /state\.activeTab === 'search'[\s\S]*?String\(state\.query \?\? ''\)\.trim\(\)[\s\S]*?state\.searchFilters\?\.length/);
   assert.match(source, /searchRef\.current\?\.\(\{[\s\S]*?replaceRoute: true,[\s\S]*?query: state\.query,[\s\S]*?filters: state\.searchFilters,[\s\S]*?scanIds: state\.selectedSearchScanIds,[\s\S]*?allScans: state\.searchAllScans/);
+});
+
+test('lag recovery restores directory-only navigation for the visible file tree', () => {
+  const source = lagRecoverySource();
+
+  assert.match(source, /state\.activeTab === 'locations' && state\.scanSubview === 'tree' && state\.selectedScanId/);
+  assert.match(source, /await ensureDirectoryTreePath\(state\.selectedPath\);/);
 });
 
 test('lag recovery starts a post-lag refresh after an in-flight pre-lag refresh settles', async () => {

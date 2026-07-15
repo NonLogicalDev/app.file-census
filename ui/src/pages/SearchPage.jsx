@@ -1,11 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 
 import FileGrid from '../components/FileGrid.jsx';
 import { Icon } from '../components/Icon.jsx';
 import SearchFilterControls from '../components/search/SearchFilterControls.jsx';
 import ScanScopeSelector from '../components/search/ScanScopeSelector.jsx';
-import { buildSearchTree } from '../utils/searchTree.js';
-import { scanLabel } from '../utils/format.js';
 import {
   Button,
   Menu,
@@ -13,23 +11,20 @@ import {
   MenuLabel,
   MenuSeparator,
   MenuTrigger,
-  SegmentedTab,
-  SegmentedTabs,
   emptyTextClassName,
   pageGridClassName,
   pageHeaderClassName
 } from '../components/ui/index.jsx';
 
-const defaultSearchColumns = ['name', 'location_slug', 'scan_nickname', 'scan_id', 'scan_started_at', 'size', 'file_count', 'blake3', 'ctime', 'mtime', 'mode', 'sha256', 'path'];
+const defaultSearchColumns = ['name', 'size', 'file_count', 'duplicate_file_count', 'original_file_count', 'same_scan_duplicate_file_count', 'blake3', 'ctime', 'mtime', 'mode', 'sha256', 'path'];
 
 const searchColumnOptions = [
   ['name', 'Name'],
-  ['location_slug', 'Location'],
-  ['scan_nickname', 'Scan Name'],
-  ['scan_id', 'Scan ID'],
-  ['scan_started_at', 'Scan Created'],
   ['size', 'Size'],
   ['file_count', 'Files'],
+  ['duplicate_file_count', 'Dup'],
+  ['original_file_count', 'Uniq'],
+  ['same_scan_duplicate_file_count', 'Scan Dup'],
   ['blake3', 'BLAKE3'],
   ['ctime', 'CTime'],
   ['mtime', 'Modified'],
@@ -42,48 +37,29 @@ export default function SearchPage({
   query,
   setQuery,
   filters,
-  locations,
-  scans,
-  results,
+  locations = [],
+  scans = [],
+  results = [],
   busy,
   loading = false,
-  searchView,
   searchAllScans,
   selectedScanIds = [],
   onSearch,
-  onSetSearchView,
   onSetSearchAllScans,
   onSetSelectedScanIds,
-  onAddFilter,
-  onRemoveFilter,
-  onGroupFilters,
   onReplaceFilterState,
   onInspectResult,
   initialShowColumnControls = false
 }) {
-  const scanById = useMemo(() => new Map((scans || []).map((scan) => [scan.id, scan])), [scans]);
   const [showColumnControls, setShowColumnControls] = useState(initialShowColumnControls);
   const [searchColumns, setSearchColumns] = useState(defaultSearchColumns);
-  const rows = useMemo(() => enrichSearchRows(results, scanById), [results, scanById]);
-  const tree = useMemo(() => buildSearchTree(rows, scans), [rows, scans]);
+  const rows = results || [];
 
   function onToggleSearchColumn(column) {
     if (column === 'name') return;
     setSearchColumns((current) => current.includes(column)
       ? current.filter((item) => item !== column)
       : [...current, column]);
-  }
-
-  function onMoveSearchColumn(column, direction) {
-    setSearchColumns((current) => {
-      const index = current.indexOf(column);
-      if (index < 0) return current;
-      const nextIndex = index + direction;
-      if (nextIndex < 0 || nextIndex >= current.length) return current;
-      const next = [...current];
-      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
-      return next;
-    });
   }
 
   function onResetSearchColumns() {
@@ -95,6 +71,7 @@ export default function SearchPage({
       <div className={pageHeaderClassName}>
         <div>
           <h2>Find files</h2>
+          <p className="m-0 text-sm text-muted">Flat results across the selected scan scope. Use Locations to browse a scan’s directory tree.</p>
         </div>
       </div>
       <SearchFilterControls
@@ -106,9 +83,6 @@ export default function SearchPage({
         placeholder="filename or path"
         submitLabel="Search"
         onSubmit={onSearch}
-        onAddFilter={onAddFilter}
-        onRemoveFilter={onRemoveFilter}
-        onGroupFilters={onGroupFilters}
         onReplaceFilterState={onReplaceFilterState}
       />
       <ScanScopeSelector
@@ -125,10 +99,6 @@ export default function SearchPage({
         }}
         onSetSelectedScanIds={onSetSelectedScanIds}
       />
-      <SegmentedTabs role="tablist" aria-label="Search result views">
-        <SegmentedTab role="tab" aria-selected={searchView === 'flat'} active={searchView === 'flat'} onClick={() => onSetSearchView('flat')}>Flat</SegmentedTab>
-        <SegmentedTab role="tab" aria-selected={searchView === 'tree'} active={searchView === 'tree'} onClick={() => onSetSearchView('tree')}>File tree</SegmentedTab>
-      </SegmentedTabs>
       <SearchColumnControls
         open={showColumnControls}
         onOpenChange={setShowColumnControls}
@@ -136,31 +106,16 @@ export default function SearchPage({
         options={searchColumnOptions}
         onResetSearchColumns={onResetSearchColumns}
         onToggleSearchColumn={onToggleSearchColumn}
-        onMoveSearchColumn={onMoveSearchColumn}
       />
       {loading ? (
         <p className={emptyTextClassName}>Searching files...</p>
-      ) : results.length ? (
-        searchView === 'flat' ? (
-          <FileGrid
-            rows={rows}
-            columnOrder={searchColumns}
-            visibleColumns={searchColumns}
-            fullPathName={false}
-            showLocationColumns
-            onInspect={onInspectResult}
-          />
-        ) : (
-          <FileGrid
-            rows={tree}
-            columnOrder={searchColumns}
-            visibleColumns={searchColumns}
-            fullPathName={false}
-            showLocationColumns
-            hierarchical
-            onInspect={onInspectResult}
-          />
-        )
+      ) : rows.length ? (
+        <FileGrid
+          rows={rows}
+          visibleColumns={searchColumns}
+          fullPathName={false}
+          onInspect={onInspectResult}
+        />
       ) : (
         <p className={emptyTextClassName}>Search by filename, extension, or path fragment.</p>
       )}
@@ -174,8 +129,7 @@ function SearchColumnControls({
   columns,
   options,
   onResetSearchColumns,
-  onToggleSearchColumn,
-  onMoveSearchColumn
+  onToggleSearchColumn
 }) {
   return (
     <div className="flex justify-end">
@@ -197,11 +151,10 @@ function SearchColumnControls({
           <div className="grid gap-1" aria-label="Search result columns">
             {options.map(([column, label]) => {
               const visible = columns.includes(column);
-              const orderIndex = columns.indexOf(column);
               return (
                 <div
                   key={column}
-                  className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-1 rounded-ui px-2 py-1.5 hover:bg-surface-muted"
+                  className="rounded-ui px-2 py-1.5 hover:bg-surface-muted"
                 >
                   <label
                     className="flex min-w-0 items-center gap-2 text-sm font-medium text-text"
@@ -216,24 +169,6 @@ function SearchColumnControls({
                     />
                     <span className="truncate">{label}</span>
                   </label>
-                  <button
-                    type="button"
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] border border-border bg-surface text-muted-strong hover:border-accent hover:bg-accent-soft hover:text-accent disabled:opacity-40"
-                    disabled={!visible || orderIndex <= 0}
-                    title={`Move ${label} left`}
-                    onClick={() => onMoveSearchColumn(column, -1)}
-                  >
-                    <Icon name="back" />
-                  </button>
-                  <button
-                    type="button"
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] border border-border bg-surface text-muted-strong hover:border-accent hover:bg-accent-soft hover:text-accent disabled:opacity-40"
-                    disabled={!visible || orderIndex < 0 || orderIndex >= columns.length - 1}
-                    title={`Move ${label} right`}
-                    onClick={() => onMoveSearchColumn(column, 1)}
-                  >
-                    <Icon name="forward" />
-                  </button>
                 </div>
               );
             })}
@@ -242,15 +177,4 @@ function SearchColumnControls({
       </Menu>
     </div>
   );
-}
-
-function enrichSearchRows(results, scanById) {
-  return (results || []).map((row) => {
-    const scan = scanById.get(row.scan_id);
-    return {
-      ...row,
-      scan_nickname: scan ? scanLabel(scan) : row.scan_nickname || '',
-      scan_started_at: scan?.started_at || row.scan_started_at || null
-    };
-  });
 }

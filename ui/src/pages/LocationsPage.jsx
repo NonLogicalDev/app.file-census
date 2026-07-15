@@ -8,7 +8,6 @@ import {
   locationEmptyStateClassName,
   locationNotesBodyClassName,
   locationNotesPanelClassName,
-  locationOverviewActionsClassName,
   locationOverviewClassName,
   locationShellClassName,
   locationSummaryGridClassName,
@@ -17,15 +16,9 @@ import {
   locationSummaryValueClassName,
   panelTitleClassName,
   panelTitleSubtextClassName,
-  panelTitleTextClassName,
-  scanSummaryCardClassName,
-  scanSummaryCodeClassName,
-  scanSummaryGridClassName,
-  scanSummaryLabelClassName,
-  scanSummaryMutedClassName,
-  scanSummaryValueClassName
+  panelTitleTextClassName
 } from '../components/ui/index.jsx';
-import { bytes, scanDetail, scanLabel, statusLabel, when } from '../utils/format.js';
+import { scanDetail, scanLabel } from '../utils/format.js';
 
 export default function LocationsPage(props) {
   const { selectedLocationView, selectedScanView, busy, locationsLoading } = props;
@@ -67,7 +60,7 @@ function LocationDetail(props) {
 }
 
 function LocationOverview(props) {
-  const { busy, location, scansLoading, onStartScan } = props;
+  const { location, scansLoading } = props;
   const representative = location.representativeScan;
   const latestGood = location.lastSuccessfulScan;
 
@@ -80,19 +73,6 @@ function LocationOverview(props) {
         </section>
       )}
 
-      <div className={locationOverviewActionsClassName}>
-        <Button onClick={() => onStartScan(location.slug)} disabled={busy} icon={<Icon name="scan" />}>
-          Scan now
-        </Button>
-      </div>
-
-      <section className={locationSummaryGridClassName}>
-        <div className={locationSummaryItemClassName({ emphasis: true })}><strong className={locationSummaryValueClassName}>{location.scanCount}</strong><span className={locationSummaryLabelClassName}>Total scans</span></div>
-        <div className={locationSummaryItemClassName()}><strong className={locationSummaryValueClassName}>{location.activeScan ? statusLabel(location.activeScan.status) : 'Idle'}</strong><span className={locationSummaryLabelClassName}>Current state</span></div>
-        <div className={locationSummaryItemClassName()}><strong className={locationSummaryValueClassName}>{location.lastSuccessfulScan ? bytes(location.lastSuccessfulScan.total_bytes) : '0 B'}</strong><span className={locationSummaryLabelClassName}>Last indexed size</span></div>
-        <div className={locationSummaryItemClassName()}><strong className={locationSummaryValueClassName}>{location.representativeScan ? when(location.representativeScan.started_at) : 'latest good'}</strong><span className={locationSummaryLabelClassName}>Representative scan</span></div>
-      </section>
-
       <section className={locationOverviewClassName}>
         <div className={panelTitleClassName}>
           <div className={panelTitleTextClassName}>
@@ -101,15 +81,13 @@ function LocationOverview(props) {
           </div>
         </div>
 
-        <div className={scanSummaryGridClassName}>
-          <ScanSummaryCard title="Representative" scan={representative} onSelect={props.onSelectScan} loading={scansLoading} />
-          <ScanSummaryCard title="Last successful" scan={latestGood} onSelect={props.onSelectScan} loading={scansLoading} />
-          <article className={scanSummaryCardClassName}>
-            <span className={scanSummaryLabelClassName}>Location</span>
-            <strong className={scanSummaryValueClassName}>{location.connected ? 'Connected' : 'Disconnected'}</strong>
-            <code className={scanSummaryCodeClassName}>{location.root_path}</code>
-          </article>
-        </div>
+        <dl className={locationSummaryGridClassName}>
+          <LocationFact label="Root path" value={location.root_path || 'Unavailable'} code />
+          <LocationFact label="Location is" value={location.connected ? 'Connected' : 'Disconnected'} />
+          <LocationFact label="Representative scan" value={scanFact(representative, scansLoading)} detail={representative ? scanDetail(representative) : ''} />
+          <LocationFact label="Last successful scan" value={scanFact(latestGood, scansLoading)} detail={latestGood ? scanDetail(latestGood) : ''} />
+          <LocationFact label="Total scans" value={String(location.scanCount || 0)} />
+        </dl>
 
         {!location.scans.length && <p className={emptyTextClassName}>{scansLoading ? 'Loading scans...' : 'Run a scan to begin exploring this location.'}</p>}
       </section>
@@ -117,23 +95,17 @@ function LocationOverview(props) {
   );
 }
 
-function ScanSummaryCard({ title, scan, onSelect, loading = false }) {
+function LocationFact({ label, value, detail = '', code = false }) {
   return (
-    <article className={scanSummaryCardClassName}>
-      <span className={scanSummaryLabelClassName}>{title}</span>
-      {scan ? (
-        <>
-          <strong className={scanSummaryValueClassName}>{scanLabel(scan)}</strong>
-          <small className={scanSummaryMutedClassName}>{scanDetail(scan)} - {bytes(scan.total_bytes)}</small>
-          <Button variant="secondary" onClick={() => onSelect(scan.id)} icon={<Icon name="folder" />}>
-            Open scan
-          </Button>
-        </>
-      ) : loading ? (
-        <p className={emptyTextClassName}>Loading scans...</p>
-      ) : (
-        <p className={emptyTextClassName}>No scan available.</p>
-      )}
-    </article>
+    <div className={locationSummaryItemClassName({ emphasis: label === 'Root path' })}>
+      {code ? <code className={locationSummaryValueClassName}>{value}</code> : <strong className={locationSummaryValueClassName}>{value}</strong>}
+      {detail && <span className={panelTitleSubtextClassName}>{detail}</span>}
+      <span className={locationSummaryLabelClassName}>{label}</span>
+    </div>
   );
+}
+
+function scanFact(scan, loading) {
+  if (scan) return scanLabel(scan);
+  return loading ? 'Loading scans...' : 'None';
 }

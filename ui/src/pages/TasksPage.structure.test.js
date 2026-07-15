@@ -9,10 +9,11 @@ const uiSrc = join(pagesDir, '..');
 const tasksPageSource = readFileSync(join(pagesDir, 'TasksPage.jsx'), 'utf8');
 const appSource = readFileSync(join(uiSrc, 'App.jsx'), 'utf8');
 
-test('background tasks expose stoppable controls through task ids', () => {
-  assert.match(tasksPageSource, /onStopBackgroundTask/);
-  assert.match(tasksPageSource, /task\.cancellable/);
-  assert.match(tasksPageSource, /onStopBackgroundTask\?\.\(task\)/);
-  assert.match(appSource, /function stopBackgroundTask\(task\)/);
-  assert.match(appSource, /file_extra_info\.stop/);
+test('tasks expose the real scan Stop callback without inventing background-task RPCs', () => {
+  assert.match(tasksPageSource, /onStopScan/);
+  assert.match(tasksPageSource, /const canStopScan = typeof onStopScan === 'function'/);
+  assert.match(tasksPageSource, /onClick=\{\(\) => onStopScan\(progress\.scan_id\)\}/);
+  assert.doesNotMatch(tasksPageSource, /onStopBackgroundTask|task\.cancellable|file_extra_info/);
+  assert.match(appSource, /<TasksPage[\s\S]*onStopScan=\{stopScan\}/);
+  assert.doesNotMatch(appSource, /function stopBackgroundTask|file_extra_info\.(?:scan|stop)/);
 });

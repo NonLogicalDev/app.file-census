@@ -9,14 +9,15 @@ const searchSource = readFileSync(join(uiSrc, 'pages', 'SearchPage.jsx'), 'utf8'
 const previewSource = readFileSync(join(uiSrc, 'preview.jsx'), 'utf8');
 const appSource = readFileSync(join(uiSrc, 'App.jsx'), 'utf8');
 
-test('search page uses shared FileGrid for flat and hierarchical tree results', () => {
+test('search page uses one shared flat FileGrid workspace', () => {
   assert.match(searchSource, /<FileGrid[\s\S]*rows=\{rows\}/);
-  assert.match(searchSource, /<FileGrid[\s\S]*rows=\{tree\}[\s\S]*hierarchical/);
-  assert.doesNotMatch(searchSource, /function SearchTreeNode/);
+  assert.match(searchSource, /Flat results across the selected scan scope/);
+  assert.match(searchSource, /Use Locations to browse a scan/);
+  assert.doesNotMatch(searchSource, /buildSearchTree|hierarchical|columnOrder|showLocationColumns|<SegmentedTabs/);
 });
 
 test('search flat results keep file name and full path as separate columns', () => {
-  assert.match(searchSource, /const searchColumns = \[[^\]]*'path'[^\]]*\]/);
+  assert.match(searchSource, /const defaultSearchColumns = \[[^\]]*'path'[^\]]*\]/);
   assert.match(searchSource, /rows=\{rows\}[\s\S]*fullPathName=\{false\}/);
   assert.match(previewSource, /path: '\/file-grid\/search-flat-results'/);
 });
@@ -32,12 +33,12 @@ test('search page inspects files and exposes representative scan scope control',
   assert.match(appSource, /scope', 'explicit'/);
 });
 
-test('search page exposes column visibility and order controls for flat and tree views', () => {
+test('search page exposes supported FileGrid column visibility controls', () => {
   assert.match(searchSource, /const defaultSearchColumns = \[/);
   assert.match(searchSource, /useState\(defaultSearchColumns\)/);
   assert.match(searchSource, /function SearchColumnControls/);
-  assert.match(searchSource, /onMoveSearchColumn/);
-  assert.match(searchSource, /columnOrder=\{searchColumns\}/);
+  assert.match(searchSource, /function onToggleSearchColumn/);
   assert.match(searchSource, /visibleColumns=\{searchColumns\}/);
+  assert.doesNotMatch(searchSource, /onMoveSearchColumn|columnOrder=\{searchColumns\}/);
   assert.match(previewSource, /path: '\/search\/column-controls'/);
 });

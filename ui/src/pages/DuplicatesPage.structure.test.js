@@ -28,8 +28,7 @@ test('duplicate groups render content kind separately from filesystem row kind',
   assert.match(duplicatesSource, /group\.file_kind/);
   assert.match(duplicatesSource, /kindLabel\(group\.file_kind\)/);
   assert.match(duplicatesSource, /`\$\{group\.blake3\}-\$\{group\.size\}-\$\{group\.file_kind\}`/);
-  assert.match(appSource, /file\?\.file_kind/);
-  assert.match(appSource, /group\?\.file_kind/);
+  assert.doesNotMatch(duplicatesSource, /kindLabel\(group\.kind\)|kindLabel\(file\.kind\)/);
   assert.match(previewSource, /file_kind: 'image'/);
   assert.match(previewSource, /file_kind: 'video'/);
   assert.match(previewSource, /path: '\/duplicates\/kind-grouping-flat'/);

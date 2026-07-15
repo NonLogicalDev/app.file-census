@@ -88,7 +88,7 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH
 } from './ui/shellClasses.js';
-import { bytes, isActiveStatus, statusLabel, when } from '../utils/format.js';
+import { bytes, isActiveStatus, scanLabel, statusLabel, when } from '../utils/format.js';
 
 const tabs = [
   ['dashboard', 'Dashboard', 'Current database and activity'],
@@ -467,8 +467,8 @@ export default function Shell({
               icon={<Icon name={compactSidebar || !sidebarVisuallyOpen ? 'sidebarOpen' : 'sidebarClose'} />}
             />
             <div className={topbarTitleCopyClassName}>
-              <h1 className={topbarTitleHeadingClassName}>{headerTitle(activeTab, selectedLocation, activeTabMeta)}</h1>
-              <p className={topbarDescriptionClassName}>{headerDescription(activeTab, selectedLocation)}</p>
+              <h1 className={topbarTitleHeadingClassName}>{headerTitle(activeTabMeta)}</h1>
+              <p className={topbarDescriptionClassName}>{headerContext(activeTab, selectedLocation, selectedScanId)}</p>
             </div>
           </div>
           <Toolbar className={headerActionsClassName}>
@@ -612,7 +612,7 @@ function SidebarLocationItem({ location, selected, hasSelectedScan, onSelect }) 
       </span>
       <span className={sidebarLocationMetaClassName}>
         <strong>{location.scanCount}</strong>
-        <small>{location.activeScan ? statusLabel(location.activeScan.status) : 'idle'}</small>
+        <small>{location.scanCount === 1 ? 'scan' : 'scans'}</small>
       </span>
     </button>
   );
@@ -630,25 +630,33 @@ function SidebarScanItem({ scan, selected, onSelect }) {
         {scan.is_representative ? 'Rep' : statusLabel(scan.status)}
       </span>
       <span className={sidebarScanBodyClassName}>
-        <strong>{statusLabel(scan.status)} - {scan.file_count} files</strong>
-        <small>{when(scan.started_at)} - {bytes(scan.total_bytes)}</small>
+        <strong>{scanLabel(scan)}</strong>
+        <small>{scan.id}</small>
       </span>
     </button>
   );
 }
 
-function headerDescription(activeTab, location) {
+function headerDescription(activeTab) {
   if (activeTab === 'dashboard') return 'Current database activity and recent app-session events.';
   if (activeTab === 'duplicates') return 'Review exact-content matches across representative scans.';
   if (activeTab === 'search') return 'Find files by name, extension, or path fragment.';
   if (activeTab === 'tasks') return 'Monitor running scanner work and recent events.';
   if (activeTab === 'options') return 'Choose the active database and manage local app settings.';
-  if (location) return `${location.slug} - ${location.root_path}`;
   return 'Choose a source location from the sidebar or add a new one.';
 }
 
-function headerTitle(activeTab, location, activeTabMeta) {
-  if (activeTab === 'locations' && location) return location.name || location.slug;
+function headerContext(activeTab, location, selectedScanId) {
+  if (activeTab === 'locations' && location) {
+    const locationLabel = location.name || location.slug;
+    const selectedScan = location.scans.find((scan) => scan.id === selectedScanId);
+    if (selectedScan) return `${locationLabel} · ${scanLabel(selectedScan)}`;
+    return locationLabel;
+  }
+  return headerDescription(activeTab);
+}
+
+function headerTitle(activeTabMeta) {
   return activeTabMeta[1];
 }
 

@@ -7,7 +7,6 @@ import assert from 'node:assert/strict';
 const uiSrc = join(dirname(fileURLToPath(import.meta.url)), '..');
 const appSource = readFileSync(join(uiSrc, 'App.jsx'), 'utf8');
 const modalSource = readFileSync(join(uiSrc, 'components', 'AppModals.jsx'), 'utf8');
-const previewSource = readFileSync(join(uiSrc, 'preview.jsx'), 'utf8');
 
 test('file details modal pages high-cardinality occurrence lists', () => {
   assert.match(appSource, /function loadMoreFileOccurrences/);
@@ -18,35 +17,26 @@ test('file details modal pages high-cardinality occurrence lists', () => {
   assert.match(modalSource, /Load more/);
 });
 
-test('file details occurrence rows use a compact action menu', () => {
-  assert.match(modalSource, /function OccurrenceActionMenu/);
-  assert.match(modalSource, /Occurrence actions/);
-  assert.match(modalSource, /Open File/);
-  assert.match(modalSource, /Reveal File/);
-  assert.match(modalSource, /Reveal in Scan/);
-  assert.doesNotMatch(modalSource, /<Button type="button" variant="secondary" onClick=\{\(\) => props\.onOpenOccurrence/);
+test('file details occurrence rows expose direct compact actions', () => {
+  assert.match(modalSource, /onOpenOccurrence\(occurrence\)[\s\S]*?>Open File<\/Button>/);
+  assert.match(modalSource, /onRevealOccurrence\(occurrence\)[\s\S]*?>Reveal File<\/Button>/);
+  assert.match(modalSource, /Reveal in scan/);
+  assert.doesNotMatch(modalSource, /function OccurrenceActionMenu/);
 });
 
-test('file details occurrence actions have a preview route', () => {
-  assert.match(previewSource, /\/file-info\/occurrence-actions/);
-  assert.match(previewSource, /fileInfoInitialTab="locations"/);
-});
-
-test('file details metadata and exif tabs use compact row previews', () => {
-  assert.match(modalSource, /metadataRows\.map/);
-  assert.match(modalSource, /metadataListClassName/);
-  assert.match(modalSource, /metadataRowClassName/);
+test('file details metadata and EXIF use the current compact data primitives', () => {
+  assert.match(modalSource, /<section className=\{metadataGridClassName\(\)\}>/);
+  assert.match(modalSource, /metadataGridClassName\(\{ compact: true \}\)/);
+  assert.match(modalSource, /metadataItemClassName\(\{ compact: true \}\)/);
+  assert.match(modalSource, /exifPanelClassName/);
   assert.match(modalSource, /exifGridClassName/);
-  assert.doesNotMatch(modalSource, /<section className=\{metadataGridClassName\(\)\}>/);
-  assert.match(previewSource, /path: '\/file-info\/metadata-compact'/);
-  assert.match(previewSource, /path: '\/file-info\/exif-compact'/);
-  assert.match(previewSource, /fileInfoInitialTab="metadata"/);
-  assert.match(previewSource, /fileInfoInitialTab="exif"/);
+  assert.doesNotMatch(modalSource, /metadataRows\.map/);
 });
 
-test('scan details modal edits nickname and notes together', () => {
-  assert.match(modalSource, /Scan details/);
-  assert.match(modalSource, /scanNotesForm\.nickname/);
-  assert.match(modalSource, /Save details/);
-  assert.match(appSource, /scans\.update_metadata/);
+test('scan notes modal uses the supported notes RPC', () => {
+  assert.match(modalSource, /<h2>Scan notes<\/h2>/);
+  assert.match(modalSource, /scanNotesForm\.notes/);
+  assert.match(modalSource, /Save notes/);
+  assert.match(appSource, /scans\.update_notes/);
+  assert.doesNotMatch(appSource, /scans\.update_metadata/);
 });

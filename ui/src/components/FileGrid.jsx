@@ -238,6 +238,14 @@ function baseColumns(options) {
       cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : bytes(getValue())
     },
     {
+      accessorKey: 'file_count',
+      header: 'Files',
+      size: 76,
+      minSize: 60,
+      meta: numericColumnMeta,
+      cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
+    },
+    {
       accessorKey: 'duplicate_file_count',
       header: 'Dup',
       size: 68,

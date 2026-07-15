@@ -47,6 +47,18 @@ const fileColumns = [
 const defaultColumns = ['name', 'size', 'file_count', 'duplicate_file_count', 'original_file_count', 'same_scan_duplicate_file_count', 'blake3', 'ctime', 'mtime'];
 const MAX_AUTO_DIRECTORY_TREE_DEPTH = 4;
 
+async function refreshAuthoritativelyAfterEventLag(refresh, refreshPromiseRef) {
+  const preLagRefresh = refreshPromiseRef.current;
+  if (preLagRefresh) {
+    try {
+      await preLagRefresh;
+    } catch {
+      // A new refresh below is the authoritative recovery path.
+    }
+  }
+  return refresh();
+}
+
 export default function App() {
   const [overview, setOverview] = useState(null);
   const [locations, setLocations] = useState([]);
@@ -106,6 +118,7 @@ export default function App() {
   const latest = useRef({});
   const refreshPromise = useRef(null);
   const treeRequestId = useRef(0);
+  const searchRequestId = useRef(0);
   const directoryTreeGeneration = useRef(0);
   const directoryTreeNodesRef = useRef({});
   const directoryTreeScopeRef = useRef('');
@@ -114,6 +127,7 @@ export default function App() {
   const directoryTreeControllers = useRef(new Map());
   const treeReloadTimer = useRef(null);
   const lagRecoveryTimer = useRef(null);
+  const lagRecoveryPromise = useRef(null);
   const hydratingProgress = useRef(new Set());
   const refreshRef = useRef(null);
   const loadTreeRef = useRef(null);
@@ -141,12 +155,37 @@ export default function App() {
     }));
   }, []);
 
+  const markScanControlStatus = useCallback((scanId, status, message) => {
+    const scan = latest.current.scans.find((item) => item.id === scanId);
+    const existing = latest.current.scanProgress[scanId];
+    const progress = {
+      ...existing,
+      scan_id: scanId,
+      location_slug: existing?.location_slug || scan?.location_slug || '',
+      location_name: existing?.location_name || scan?.location_name || scan?.location_slug || '',
+      status,
+      message,
+      file_count: existing?.file_count ?? scan?.file_count ?? 0,
+      dir_count: existing?.dir_count ?? scan?.dir_count ?? 0,
+      error_count: existing?.error_count ?? scan?.error_count ?? 0,
+      total_bytes: existing?.total_bytes ?? scan?.total_bytes ?? 0,
+      current_path: existing?.current_path ?? null,
+      log: existing?.log || []
+    };
+    latest.current.scanProgress = { ...latest.current.scanProgress, [scanId]: progress };
+    latest.current.scans = latest.current.scans.map((item) => item.id === scanId ? { ...item, status } : item);
+    mergeProgress([progress]);
+  }, [mergeProgress]);
+
   const handleEvent = useCallback((appEvent) => {
     if (isUserVisibleEvent(appEvent)) {
       setEventLog((current) => [appEvent, ...current].slice(0, 40));
     }
     if (appEvent.kind === 'events_lagged') {
       scheduleLagRecovery();
+    }
+    if (appEvent.kind === 'scan_stop_requested' && appEvent.payload?.scan_id && appEvent.payload?.stop_requested) {
+      markScanControlStatus(appEvent.payload.scan_id, 'stopping', 'Stop requested');
     }
     if (appEvent.kind === 'scan_log_batch' && appEvent.payload?.scan_id) {
       const payload = appEvent.payload;
@@ -226,7 +265,7 @@ export default function App() {
     if (['database_changed', 'location_added', 'location_updated', 'location_deleted', 'scan_started', 'scan_update_started', 'scan_repair_started', 'scan_finished', 'scan_stopped', 'scan_failed', 'scan_paused', 'scan_resumed', 'scan_deleted', 'scan_path_deleted', 'scan_representative_set', 'scan_notes_updated', 'scan_recovery_completed'].includes(appEvent.kind)) {
       refreshRef.current?.();
     }
-  }, [mergeProgress]);
+  }, [markScanControlStatus, mergeProgress]);
 
   const { rpc, status: wsStatus, statusDetail } = useRpcConnection({ onEvent: handleEvent, onOpen: () => refreshRef.current?.() });
   rpcRef.current = rpc;
@@ -912,11 +951,70 @@ export default function App() {
   }
 
   function scheduleLagRecovery() {
-    if (lagRecoveryTimer.current) return;
+    if (lagRecoveryTimer.current || lagRecoveryPromise.current) return;
     lagRecoveryTimer.current = window.setTimeout(() => {
       lagRecoveryTimer.current = null;
-      refreshRef.current?.();
+      void recoverFromEventLag();
     }, 1000);
+  }
+
+  function clearFileFacingStateAfterLag() {
+    invalidateSearchRequest();
+    treeRequestId.current += 1;
+    treeAbortController.current?.abort();
+    treeAbortController.current = null;
+    if (treeReloadTimer.current) {
+      window.clearTimeout(treeReloadTimer.current);
+      treeReloadTimer.current = null;
+    }
+    setTreeEntries([]);
+    setTreeLoading(false);
+    clearDirectoryTree();
+    setDeleteCheck(null);
+    setDeleteCheckPath('');
+    setSelectedGridPaths([]);
+    setConfirmDeletePath(null);
+    setFileInfo(null);
+    setShowFileInfo(false);
+    setBuildThumbnailRequest(null);
+    setShowBuildThumbnails(false);
+    Object.assign(latest.current, {
+      deleteCheck: null,
+      deleteCheckPath: '',
+      selectedGridPaths: [],
+      confirmDeletePath: null,
+      fileInfo: null,
+      buildThumbnailRequest: null
+    });
+  }
+
+  async function recoverFromEventLag() {
+    if (lagRecoveryPromise.current) return lagRecoveryPromise.current;
+    clearFileFacingStateAfterLag();
+    const recovery = (async () => {
+      await refreshAuthoritativelyAfterEventLag(() => refreshRef.current?.(), refreshPromise);
+      const state = latest.current;
+      if (state.activeTab === 'locations' && state.scanSubview === 'tree' && state.selectedScanId) {
+        await ensureDirectoryTreePath(state.selectedPath);
+      }
+      if (state.activeTab === 'search' && (String(state.query ?? '').trim() || state.searchFilters?.length)) {
+        await searchRef.current?.({
+          replaceRoute: true,
+          query: state.query,
+          filters: state.searchFilters,
+          scanIds: state.selectedSearchScanIds,
+          allScans: state.searchAllScans
+        });
+      }
+    })()
+      .catch((error) => {
+        setMessage(error?.message || String(error));
+      })
+      .finally(() => {
+        lagRecoveryPromise.current = null;
+      });
+    lagRecoveryPromise.current = recovery;
+    return recovery;
   }
 
   async function hydrateProgress(scanId) {
@@ -1206,7 +1304,10 @@ export default function App() {
   async function stopScan(scanId) {
     setBusy(true);
     try {
-      await rpc('scans.stop', { scan_id: scanId });
+      const result = await rpc('scans.stop', { scan_id: scanId });
+      if (result?.stop_requested) {
+        markScanControlStatus(scanId, 'stopping', 'Stop requested');
+      }
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -1459,6 +1560,7 @@ export default function App() {
   }
 
   async function search(options = {}) {
+    const requestId = ++searchRequestId.current;
     const activeQuery = String(options.query ?? latest.current.query ?? query).trim();
     const activeFilters = options.filters ?? latest.current.searchFilters ?? searchFilters;
     const activeSearchScanIds = uniqueScanIds(
@@ -1499,19 +1601,27 @@ export default function App() {
         selectedSearchScanIds: activeSearchScanIds
       });
       routeTo(options.replaceRoute);
-      setResults(await rpc('files.search', buildFileSearchQuery(activeQuery, activeFilters, {
+      const nextResults = await rpc('files.search', buildFileSearchQuery(activeQuery, activeFilters, {
         limit: 200,
         scanIds: activeSearchScanIds,
         allScans: activeSearchAllScans
-      })));
+      }));
+      if (requestId !== searchRequestId.current) return;
+      setResults(nextResults);
     } catch (error) {
-      setMessage(error.message);
+      if (requestId === searchRequestId.current) setMessage(error.message);
     } finally {
       setBusy(false);
-      setSearchLoading(false);
+      if (requestId === searchRequestId.current) setSearchLoading(false);
     }
   }
   searchRef.current = search;
+
+  function invalidateSearchRequest() {
+    searchRequestId.current += 1;
+    setResults([]);
+    setSearchLoading(false);
+  }
 
   function setSearchAllScanScope(nextAllScans) {
     const allScans = Boolean(nextAllScans);
@@ -1564,32 +1674,17 @@ export default function App() {
 
   function addSearchFilterForCurrentView(filter) {
     const nextFilters = addSearchFilter(latest.current.searchFilters, filter);
-    setSearchFilters(nextFilters);
-    latest.current.searchFilters = nextFilters;
-    routeTo(true);
-    if (latest.current.activeTab === 'search') {
-      searchRef.current?.({ replaceRoute: true, filters: nextFilters });
-    }
+    commitSearchState({ filters: nextFilters });
   }
 
   function removeSearchFilterForCurrentView(filterKey) {
     const nextFilters = removeSearchFilter(latest.current.searchFilters, filterKey);
-    setSearchFilters(nextFilters);
-    latest.current.searchFilters = nextFilters;
-    routeTo(true);
-    if (latest.current.activeTab === 'search') {
-      searchRef.current?.({ replaceRoute: true, filters: nextFilters });
-    }
+    commitSearchState({ filters: nextFilters });
   }
 
   function groupSearchFiltersForCurrentView(filterKeys, operator) {
     const nextFilters = groupSearchFilters(latest.current.searchFilters, filterKeys, operator);
-    setSearchFilters(nextFilters);
-    latest.current.searchFilters = nextFilters;
-    routeTo(true);
-    if (latest.current.activeTab === 'search') {
-      searchRef.current?.({ replaceRoute: true, filters: nextFilters });
-    }
+    commitSearchState({ filters: nextFilters });
   }
 
   function replaceSearchFilterStateForCurrentView(nextQuery, nextFilters) {

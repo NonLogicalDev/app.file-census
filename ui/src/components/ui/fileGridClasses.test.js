@@ -25,7 +25,7 @@ import {
 
 test('file grid frame and table helpers preserve dense scrollable layout', () => {
   assert.match(fileGridClassName, /h-\[min\(70vh,800px\)\]/);
-  assert.match(fileGridClassName, /min-h-\[600px\]/);
+  assert.match(fileGridClassName, /min-h-\[360px\]/);
   assert.match(fileGridClassName, /overflow-auto/);
   assert.match(fileGridClassName, /rounded-ui/);
   assert.match(fileGridClassName, /bg-surface/);
@@ -64,7 +64,7 @@ test('file grid header helpers preserve sticky sortable columns and resize affor
 
 test('file grid row helpers preserve alternating rows, actions, and selection', () => {
   assert.match(fileGridRowClassName({ index: 0, kind: 'file', actionable: true }), /bg-surface/);
-  assert.match(fileGridRowClassName({ index: 1, kind: 'file', actionable: false }), /bg-\[#fafbf8\]/);
+  assert.match(fileGridRowClassName({ index: 1, kind: 'file', actionable: false }), /bg-surface-subtle/);
   assert.match(fileGridRowClassName({ index: 0, kind: 'dir', actionable: true }), /font-\[650\]/);
   assert.match(fileGridRowClassName({ index: 0, kind: 'file', actionable: true }), /cursor-pointer/);
   assert.match(fileGridRowClassName({ index: 0, kind: 'file', selected: true }), /color-mix/);

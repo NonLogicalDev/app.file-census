@@ -31,14 +31,16 @@ test('pages render loading text instead of false empty states', () => {
   assert.match(duplicatesSource, /Loading duplicates/);
 });
 
-test('scan tree rows are keyed to the current scan, path, query, filters, depth, and page', () => {
-  assert.match(appSource, /const treeRequestKeyRef = useRef\(''\)/);
-  assert.match(appSource, /function treeRequestKey\(/);
-  assert.match(appSource, /scan_id: scanId \|\| ''/);
-  assert.match(appSource, /filters: canonicalTreeFilterKey\(filters\)/);
-  assert.match(appSource, /const requestedTreeKey = treeRequestKey\(\{/);
-  assert.match(appSource, /if \(previousTreeKey !== requestedTreeKey\) \{\s*setTreeEntries\(\[\]\);/s);
-  assert.match(appSource, /treeRequestKeyRef\.current !== requestedTreeKey/);
+test('scan tree responses only adopt the current scan and path, and filter commits reload that scope', () => {
+  assert.match(appSource, /const treeRequestId = useRef\(0\)/);
+  assert.match(appSource, /const requestId = \+\+treeRequestId\.current;/);
+  assert.match(appSource, /treeAbortController\.current\?\.abort\(\);/);
+  assert.match(appSource, /query: buildFileSearchQuery\(latest\.current\.query, latest\.current\.searchFilters\)/);
+  assert.match(appSource, /requestId !== treeRequestId\.current \|\| latest\.current\.selectedScanId !== requestedScanId \|\| latest\.current\.selectedPath !== requestedPath/);
+  assert.match(appSource, /function commitSearchState[\s\S]*?latest\.current\.activeTab === 'locations'[\s\S]*?loadTreeRef\.current\?\.\(latest\.current\.selectedPath/);
+  assert.match(appSource, /function addSearchFilterForCurrentView[\s\S]*?commitSearchState\(\{ filters: nextFilters \}\);/);
+  assert.match(appSource, /function removeSearchFilterForCurrentView[\s\S]*?commitSearchState\(\{ filters: nextFilters \}\);/);
+  assert.match(appSource, /function groupSearchFiltersForCurrentView[\s\S]*?commitSearchState\(\{ filters: nextFilters \}\);/);
 });
 
 test('destructive scan and location requests are guarded against active scans', () => {
@@ -51,15 +53,16 @@ test('destructive scan and location requests are guarded against active scans', 
 });
 
 test('stop scan acknowledgements immediately mark scans as stopping', () => {
+  assert.match(appSource, /const markScanControlStatus = useCallback\(/);
   assert.match(appSource, /function stopScan\(scanId\)/);
+  assert.match(appSource, /const result = await rpc\('scans\.stop', \{ scan_id: scanId \}\);/);
   assert.match(appSource, /markScanControlStatus\(scanId, 'stopping', 'Stop requested'\)/);
-  assert.match(appSource, /appEvent\.kind === 'scan_stop_requested'/);
-  assert.match(appSource, /appEvent\.payload\?\.stop_requested/);
-  assert.match(fileExplorerSource, /activeScan\.status === 'stopping' \? 'Stopping' : 'Stop'/);
+  assert.match(appSource, /appEvent\.kind === 'scan_stop_requested' && appEvent\.payload\?\.scan_id && appEvent\.payload\?\.stop_requested/);
+  assert.match(fileExplorerSource, /statusLabel\(activeScan\.status\)/);
 });
 
-test('file extra info events are tracked as background tasks', () => {
-  assert.match(appSource, /file_extra_info_/);
-  assert.match(appSource, /updateFileExtraInfoTask/);
-  assert.match(appSource, /file_extra_info\.scan/);
+test('recovery UI does not invent an unsupported file-extra-info transport', () => {
+  // The recovered backend has no file-extra-info RPC; exposing one would lie about its progress.
+  assert.doesNotMatch(appSource, /file_extra_info\.scan/);
+  assert.doesNotMatch(appSource, /updateFileExtraInfoTask/);
 });

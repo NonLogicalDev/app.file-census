@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import ScanProgressPools from './components/ScanProgressPools.jsx';
+import ScanScopeSelector from './components/search/ScanScopeSelector.jsx';
+import DuplicatesPage from './pages/DuplicatesPage.jsx';
+import SearchPage from './pages/SearchPage.jsx';
 import PrototypeApp from './prototypes/redesign/PrototypeApp.jsx';
 import './style.css';
 
@@ -21,6 +24,150 @@ const SAMPLE_SCAN_PROGRESS = {
   },
   log: []
 };
+
+const SAMPLE_SCANS = [
+  {
+    id: 'scan-media-july',
+    nickname: 'July media',
+    location_slug: 'nl-media-01',
+    location_name: 'NLMedia 01',
+    status: 'complete',
+    file_count: 18420,
+    started_at: '2026-07-14T15:30:00.000Z',
+    is_representative: true
+  },
+  {
+    id: 'scan-media-june',
+    nickname: 'June media',
+    location_slug: 'nl-media-01',
+    location_name: 'NLMedia 01',
+    status: 'complete',
+    file_count: 18102,
+    started_at: '2026-06-16T15:30:00.000Z',
+    is_representative: false
+  },
+  {
+    id: 'scan-archive-july',
+    nickname: 'July archive',
+    location_slug: 'archive-01',
+    location_name: 'Archive 01',
+    status: 'complete',
+    file_count: 6931,
+    started_at: '2026-07-13T09:15:00.000Z',
+    is_representative: true
+  }
+];
+
+const SAMPLE_LOCATIONS = [
+  {
+    slug: 'nl-media-01',
+    name: 'NLMedia 01',
+    scans: SAMPLE_SCANS.slice(0, 2),
+    representativeScan: SAMPLE_SCANS[0]
+  },
+  {
+    slug: 'archive-01',
+    name: 'Archive 01',
+    scans: SAMPLE_SCANS.slice(2),
+    representativeScan: SAMPLE_SCANS[2]
+  }
+];
+
+const SAMPLE_DUPLICATES = [
+  {
+    blake3: 'a79e2f3ab51c3240d97a7e09bf6a2fd5bd1da3dfb08764af3b7d2e93d0fc71b4',
+    size: 4821344,
+    file_kind: 'image',
+    count: 2,
+    files: [
+      {
+        scan_id: 'scan-media-july',
+        location_slug: 'nl-media-01',
+        location_name: 'NLMedia 01',
+        path: 'Camera/2026/07/harbor.jpg',
+        name: 'harbor.jpg',
+        size: 4821344,
+        blake3: 'a79e2f3ab51c3240d97a7e09bf6a2fd5bd1da3dfb08764af3b7d2e93d0fc71b4',
+        file_kind: 'image'
+      },
+      {
+        scan_id: 'scan-archive-july',
+        location_slug: 'archive-01',
+        location_name: 'Archive 01',
+        path: 'Photo archive/harbor.jpg',
+        name: 'harbor.jpg',
+        size: 4821344,
+        blake3: 'a79e2f3ab51c3240d97a7e09bf6a2fd5bd1da3dfb08764af3b7d2e93d0fc71b4',
+        file_kind: 'image'
+      }
+    ]
+  },
+  {
+    blake3: 'b27d03dbd28e3c02bfc58bd98dd3d58c2944fd5afe3bdc15c9ea9ebace4c4310',
+    size: 96341020,
+    file_kind: 'video',
+    count: 2,
+    files: [
+      {
+        scan_id: 'scan-media-july',
+        location_slug: 'nl-media-01',
+        location_name: 'NLMedia 01',
+        path: 'Camera/2026/07/arrival.mov',
+        name: 'arrival.mov',
+        size: 96341020,
+        blake3: 'b27d03dbd28e3c02bfc58bd98dd3d58c2944fd5afe3bdc15c9ea9ebace4c4310',
+        file_kind: 'video'
+      },
+      {
+        scan_id: 'scan-archive-july',
+        location_slug: 'archive-01',
+        location_name: 'Archive 01',
+        path: 'Video archive/arrival.mov',
+        name: 'arrival.mov',
+        size: 96341020,
+        blake3: 'b27d03dbd28e3c02bfc58bd98dd3d58c2944fd5afe3bdc15c9ea9ebace4c4310',
+        file_kind: 'video'
+      }
+    ]
+  }
+];
+
+const SAMPLE_SEARCH_RESULTS = [
+  {
+    scan_id: 'scan-media-july',
+    location_slug: 'nl-media-01',
+    location_name: 'NLMedia 01',
+    kind: 'file',
+    name: 'harbor.jpg',
+    path: 'Camera/2026/07/harbor.jpg',
+    size: 4821344,
+    file_count: 1,
+    duplicate_file_count: 1,
+    original_file_count: 1,
+    same_scan_duplicate_file_count: 0,
+    blake3: 'a79e2f3ab51c3240d97a7e09bf6a2fd5bd1da3dfb08764af3b7d2e93d0fc71b4',
+    ctime: '2026-07-14T15:30:00.000Z',
+    mtime: '2026-07-14T15:30:00.000Z',
+    mode: 420
+  },
+  {
+    scan_id: 'scan-archive-july',
+    location_slug: 'archive-01',
+    location_name: 'Archive 01',
+    kind: 'file',
+    name: 'arrival.mov',
+    path: 'Video archive/arrival.mov',
+    size: 96341020,
+    file_count: 1,
+    duplicate_file_count: 1,
+    original_file_count: 1,
+    same_scan_duplicate_file_count: 0,
+    blake3: 'b27d03dbd28e3c02bfc58bd98dd3d58c2944fd5afe3bdc15c9ea9ebace4c4310',
+    ctime: '2026-07-13T09:15:00.000Z',
+    mtime: '2026-07-13T09:15:00.000Z',
+    mode: 420
+  }
+];
 
 const PREVIEWS = [
   {
@@ -51,6 +198,69 @@ const PREVIEWS = [
     render: () => <PrototypeApp screen="tasks" />
   },
   {
+    path: '/scan-scope/search',
+    group: 'ScanScopeSelector',
+    variant: 'search scope',
+    title: 'Search scan scope',
+    description: 'Representative, all-scan, and explicit scan choices for flat search results.',
+    frameClassName: 'w-full max-w-[760px] border-border bg-surface text-text',
+    render: () => <ScanScopePreview allowAll initialScope="all" />
+  },
+  {
+    path: '/scan-scope/duplicates',
+    group: 'ScanScopeSelector',
+    variant: 'duplicate comparison scope',
+    title: 'Duplicate comparison scope',
+    description: 'Representative or explicitly selected scans for cross-scan duplicate groups.',
+    frameClassName: 'w-full max-w-[760px] border-border bg-surface text-text',
+    render: () => <ScanScopePreview initialScope="representative" />
+  },
+  {
+    path: '/duplicates/click-affordance',
+    group: 'DuplicatesPage',
+    variant: 'file detail affordance',
+    title: 'Duplicate file detail affordance',
+    description: 'Flat duplicate rows expose a real file-detail action without leaving the current workflow.',
+    frameClassName: 'w-full border-border bg-bg text-text',
+    render: () => <DuplicatePreview />
+  },
+  {
+    path: '/duplicates/kind-grouping-flat',
+    group: 'DuplicatesPage',
+    variant: 'content kinds flat',
+    title: 'Duplicate content kinds — flat',
+    description: 'Image and video duplicate groups retain content kind separately from filesystem topology.',
+    frameClassName: 'w-full border-border bg-bg text-text',
+    render: () => <DuplicatePreview />
+  },
+  {
+    path: '/duplicates/kind-grouping-tree',
+    group: 'DuplicatesPage',
+    variant: 'content kinds tree',
+    title: 'Duplicate content kinds — tree',
+    description: 'The same duplicate records in the main-workspace tree result presentation.',
+    frameClassName: 'w-full border-border bg-bg text-text',
+    render: () => <DuplicatePreview initialView="tree" />
+  },
+  {
+    path: '/file-grid/search-flat-results',
+    group: 'SearchPage',
+    variant: 'flat results',
+    title: 'Search file grid',
+    description: 'Search remains a single flat result workspace; scan directory trees belong to Locations.',
+    frameClassName: 'w-full border-border bg-bg text-text',
+    render: () => <SearchPreview />
+  },
+  {
+    path: '/search/column-controls',
+    group: 'SearchPage',
+    variant: 'column visibility',
+    title: 'Search columns',
+    description: 'Supported FileGrid columns can be shown or hidden without offering ignored reordering controls.',
+    frameClassName: 'w-full border-border bg-bg text-text',
+    render: () => <SearchPreview initialShowColumnControls />
+  },
+  {
     path: '/scan-progress/expanded',
     group: 'ScanProgressPools',
     variant: 'expanded',
@@ -69,6 +279,102 @@ const PREVIEWS = [
     render: () => <ScanProgressPools progress={SAMPLE_SCAN_PROGRESS} compact />
   }
 ];
+
+function ScanScopePreview({ allowAll = false, initialScope = 'representative' }) {
+  const [scope, setScope] = useState(initialScope);
+  const [selectedScanIds, setSelectedScanIds] = useState([]);
+
+  function onScopeChange(nextScope) {
+    setScope(nextScope);
+    if (nextScope !== 'explicit') setSelectedScanIds([]);
+  }
+
+  function onSetSelectedScanIds(nextScanIds) {
+    setSelectedScanIds(nextScanIds);
+    if (nextScanIds.length) setScope('explicit');
+  }
+
+  return (
+    <ScanScopeSelector
+      allowAll={allowAll}
+      scope={scope}
+      locations={SAMPLE_LOCATIONS}
+      scans={SAMPLE_SCANS}
+      selectedScanIds={selectedScanIds}
+      onScopeChange={onScopeChange}
+      onSetSelectedScanIds={onSetSelectedScanIds}
+    />
+  );
+}
+
+function DuplicatePreview({ initialView = 'flat' }) {
+  const [query, setQuery] = useState('');
+  const [filters, setFilters] = useState([]);
+  const [selectedScanIds, setSelectedScanIds] = useState([]);
+  const [duplicateView, setDuplicateView] = useState(initialView);
+
+  return (
+    <DuplicatesPage
+      query={query}
+      setQuery={setQuery}
+      filters={filters}
+      locations={SAMPLE_LOCATIONS}
+      scans={SAMPLE_SCANS}
+      busy={false}
+      filteredDupes={SAMPLE_DUPLICATES}
+      selectedScanIds={selectedScanIds}
+      duplicateView={duplicateView}
+      onCommitSearch={() => {}}
+      onReplaceFilterState={(nextQuery, nextFilters) => {
+        setQuery(nextQuery);
+        setFilters(nextFilters);
+      }}
+      onSetSelectedScanIds={setSelectedScanIds}
+      onSetDuplicateView={setDuplicateView}
+      onOpenDuplicate={() => {}}
+    />
+  );
+}
+
+function SearchPreview({ initialShowColumnControls = false }) {
+  const [query, setQuery] = useState('harbor');
+  const [filters, setFilters] = useState([]);
+  const [searchAllScans, setSearchAllScans] = useState(true);
+  const [selectedScanIds, setSelectedScanIds] = useState([]);
+
+  function onSetSearchAllScans(nextAllScans) {
+    setSearchAllScans(nextAllScans);
+    setSelectedScanIds([]);
+  }
+
+  function onSetSelectedScanIds(nextScanIds) {
+    setSelectedScanIds(nextScanIds);
+    if (nextScanIds.length) setSearchAllScans(false);
+  }
+
+  return (
+    <SearchPage
+      query={query}
+      setQuery={setQuery}
+      filters={filters}
+      locations={SAMPLE_LOCATIONS}
+      scans={SAMPLE_SCANS}
+      results={SAMPLE_SEARCH_RESULTS}
+      busy={false}
+      searchAllScans={searchAllScans}
+      selectedScanIds={selectedScanIds}
+      onSearch={() => {}}
+      onSetSearchAllScans={onSetSearchAllScans}
+      onSetSelectedScanIds={onSetSelectedScanIds}
+      onReplaceFilterState={(nextQuery, nextFilters) => {
+        setQuery(nextQuery);
+        setFilters(nextFilters);
+      }}
+      onInspectResult={() => {}}
+      initialShowColumnControls={initialShowColumnControls}
+    />
+  );
+}
 
 function routeFromHash(hash = '') {
   const route = String(hash || '').replace(/^#/, '') || '/scan-progress/expanded';

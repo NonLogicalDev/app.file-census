@@ -60,7 +60,7 @@ tasks:
       - native-bundle-icon-assets
     priority: 96
     created_at: 2026-07-15T08:45:00Z
-    outcome: Exact PostCSS and Tailwind source configs are restored. The remaining gate is an empty ui/dist, an incomplete ignored ui/node_modules store with no executable Vite links, no canonical frontend lockfile, no flake.lock, no ambient Node/Rust toolchain, and an external untracked Cargo.lock. This work needs explicit approval before network or high-disk writes.
+    outcome: Exact PostCSS and Tailwind source configs are restored. The remaining gate is an empty ui/dist, an incomplete ignored ui/node_modules store with no executable Vite links, no canonical frontend lockfile, no ambient Node/Rust toolchain, and an external untracked Cargo.lock. An unproven working-tree flake.lock is present but is not yet canonical evidence; preserve it without staging and verify its provenance under explicit build-input approval. This work needs explicit approval before network or high-disk writes.
     resources:
       - user-approval-for-network-and-build-artifacts
 
@@ -102,13 +102,13 @@ tasks:
     outcome: Production Cmd-K now dispatches real route/location/scan/current-view callbacks, Tasks receives real Stop wiring, unsupported controls are truthful rather than fake RPCs, Dashboard receives activity props, and local-only cancellation is explicit. Static source closure is complete; runtime proof remains pending.
 
   - id: ui-source-horizon-closure
-    work: "Close mixed-horizon UI source defects without weakening tests: real shared exports, File tree/hierarchy behavior, matching shell/grid classes, and redesign preview route registration."
+    work: "Close mixed-horizon UI source defects without weakening tests: real shared exports, File tree/hierarchy behavior, matching shell/grid classes, redesign preview route registration, and every remaining source-only UI regression."
     status: succeeded
     prerequisites:
       - structured-source-recovery
     priority: 100
     created_at: 2026-07-15T10:45:00Z
-    outcome: Static export P0s, exact prototype/routing recovery, directory-only File tree behavior, shell/grid class coverage, preview build entry, and stale search-filter test closure are repaired. Runtime/build validation belongs to reproducible-build-inputs and browser/native acceptance tasks.
+    outcome: Static export P0s, exact prototype/routing recovery, directory-only File tree behavior, shell/grid class coverage, and preview build entry are repaired. The full source-only UI suite now passes 137/137 using the bundled Node runtime. Repaired behavior includes authoritative event-lag recovery, stale-result invalidation, immediate real stop acknowledgement, sidebar-only scan selection, a flat truthful Search workspace, and fixture-backed component preview routes. Assertions were re-baselined only for retired/fake contracts (unsupported file-extra-info cancellation, obsolete scan metadata RPC, abandoned hierarchy props), with product-specific evidence. Runtime/build validation remains with reproducible-build-inputs and browser/native acceptance tasks.
 
   - id: scan-workspace-and-directory-navigation
     work: Build the scan-relative Files/File tree workspace, directory-only side navigation, file table, inspector, and safe actions.
