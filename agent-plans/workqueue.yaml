@@ -1,0 +1,117 @@
+version: 1
+queue:
+  id: file-census-rebuild
+  subject: file-census production rebuild and acceptance
+  coordinator: root
+  created_at: 2026-07-15T05:45:00Z
+  updated_at: 2026-07-15T05:55:00Z
+tasks:
+  - id: rebuild-requirements-ledger
+    work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
+    status: succeeded
+    prerequisites: []
+    priority: 100
+    created_at: 2026-07-15T05:45:00Z
+    outcome: Clean rebuild requirements and durable coordination files exist.
+    evidence:
+      - docs: AGENTS.md, GOALS.md, plan-065, plan-066, workqueue.yaml
+
+  - id: visual-reference-recovery
+    work: Recover or re-supply the deleted visual reference and approved prototype screenshots before any visual parity or final-acceptance claim.
+    status: open
+    prerequisites:
+      - rebuild-requirements-ledger
+    priority: 100
+    created_at: 2026-07-15T05:45:00Z
+    routing:
+      assigned_to: user
+    resources:
+      - user-reference-asset
+
+  - id: structured-source-recovery
+    work: Extract the pre-deletion historical patch ledger, deduplicate copied calls, replay only exact context matches into a temporary tree, and promote only validated source into this checkout.
+    status: in-progress
+    prerequisites:
+      - rebuild-requirements-ledger
+    priority: 100
+    created_at: 2026-07-15T05:55:00Z
+    resources:
+      - session-logs
+    outcome: Pending a source manifest and strict temporary replay result.
+
+  - id: backend-domain-foundation
+    work: Build the Rust/SQLite domain and JSON-RPC/browser-server foundation for locations, scans, files, scan visibility, and live progress.
+    status: open
+    prerequisites:
+      - rebuild-requirements-ledger
+      - structured-source-recovery
+    priority: 99
+    created_at: 2026-07-15T05:45:00Z
+
+  - id: production-shell-and-routing
+    work: Build the real dark application shell, routing, persisted collapsible sidebar, and main-top-bar Cmd-K foundation.
+    status: open
+    prerequisites:
+      - backend-domain-foundation
+    priority: 98
+    created_at: 2026-07-15T05:45:00Z
+
+  - id: scan-workspace-and-directory-navigation
+    work: Build the scan-relative Files/File tree workspace, directory-only side navigation, file table, inspector, and safe actions.
+    status: open
+    prerequisites:
+      - production-shell-and-routing
+    priority: 98
+    created_at: 2026-07-15T05:45:00Z
+
+  - id: scan-exclude-filter-contract
+    work: Implement persistent non-destructive per-scan excludes across every scan-scoped query/action with database/source integrity tests.
+    status: open
+    prerequisites:
+      - scan-workspace-and-directory-navigation
+    priority: 99
+    created_at: 2026-07-15T05:45:00Z
+
+  - id: duplicates-tasks-search-options
+    work: Build real Duplicates, Tasks, Search, and Options workflows on shared shell/state/transport primitives.
+    status: open
+    prerequisites:
+      - production-shell-and-routing
+    priority: 94
+    created_at: 2026-07-15T05:45:00Z
+
+  - id: cli-scan-bootstrap
+    work: Implement and prove compatible CLI scan bootstrap with canonical source validation, atomic location/scan creation, UTC date-based IDs, collisions, and legacy behavior.
+    status: open
+    prerequisites:
+      - backend-domain-foundation
+    priority: 88
+    created_at: 2026-07-15T05:45:00Z
+
+  - id: scanner-progress-tui
+    work: Implement and prove opt-in Ratatui progress with bounded active-operation telemetry, truthful queue/pool bars, duration ordering, terminal restoration, and non-TTY fallback.
+    status: open
+    prerequisites:
+      - backend-domain-foundation
+    priority: 86
+    created_at: 2026-07-15T05:45:00Z
+
+  - id: browser-native-accessibility-matrix
+    work: Prove browser-server, native/Tauri, keyboard/accessibility, destructive-fixture, and transport behavior on the rebuilt product.
+    status: open
+    prerequisites:
+      - scan-exclude-filter-contract
+      - duplicates-tasks-search-options
+    priority: 80
+    created_at: 2026-07-15T05:45:00Z
+
+  - id: visual-qa-and-final-approval
+    work: Compare current 1440x900 and 1280x800 production captures to the recovered visual reference, resolve every P0/P1/P2 issue, and obtain explicit user approval.
+    status: open
+    prerequisites:
+      - visual-reference-recovery
+      - browser-native-accessibility-matrix
+      - cli-scan-bootstrap
+      - scanner-progress-tui
+    priority: 10
+    created_at: 2026-07-15T05:45:00Z
