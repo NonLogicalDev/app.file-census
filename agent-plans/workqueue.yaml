@@ -4,7 +4,7 @@ queue:
   subject: file-census production rebuild and acceptance
   coordinator: root
   created_at: 2026-07-15T05:45:00Z
-  updated_at: 2026-07-15T06:51:00Z
+  updated_at: 2026-07-15T07:08:00Z
 tasks:
   - id: rebuild-requirements-ledger
     work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
@@ -37,7 +37,7 @@ tasks:
     created_at: 2026-07-15T05:55:00Z
     resources:
       - session-logs
-    outcome: Direct-event manifest plus 109-entry source index are complete; a reproducible 106-file, hash-verified snapshot tree exists. Strict final-workspace/boot-closure replay and source promotion remain pending.
+    outcome: Direct-event manifest plus 109-entry source index are complete; a reproducible 106-file, hash-verified snapshot tree exists. Path-scoped recovery now gates every patch on direct success output and has seven complete-read closure seeds. Strict final-workspace, boot-closure, historic-plan replay, and source promotion remain pending.
 
   - id: backend-domain-foundation
     work: Build the Rust/SQLite domain and JSON-RPC/browser-server foundation for locations, scans, files, scan visibility, and live progress.

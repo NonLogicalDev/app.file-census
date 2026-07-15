@@ -66,6 +66,7 @@ BUILTIN_TRUSTED_SOURCE_READS = {
   },
 }.freeze
 SNAPSHOT_CANDIDATE_FILE = File.join(__dir__, "recovery_snapshot_candidates.json")
+COMPLETE_READ_SEED_FILE = File.join(__dir__, "recovery_complete_read_seeds.json")
 
 class RecoveryError < StandardError; end
 
@@ -92,8 +93,69 @@ rescue JSON::ParserError, KeyError, TypeError => error
   raise RecoveryError, "invalid snapshot candidate index: #{error.message}"
 end
 
+def complete_read_seeds
+  return [] unless File.file?(COMPLETE_READ_SEED_FILE)
+
+  data = JSON.parse(File.read(COMPLETE_READ_SEED_FILE))
+  source_log = data.fetch("source_log")
+  data.fetch("seeds").map.with_index do |entry, index|
+    segments = entry.fetch("segments")
+    raise RecoveryError, "complete read seed has no segments: #{entry.fetch("path")}" if segments.empty?
+
+    {
+      id: entry.fetch("id", "seed-#{index}"),
+      path: entry.fetch("path"),
+      timestamp: entry.fetch("timestamp"),
+      source_log: entry.fetch("source_log", source_log),
+      bytes: entry.fetch("bytes"),
+      lines: entry.fetch("lines"),
+      sha256: entry.fetch("sha256"),
+      segments: segments.map do |segment|
+        {
+          call_id: segment.fetch("call_id"),
+          command: segment.fetch("command"),
+          request_line: segment.fetch("request_line"),
+          output_line: segment.fetch("output_line"),
+        }
+      end,
+    }
+  end
+rescue JSON::ParserError, KeyError, TypeError => error
+  raise RecoveryError, "invalid complete-read seed index: #{error.message}"
+end
+
+def complete_read_seed_requests
+  complete_read_seeds.each_with_object({}) do |seed, reads|
+    seed[:segments].each_with_index do |segment, index|
+      call_id = segment[:call_id]
+      raise RecoveryError, "duplicate complete-read seed call: #{call_id}" if reads.key?(call_id)
+
+      reads[call_id] = {
+        path: seed[:path],
+        kind: :complete_read_segment,
+        command: segment[:command],
+        expected_source_log: seed[:source_log],
+        expected_source_line: segment[:request_line],
+        expected_output_line: segment[:output_line],
+        complete_seed: seed,
+        complete_seed_segment: index,
+      }
+    end
+  end
+end
+
 def trusted_source_reads
-  @trusted_source_reads ||= BUILTIN_TRUSTED_SOURCE_READS.merge(candidate_snapshot_reads).freeze
+  @trusted_source_reads ||= begin
+    # The candidate index intentionally refines several historical built-ins
+    # with source-line and hash checks. Complete-read seeds must be distinct.
+    combined = BUILTIN_TRUSTED_SOURCE_READS.merge(candidate_snapshot_reads)
+    complete_read_seed_requests.each do |call_id, read|
+      raise RecoveryError, "duplicate complete-read source call: #{call_id}" if combined.key?(call_id)
+
+      combined[call_id] = read
+    end
+    combined.freeze
+  end
 end
 
 def trusted_source_read_pattern
@@ -109,6 +171,7 @@ Options = Struct.new(
   :include_generated,
   :snapshot_horizons,
   :snapshot_only,
+  :paths,
   keyword_init: true,
 )
 
@@ -122,6 +185,7 @@ def options_from(argv)
     include_generated: false,
     snapshot_horizons: false,
     snapshot_only: false,
+    paths: [],
   )
 
   parser = OptionParser.new do |opts|
@@ -140,11 +204,23 @@ def options_from(argv)
     opts.on("--include-generated", "Include target/, node_modules/, and ui/dist/ records") { options.include_generated = true }
     opts.on("--snapshot-horizons", "Use the newest verified source snapshot per path, then exact later changes") { options.snapshot_horizons = true }
     opts.on("--snapshot-only", "Write only the newest verified source snapshot per path") { options.snapshot_only = true }
+    opts.on("--path PATH", "Limit recovery to a relative path or directory prefix (repeatable)") { |value| options.paths << value }
     opts.on("-h", "--help", "Show this help") { puts opts; exit }
   end
   parser.parse!(argv)
   raise RecoveryError, "--keep-partial requires --output" if options.keep_partial && options.output.nil?
+  options.paths = options.paths.map { |path| normalize_path_scope(path) }.uniq
   options
+end
+
+def normalize_path_scope(path)
+  normalized = path.delete_prefix("./").delete_suffix("/")
+  raise RecoveryError, "unsafe --path scope: #{path.inspect}" if normalized.empty? || normalized.start_with?("/")
+
+  segments = normalized.split("/")
+  raise RecoveryError, "unsafe --path scope: #{path.inspect}" if segments.any? { |segment| segment.empty? || segment == "." || segment == ".." }
+
+  normalized
 end
 
 def safe_relative_path(path, historical_root)
@@ -197,6 +273,32 @@ def candidate_patch_blocks(name, input)
   texts << input if input.include?("\n")
   texts.concat(json_string_literals(input)) if name == "exec"
   texts.flat_map { |text| patch_blocks(text) }.uniq
+end
+
+def historical_workdir(workdir, historical_root)
+  return nil unless workdir.is_a?(String)
+
+  expanded_root = File.expand_path(historical_root)
+  expanded_workdir = File.expand_path(workdir)
+  return nil unless expanded_workdir == expanded_root || expanded_workdir.start_with?("#{expanded_root}/")
+
+  expanded_workdir
+end
+
+def patch_call_input(payload, historical_root)
+  if payload["type"] == "custom_tool_call" && %w[apply_patch exec].include?(payload["name"]) && payload["input"].is_a?(String)
+    return [payload["name"], payload["input"], nil]
+  end
+
+  return nil unless payload["type"] == "function_call" && payload["name"] == "exec_command"
+
+  arguments = JSON.parse(payload["arguments"])
+  command = arguments["cmd"]
+  return nil unless command.is_a?(String)
+
+  [payload["name"], command, historical_workdir(arguments["workdir"], historical_root)]
+rescue JSON::ParserError
+  nil
 end
 
 def command_relative_path(raw_path, historical_root)
@@ -271,6 +373,17 @@ def output_text(output)
   end
 end
 
+def successful_patch_output?(payload)
+  text = output_text(payload["output"])
+  return false unless text
+
+  return false if text.match?(/script error|apply_patch verification failed|\bfailed\b|\berror:/i)
+
+  text.include?("Script completed") ||
+    text.match?(/(?:Process exited with code|Exit code:)\s*0\b/) ||
+    text.match?(/\bSuccess(?:\.|\b)/)
+end
+
 def snapshot_content(output, request)
   text = output_text(output)
   return nil unless text
@@ -294,7 +407,64 @@ rescue JSON::ParserError
   nil
 end
 
-def parse_patch(patch, historical_root:, include_generated:)
+def merge_complete_read_segments(seed, segments)
+  ordered = seed[:segments].each_index.map do |index|
+    content = segments[index]
+    raise RecoveryError, "missing complete-read segment #{index + 1} for #{seed[:path]}" unless content
+
+    content
+  end
+
+  content = ordered.shift.dup
+  ordered.each_with_index do |segment, index|
+    previous_lines = content.lines
+    next_lines = segment.lines
+    raise RecoveryError, "empty complete-read segment #{index + 2} for #{seed[:path]}" if next_lines.empty?
+    unless previous_lines.last == next_lines.first
+      raise RecoveryError, "complete-read boundary mismatch at segment #{index + 2} for #{seed[:path]}"
+    end
+
+    content = previous_lines.join + next_lines.drop(1).join
+  end
+
+  raise RecoveryError, "complete-read byte mismatch for #{seed[:path]}" unless content.bytesize == seed[:bytes]
+  raise RecoveryError, "complete-read line mismatch for #{seed[:path]}" unless content.lines.count == seed[:lines]
+  raise RecoveryError, "complete-read hash mismatch for #{seed[:path]}" unless Digest::SHA256.hexdigest(content) == seed[:sha256]
+
+  content
+end
+
+def complete_read_snapshot_records(seed_segments)
+  complete_read_seeds.each_with_object({}) do |seed, snapshots|
+    segments = seed_segments.fetch(seed[:id], {})
+    next if segments.empty?
+
+    content = merge_complete_read_segments(seed, segments.transform_values { |record| record[:content] })
+    last_segment = segments.fetch(seed[:segments].length - 1)
+    hash = Digest::SHA256.hexdigest(content)
+    record = {
+      call_id: "complete-read:#{seed[:id]}",
+      timestamp: seed[:timestamp],
+      source_file: last_segment[:source_file],
+      source_line: last_segment[:source_line],
+      ordinal: 0,
+      patch_hash: hash,
+      kind: "snapshot",
+      changes: [{ type: "snapshot", path: seed[:path], content: content }],
+    }
+    snapshots[record[:call_id]] = record
+  end
+end
+
+def patch_path(raw_path, historical_root, patch_workdir)
+  if raw_path.start_with?("/")
+    safe_relative_path(raw_path, historical_root)
+  elsif patch_workdir
+    safe_relative_path(File.expand_path(raw_path, patch_workdir), historical_root)
+  end
+end
+
+def parse_patch(patch, historical_root:, include_generated:, patch_workdir: nil)
   lines = patch.split("\n", -1)
   raise RecoveryError, "missing patch start" unless lines.shift == BEGIN_PATCH
 
@@ -307,7 +477,7 @@ def parse_patch(patch, historical_root:, include_generated:)
     header = lines[index]
     case header
     when /\A\*\*\* Add File: (.+)\z/
-      path = safe_relative_path(Regexp.last_match(1), historical_root)
+      path = patch_path(Regexp.last_match(1), historical_root, patch_workdir)
       raise RecoveryError, "unsafe add path" unless path
       index += 1
       body = []
@@ -321,12 +491,12 @@ def parse_patch(patch, historical_root:, include_generated:)
       next if excluded_path?(path, include_generated)
       changes << { type: "add", path: path, content: body.empty? ? "" : "#{body.join("\n")}\n" }
     when /\A\*\*\* Update File: (.+)\z/
-      path = safe_relative_path(Regexp.last_match(1), historical_root)
+      path = patch_path(Regexp.last_match(1), historical_root, patch_workdir)
       raise RecoveryError, "unsafe update path" unless path
       index += 1
       move_to = nil
       if index < lines.length && lines[index].start_with?("*** Move to: ")
-        move_to = safe_relative_path(lines[index].delete_prefix("*** Move to: "), historical_root)
+        move_to = patch_path(lines[index].delete_prefix("*** Move to: "), historical_root, patch_workdir)
         raise RecoveryError, "unsafe move path" unless move_to
 
         index += 1
@@ -339,7 +509,7 @@ def parse_patch(patch, historical_root:, include_generated:)
       next if excluded_path?(path, include_generated) || (move_to && excluded_path?(move_to, include_generated))
       changes << { type: "update", path: path, move_to: move_to, diff: diff.join("\n") }
     when /\A\*\*\* Delete File: (.+)\z/
-      path = safe_relative_path(Regexp.last_match(1), historical_root)
+      path = patch_path(Regexp.last_match(1), historical_root, patch_workdir)
       raise RecoveryError, "unsafe delete path" unless path
       index += 1
       next if excluded_path?(path, include_generated)
@@ -355,16 +525,18 @@ def collect_records(options)
   records = {}
   snapshots = {}
   read_requests = {}
+  complete_read_segments = Hash.new { |hash, key| hash[key] = {} }
   ignored = []
   scanned_files = 0
   scanned_lines = 0
 
   Dir.glob(options.sessions_glob).sort.each do |session_file|
+    pending_patches = {}
     scanned_files += 1
     File.foreach(session_file).with_index(1) do |line, line_number|
       scanned_lines += 1
       next if line[0, 14] == '{"timestamp":"' && line[14, 24] >= options.cutoff
-      next unless line.include?(BEGIN_PATCH) || trusted_source_read_pattern.match?(line)
+      next unless line.include?(BEGIN_PATCH) || trusted_source_read_pattern.match?(line) || pending_patches.keys.any? { |call_id| line.include?(call_id) }
 
       event = JSON.parse(line)
       payload = event["payload"] || {}
@@ -385,37 +557,67 @@ def collect_records(options)
 
       if %w[function_call_output custom_tool_call_output].include?(payload["type"])
         request = read_requests[payload["call_id"]]
-        next unless request && request[:source_file] == session_file
-        content = snapshot_content(payload["output"], request)
-        next unless content
+        if request && request[:source_file] == session_file && (!request[:expected_output_line] || line_number == request[:expected_output_line])
+          content = snapshot_content(payload["output"], request)
+          if content
+            if request[:complete_seed]
+              seed_id = request[:complete_seed][:id]
+              complete_read_segments[seed_id][request[:complete_seed_segment]] = {
+                content: content,
+                source_file: session_file,
+                source_line: line_number,
+              }
+            else
+              hash = Digest::SHA256.hexdigest(content)
+              key = [payload["call_id"], request[:path], hash].join(":")
+              record = {
+                call_id: payload["call_id"],
+                timestamp: event["timestamp"],
+                source_file: session_file,
+                source_line: line_number,
+                ordinal: 0,
+                patch_hash: hash,
+                kind: "snapshot",
+                changes: [{ type: "snapshot", path: request[:path], content: content }],
+              }
+              existing = snapshots[key]
+              snapshots[key] = record if existing.nil? || [record[:timestamp], record[:source_file], record[:source_line]] < [existing[:timestamp], existing[:source_file], existing[:source_line]]
+            end
+          end
+          next
+        end
 
-        hash = Digest::SHA256.hexdigest(content)
-        key = [payload["call_id"], request[:path], hash].join(":")
-        record = {
-          call_id: payload["call_id"],
-          timestamp: event["timestamp"],
-          source_file: session_file,
-          source_line: line_number,
-          ordinal: 0,
-          patch_hash: hash,
-          kind: "snapshot",
-          changes: [{ type: "snapshot", path: request[:path], content: content }],
-        }
-        existing = snapshots[key]
-        snapshots[key] = record if existing.nil? || [record[:timestamp], record[:source_file], record[:source_line]] < [existing[:timestamp], existing[:source_file], existing[:source_line]]
+        pending = pending_patches.delete(payload["call_id"])
+        if pending
+          if successful_patch_output?(payload)
+            pending[:records].each do |record|
+              existing = records[record[:key]]
+              records[record[:key]] = record if existing.nil? || [record[:timestamp], record[:source_file], record[:source_line]] < [existing[:timestamp], existing[:source_file], existing[:source_line]]
+            end
+          else
+            ignored << {
+              file: session_file,
+              line: pending[:source_line],
+              call_id: pending[:call_id],
+              reason: "patch command did not report a direct successful tool output",
+            }
+          end
+        end
         next
       end
 
-      next unless payload["type"] == "custom_tool_call"
-      next unless %w[apply_patch exec].include?(payload["name"])
-      next unless payload["input"].is_a?(String)
+      patch_call = patch_call_input(payload, options.historical_root)
+      next unless patch_call
+      patch_name, patch_input, patch_workdir = patch_call
+      pending_records = []
 
-      candidate_patch_blocks(payload["name"], payload["input"]).each_with_index do |patch, ordinal|
+      candidate_patch_blocks(patch_name, patch_input).each_with_index do |patch, ordinal|
         begin
           changes = parse_patch(
             patch,
             historical_root: options.historical_root,
             include_generated: options.include_generated,
+            patch_workdir: patch_workdir,
           )
           next if changes.empty?
         rescue RecoveryError => error
@@ -435,15 +637,31 @@ def collect_records(options)
           patch_hash: hash,
           changes: changes,
         }
-        existing = records[key]
-        records[key] = record if existing.nil? || [record[:timestamp], record[:source_file], record[:source_line]] < [existing[:timestamp], existing[:source_file], existing[:source_line]]
+        pending_records << record.merge(key: key)
+      end
+      unless pending_records.empty?
+        pending_patches[payload["call_id"]] = {
+          call_id: payload["call_id"],
+          source_line: line_number,
+          records: pending_records,
+        }
       end
     rescue JSON::ParserError
       # Session logs can contain non-JSON diagnostic fragments; they are not evidence.
       next
     end
+
+    pending_patches.each_value do |pending|
+      ignored << {
+        file: session_file,
+        line: pending[:source_line],
+        call_id: pending[:call_id],
+        reason: "patch command had no direct successful tool output",
+      }
+    end
   end
 
+  snapshots.merge!(complete_read_snapshot_records(complete_read_segments))
   all_records = records.values + snapshots.values
   [all_records.sort_by { |record| [record[:timestamp], record[:source_file], record[:source_line], record[:ordinal]] }, ignored, scanned_files, scanned_lines, snapshots.length]
 end
@@ -551,6 +769,21 @@ def change_paths(change)
   [change[:path], change[:move_to]].compact.uniq
 end
 
+def path_selected?(path, scopes)
+  scopes.any? { |scope| path == scope || path.start_with?("#{scope}/") }
+end
+
+def records_for_paths(records, scopes)
+  return records if scopes.empty?
+
+  records.each_with_object([]) do |record, selected|
+    changes = record[:changes].select do |change|
+      change_paths(change).any? { |path| path_selected?(path, scopes) }
+    end
+    selected << record.merge(changes: changes) unless changes.empty?
+  end
+end
+
 def snapshot_horizon_replay(records)
   horizons = {}
   records.select { |record| record[:kind] == "snapshot" }.each do |record|
@@ -612,10 +845,12 @@ end
 begin
   options = options_from(ARGV)
   records, ignored, scanned_files, scanned_lines, = collect_records(options)
-  summary = manifest(records, ignored, scanned_files, scanned_lines, options)
-  replay_records = records
+  scoped_records = records_for_paths(records, options.paths)
+  summary = manifest(scoped_records, ignored, scanned_files, scanned_lines, options)
+  summary[:path_scope] = options.paths unless options.paths.empty?
+  replay_records = scoped_records
   if options.snapshot_horizons || options.snapshot_only
-    replay_records, horizons, skipped_changes = snapshot_horizon_replay(records)
+    replay_records, horizons, skipped_changes = snapshot_horizon_replay(scoped_records)
     replay_records = horizons.values.sort_by { |record| record_sort_key(record) } if options.snapshot_only
     summary.merge!(
       recovery_mode: options.snapshot_only ? "latest-verified-snapshots" : "snapshot-horizons-plus-exact-patches",

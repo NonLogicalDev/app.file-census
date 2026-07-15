@@ -32,7 +32,7 @@ The original visual reference image and prototype commit are missing. Build real
 1. [x] Recreate requirements, task queue, reference-asset recovery gate, and a clean recovery checkpoint.
 2. [x] Produce a direct-event source-recovery manifest with a fixed pre-deletion cutoff and duplicate-safe ordering.
 3. [x] Extract the latest verified whole-file snapshot per path into a reproducible temporary source tree, without claiming it is a coherent final build.
-4. [ ] Recover the final workspace backbone and frontend boot closure as strict composite temporary trees using verified source snapshots as file-local horizons; promote only validated, coherent source into this checkout.
+4. [ ] Recover the final workspace backbone, frontend boot closure, and historic plan evidence as strict composite temporary trees using verified source snapshots as file-local horizons; promote only validated, coherent source into this checkout.
 5. [ ] Build the SQLite domain and JSON-RPC/browser-server foundation for locations, scans, files, and live progress.
 6. [ ] Build the shared dark shell, persisted collapsible sidebar, routing, and main-top-bar Cmd-K.
 7. [ ] Build the scan workspace with directory-only tree/folder navigation, main files/File tree modes, inspector, safe actions, and non-destructive exclusions.
@@ -50,6 +50,10 @@ The original visual reference image and prototype commit are missing. Build real
 - A direct snapshot-index pass found 109 complete pre-deletion file-read events across 106 paths. The recovery tool validates direct call ID, logged command, source-log basename and line, output line count, and SHA-256 before reproducing the newest snapshot per path. It now generates a 106-file, 740 KB exact-source tree with no conflicts.
 - The source-only mode and horizon mode are separate: source-only preserves the newest proven version of each allowlisted file; horizon mode applies only later exact patches and stops on the first conflict. Neither mode writes the active checkout.
 - The 106-file tree is not ready to promote: it mixes POC-era root Rust with later workspace sources, has no full `ui/src/App.jsx` snapshot, and lacks final workspace modules/configuration such as backend `db`/`scanner`/`web`, native manifest/Tauri config, and HTML entries. The next recovery action is a final-architecture closure, not a bulk copy.
+- Direct `function_call → exec_command` patch inputs and `custom_tool_call` patch/exec inputs are historical evidence only when their matching direct output reports success. A late shared update (`call_PSSZGO3bTHcGZETHAD7GS0Vp`) failed atomically and must never be replayed.
+- Seven complete, hash-verified source seeds now cover the missing React app entry, final backend `db`/`scanner`/`web`, native manifest/config, and `ui/index.html`. Multi-range reads are accepted only when their exact one-line overlaps, total bytes, line count, and SHA-256 all validate.
+- The recovery tool now supports safe `--path` scopes so obsolete root/POC history cannot block final architecture paths. It never writes the active checkout.
+- Historical project plans use `agent-plans/`; no project `.agent-plans/` entries were found in the canonical source logs. `plan-061` and `plan-066` have direct successful baselines; `plan-065` has a successful Add baseline but needs success-gated replay for its later state.
 
 # Work Log
 
@@ -61,9 +65,12 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-14 23:40 - Added provenance checks for direct command reads and generated a 25-file exact-source snapshot tree (244 KB) from the newest verified file versions; JSON/package parsing and recovery-report checks passed.
 - [x] 2026-07-14 23:51 - Added the 109-entry provenance index and validated a complete 106-path, 740 KB source-only recovery tree with direct call/source-line/output-hash checks and no replay conflict.
 - [x] 2026-07-14 23:51 - Audited the recovered tree for timestamp and import/workspace coherence; retained it as evidence only because final backend/native and frontend boot closures are still incomplete.
+- [x] 2026-07-15 00:08 - Added path-scoped, output-success-gated recovery plus seven hash-verified complete-read seeds for the missing final workspace closure; verified failed historical plan patches are excluded.
+- [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
 # Unfinished Work
 
 - [ ] Recover the deleted visual reference/prototype evidence from the user.
-- [ ] Use the verified snapshot index to recover the final workspace backbone and frontend boot closure with strict later-patch replay before copying any recovered source into the checkout.
+- [ ] Use the verified snapshot index and complete-read seeds to recover the final workspace backbone and frontend boot closure with strict later-patch replay before copying any recovered source into the checkout.
+- [ ] Recover all success-gated `agent-plans/` entries that have direct Add/snapshot baselines; retain unresolved plan files as evidence rather than fabricating them.
 - [ ] Complete every implementation and verification step above.

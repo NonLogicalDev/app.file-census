@@ -1,0 +1,89 @@
+{
+  "source_log": "rollout-2026-05-29T20-01-18-019e76d4-3180-7473-b7b1-366ac8014fbd.jsonl",
+  "seeds": [
+    {
+      "id": "react-app-2026-06-13",
+      "path": "ui/src/App.jsx",
+      "timestamp": "2026-06-13T00:28:12.120Z",
+      "bytes": 48974,
+      "lines": 1197,
+      "sha256": "08e3700cb93055105b74c5ffcdf66466a350e99e86ed04e52a6641d95e27cb15",
+      "segments": [
+        { "call_id": "call_on5rvAvH4bVDLojoGUaeQQbS", "command": "sed -n '1,340p' ui/src/App.jsx", "request_line": 10963, "output_line": 10969 },
+        { "call_id": "call_m9CGuQgn6XedKrHrtybXElMa", "command": "sed -n '340,760p' ui/src/App.jsx", "request_line": 10964, "output_line": 10970 },
+        { "call_id": "call_v47CqfZWMr4tPcXLVcXf5OXN", "command": "sed -n '760,1260p' ui/src/App.jsx", "request_line": 10977, "output_line": 10981 }
+      ]
+    },
+    {
+      "id": "backend-db-2026-06-13",
+      "path": "src/backend/src/db.rs",
+      "timestamp": "2026-06-13T00:28:01.877Z",
+      "bytes": 57557,
+      "lines": 1694,
+      "sha256": "6ba821b7ccde75221dc9cc98df02e68ced426512a4ba14e38f4895a0358f94b6",
+      "segments": [
+        { "call_id": "call_LHKlO7yKSg5ohGCHYP8hySm1", "command": "sed -n '1,360p' src/backend/src/db.rs", "request_line": 10945, "output_line": 10951 },
+        { "call_id": "call_9X4pfbZuuxzMdECMlLBwCkpQ", "command": "sed -n '360,820p' src/backend/src/db.rs", "request_line": 10946, "output_line": 10952 },
+        { "call_id": "call_8yW5SypcRKB6NEGbjyowWIK9", "command": "sed -n '820,1320p' src/backend/src/db.rs", "request_line": 10961, "output_line": 10967 },
+        { "call_id": "call_0hvQ3RpKR1JBBKbHX2xwf1Mh", "command": "sed -n '1320,1740p' src/backend/src/db.rs", "request_line": 10962, "output_line": 10968 }
+      ]
+    },
+    {
+      "id": "backend-scanner-2026-06-13",
+      "path": "src/backend/src/scanner.rs",
+      "timestamp": "2026-06-13T00:27:48.999Z",
+      "bytes": 24901,
+      "lines": 765,
+      "sha256": "ec94329ec2613b198ed31792960e471af36c05c1ca2fb6113582ca8fc701d9fe",
+      "segments": [
+        { "call_id": "call_14vYumcEjPWuFjgiZb1chRSr", "command": "sed -n '1,360p' src/backend/src/scanner.rs", "request_line": 10947, "output_line": 10953 },
+        { "call_id": "call_azgmUHG8gWnqN8dQi4stQnJt", "command": "sed -n '360,820p' src/backend/src/scanner.rs", "request_line": 10948, "output_line": 10954 }
+      ]
+    },
+    {
+      "id": "backend-web-2026-06-13",
+      "path": "src/backend/src/web.rs",
+      "timestamp": "2026-06-13T00:28:12.120Z",
+      "bytes": 26089,
+      "lines": 836,
+      "sha256": "f24639994d8a06b1ed25b12e419b8214d7ef331a3c04dcf98558aa802f09c9a5",
+      "segments": [
+        { "call_id": "call_Ht1NTf13GPcle3MqenAZjCn5", "command": "sed -n '1,520p' src/backend/src/web.rs", "request_line": 10950, "output_line": 10956 },
+        { "call_id": "call_kpp2kRsiWStFo7GQI9opiInO", "command": "sed -n '520,920p' src/backend/src/web.rs", "request_line": 10978, "output_line": 10982 }
+      ]
+    },
+    {
+      "id": "native-tauri-config-2026-06-13",
+      "path": "src/native_app/tauri.conf.json",
+      "timestamp": "2026-06-13T01:34:00.177Z",
+      "bytes": 587,
+      "lines": 27,
+      "sha256": "f6538968067c2b9d6011a05e2632e5445ead84e700e40972c7f46af00152db02",
+      "segments": [
+        { "call_id": "call_cAlwVCMOWxwq07awu8LQhpig", "command": "cat src/native_app/tauri.conf.json", "request_line": 12450, "output_line": 12453 }
+      ]
+    },
+    {
+      "id": "native-cargo-manifest-2026-06-13",
+      "path": "src/native_app/Cargo.toml",
+      "timestamp": "2026-06-13T01:37:13.208Z",
+      "bytes": 351,
+      "lines": 15,
+      "sha256": "a63a41a917db02a00bfa3737d47a2e84a192ebead6d7293008c9006fdf6ff53d",
+      "segments": [
+        { "call_id": "call_1hJF8YA0w9R6N3UOUBF8hWRK", "command": "cat src/native_app/Cargo.toml", "request_line": 12535, "output_line": 12536 }
+      ]
+    },
+    {
+      "id": "ui-index-2026-06-13",
+      "path": "ui/index.html",
+      "timestamp": "2026-06-13T03:01:14.133Z",
+      "bytes": 297,
+      "lines": 12,
+      "sha256": "6915311556346d986fabcd433b9dbdba9919a9b4b5ed86440422962ca2b01821",
+      "segments": [
+        { "call_id": "call_SfxjRNoQSxudKkYLNsQ4Y99x", "command": "cat ui/index.html", "request_line": 14002, "output_line": 14004 }
+      ]
+    }
+  ]
+}
