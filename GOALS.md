@@ -2,7 +2,7 @@
 
 ## Recovery status
 
-On 2026-07-14 the prior repository, Git history, plans, source, and generated assets were deleted during disk cleanup. Structured historical session logs survive and are being replayed only when their context can be validated exactly. Every prior implementation and verification claim remains reset until proven again in this checkout.
+On 2026-07-14 the prior repository, Git history, plans, source, and generated assets were deleted during disk cleanup. Structured historical session logs survive and are being replayed only when their context can be validated exactly. A 109-event provenance index now reproduces 106 hash-verified source paths into a temporary evidence tree; it is not yet a coherent, buildable checkout. Every prior implementation and verification claim remains reset until proven again in this checkout.
 
 ## Completion contract
 

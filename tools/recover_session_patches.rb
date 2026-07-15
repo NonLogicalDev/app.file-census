@@ -21,11 +21,10 @@ DEFAULT_SESSIONS = File.join(Dir.home, ".codex", "sessions", "2026", "{05,06,07}
 BEGIN_PATCH = "*** Begin Patch"
 END_PATCH = "*** End Patch"
 
-# These reads are proven complete historical source snapshots: each command
-# requested more lines than its output contained after `cargo fmt`. They bridge
-# source formatting actions that were performed by shell commands rather than
-# by patches. Keep this allowlist intentionally small and evidence-backed.
-TRUSTED_SOURCE_READS = {
+# These built-in reads bridge source-formatting actions that were performed by
+# shell commands rather than patches. The tracked candidate index adds direct,
+# hash-verified historical reads without trusting copied conversation context.
+BUILTIN_TRUSTED_SOURCE_READS = {
   "call_EDYdmvPoHX5QGMJ5Nd32YbA5" => { path: "src/main.rs", kind: :sed, max_lines: 220 },
   "call_TFaUXtNW4X3iK28aoB2ELqrn" => { path: "src/web.rs", kind: :sed, max_lines: 260 },
   "call_aVfE8TEf3Q2dr1lCaYjAebk1" => { path: "src/scanner.rs", kind: :sed, max_lines: 260 },
@@ -66,9 +65,40 @@ TRUSTED_SOURCE_READS = {
     command: "cat ui/package.json && git diff --check && git diff -- ui/src/App.jsx ui/src/App.structure.test.js",
   },
 }.freeze
-TRUSTED_SOURCE_READ_PATTERN = Regexp.union(TRUSTED_SOURCE_READS.keys).freeze
+SNAPSHOT_CANDIDATE_FILE = File.join(__dir__, "recovery_snapshot_candidates.json")
 
 class RecoveryError < StandardError; end
+
+def candidate_snapshot_reads
+  return {} unless File.file?(SNAPSHOT_CANDIDATE_FILE)
+
+  data = JSON.parse(File.read(SNAPSHOT_CANDIDATE_FILE))
+  data.fetch("snapshots").each_with_object({}) do |entry, reads|
+    call_id = entry.fetch("call_id")
+    raise RecoveryError, "duplicate candidate snapshot call: #{call_id}" if reads.key?(call_id)
+
+    command = entry.fetch("command")
+    reads[call_id] = {
+      path: entry.fetch("path"),
+      kind: command.start_with?("sed -n ") ? :sed : :full,
+      command: command,
+      expected_source_log: entry.fetch("source_log"),
+      expected_source_line: entry.fetch("source_line"),
+      output_lines: entry.fetch("output_lines"),
+      sha256: entry.fetch("sha256"),
+    }
+  end
+rescue JSON::ParserError, KeyError, TypeError => error
+  raise RecoveryError, "invalid snapshot candidate index: #{error.message}"
+end
+
+def trusted_source_reads
+  @trusted_source_reads ||= BUILTIN_TRUSTED_SOURCE_READS.merge(candidate_snapshot_reads).freeze
+end
+
+def trusted_source_read_pattern
+  @trusted_source_read_pattern ||= Regexp.union(trusted_source_reads.keys).freeze
+end
 
 Options = Struct.new(
   :sessions_glob,
@@ -176,10 +206,17 @@ def command_relative_path(raw_path, historical_root)
 end
 
 def source_read_request_from_arguments(arguments, trusted, historical_root)
-  return nil unless arguments["workdir"] == historical_root
-
   command = arguments["cmd"].to_s
-  return trusted.dup if trusted[:command] && command == trusted[:command]
+  expected_command = trusted[:command]&.gsub("<historical-root>", historical_root)
+  if expected_command && command == expected_command
+    request = trusted.dup
+    if (match = command.match(/\Ased -n '1,(\d+)p /))
+      request[:max_lines] ||= match[1].to_i
+    end
+    return request
+  end
+
+  return nil unless arguments["workdir"] == historical_root
 
   if (match = command.match(/\Acat ([A-Za-z0-9_.\/-]+)\z/))
     path = command_relative_path(match[1], historical_root)
@@ -196,17 +233,29 @@ def source_read_request_from_arguments(arguments, trusted, historical_root)
 end
 
 def source_read_request(payload, historical_root)
-  trusted = TRUSTED_SOURCE_READS[payload["call_id"]]
+  trusted = trusted_source_reads[payload["call_id"]]
   return nil unless trusted
 
   if payload["type"] == "function_call" && payload["name"] == "exec_command"
     return source_read_request_from_arguments(JSON.parse(payload["arguments"]), trusted, historical_root)
   end
   if payload["type"] == "custom_tool_call" && payload["name"] == "exec"
-    match = payload["input"].to_s.match(/tools\.exec_command\((\{.*?\})\)/m)
-    return nil unless match
+    payload["input"].to_s.scan(/tools\.exec_command\((\{.*?\})\)/m) do |match|
+      arguments = JSON.parse(match.first) rescue next
+      request = source_read_request_from_arguments(arguments, trusted, historical_root)
+      return request if request
+    end
 
-    return source_read_request_from_arguments(JSON.parse(match[1]), trusted, historical_root)
+    payload["input"].to_s.scan(/tools\.exec_command\(\{(.*?)\}\)/m) do |match|
+      object = match.first
+      command = object.match(/"?cmd"?\s*:\s*("(?:\\.|[^"\\])*")/)
+      workdir = object.match(/"?workdir"?\s*:\s*("(?:\\.|[^"\\])*")/)
+      next unless command && workdir
+
+      arguments = { "cmd" => JSON.parse(command[1]), "workdir" => JSON.parse(workdir[1]) }
+      request = source_read_request_from_arguments(arguments, trusted, historical_root)
+      return request if request
+    end
   end
   nil
 rescue JSON::ParserError
@@ -237,6 +286,8 @@ def snapshot_content(output, request)
     JSON.parse(content)
   end
   return nil if request[:kind] == :sed && request[:max_lines] && content.lines.count >= request[:max_lines]
+  return nil if request[:output_lines] && content.lines.count != request[:output_lines]
+  return nil if request[:sha256] && Digest::SHA256.hexdigest(content) != request[:sha256]
 
   content
 rescue JSON::ParserError
@@ -313,7 +364,7 @@ def collect_records(options)
     File.foreach(session_file).with_index(1) do |line, line_number|
       scanned_lines += 1
       next if line[0, 14] == '{"timestamp":"' && line[14, 24] >= options.cutoff
-      next unless line.include?(BEGIN_PATCH) || TRUSTED_SOURCE_READ_PATTERN.match?(line)
+      next unless line.include?(BEGIN_PATCH) || trusted_source_read_pattern.match?(line)
 
       event = JSON.parse(line)
       payload = event["payload"] || {}
@@ -323,6 +374,9 @@ def collect_records(options)
       if (request = source_read_request(payload, options.historical_root))
         call_id = payload["call_id"]
         next unless call_id
+        next if excluded_path?(request[:path], options.include_generated)
+        next if request[:expected_source_log] && File.basename(session_file) != request[:expected_source_log]
+        next if request[:expected_source_line] && line_number != request[:expected_source_line]
         request.merge!(source_file: session_file, source_line: line_number, timestamp: event["timestamp"])
         existing = read_requests[call_id]
         read_requests[call_id] = request if existing.nil? || [request[:timestamp], request[:source_file], request[:source_line]] < [existing[:timestamp], existing[:source_file], existing[:source_line]]
