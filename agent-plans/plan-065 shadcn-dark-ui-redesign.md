@@ -66,6 +66,7 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-14 23:51 - Added the 109-entry provenance index and validated a complete 106-path, 740 KB source-only recovery tree with direct call/source-line/output-hash checks and no replay conflict.
 - [x] 2026-07-14 23:51 - Audited the recovered tree for timestamp and import/workspace coherence; retained it as evidence only because final backend/native and frontend boot closures are still incomplete.
 - [x] 2026-07-15 00:08 - Added path-scoped, output-success-gated recovery plus seven hash-verified complete-read seeds for the missing final workspace closure; verified failed historical plan patches are excluded.
+- [x] 2026-07-15 00:08 - Restored historic `plan-061` at its original path and retained success-gated pre-deletion copies of plans 065/066 under `agent-plans/recovered/`; no historic project `.agent-plans/` entries exist in canonical logs.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
 # Unfinished Work
