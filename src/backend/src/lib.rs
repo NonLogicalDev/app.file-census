@@ -1,0 +1,9 @@
+pub mod app;
+pub mod db;
+pub mod duplicate_cache;
+pub mod events;
+pub mod media;
+pub mod paths;
+pub mod scanner;
+pub mod search;
+pub mod web;

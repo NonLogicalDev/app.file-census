@@ -54,6 +54,8 @@ The original visual reference image and prototype commit are missing. Build real
 - Seven complete, hash-verified source seeds now cover the missing React app entry, final backend `db`/`scanner`/`web`, native manifest/config, and `ui/index.html`. Multi-range reads are accepted only when their exact one-line overlaps, total bytes, line count, and SHA-256 all validate.
 - The recovery tool now supports safe `--path` scopes so obsolete root/POC history cannot block final architecture paths. It never writes the active checkout.
 - Historical project plans use `agent-plans/`; no project `.agent-plans/` entries were found in the canonical source logs. `plan-061` and `plan-066` have direct successful baselines; `plan-065` has a successful Add baseline but needs success-gated replay for its later state.
+- The empty checkout now contains the recovered final-architecture source baseline: Rust workspace/backend/native shell, React UI, component preview entry, and direct closure modules. Static relative-import and Rust module-declaration checks pass without installing/building dependencies.
+- Exact replay still stops at historical formatting/state transitions in `scanner.rs`, `ui/src/App.jsx`, and `cli.rs`. Their promoted versions are the latest verified snapshot or exact pre-conflict prefix, never fuzzy merges. Native bundle PNG/ICNS icons remain unrecovered.
 
 # Work Log
 
@@ -67,11 +69,14 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-14 23:51 - Audited the recovered tree for timestamp and import/workspace coherence; retained it as evidence only because final backend/native and frontend boot closures are still incomplete.
 - [x] 2026-07-15 00:08 - Added path-scoped, output-success-gated recovery plus seven hash-verified complete-read seeds for the missing final workspace closure; verified failed historical plan patches are excluded.
 - [x] 2026-07-15 00:08 - Restored historic `plan-061` at its original path and retained success-gated pre-deletion copies of plans 065/066 under `agent-plans/recovered/`; no historic project `.agent-plans/` entries exist in canonical logs.
+- [x] 2026-07-15 00:22 - Promoted 118 final-architecture source files into the otherwise empty checkout from verified snapshots, exact direct patch chains, and mapped native move provenance; static React import closure and Rust module declarations pass.
+- [ ] 2026-07-15 00:22 - Resolve the three formatter/state-conflicted path horizons (`App.jsx`, `scanner.rs`, `cli.rs`), native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
 # Unfinished Work
 
 - [ ] Recover the deleted visual reference/prototype evidence from the user.
-- [ ] Use the verified snapshot index and complete-read seeds to recover the final workspace backbone and frontend boot closure with strict later-patch replay before copying any recovered source into the checkout.
+- [ ] Use the verified snapshot index and complete-read seeds to finish strict later-patch recovery for the promoted final workspace backbone and frontend boot closure; do not fuzzy-merge conflicted histories.
+- [ ] Finish the post-promotion recovery closure: resolve exact conflicted path horizons, missing native bundle assets, and source/runtime mismatches before implementing new behavior.
 - [ ] Recover all success-gated `agent-plans/` entries that have direct Add/snapshot baselines; retain unresolved plan files as evidence rather than fabricating them.
 - [ ] Complete every implementation and verification step above.

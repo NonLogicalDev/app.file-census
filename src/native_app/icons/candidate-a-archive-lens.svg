@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="file-census archive lens app icon concept">
+  <defs>
+    <linearGradient id="bg-a" x1="160" y1="80" x2="864" y2="944" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f7fbf7"/>
+      <stop offset="0.45" stop-color="#d8eee3"/>
+      <stop offset="1" stop-color="#4a9e83"/>
+    </linearGradient>
+    <linearGradient id="drawer-a" x1="250" y1="222" x2="774" y2="746" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dce7e1"/>
+    </linearGradient>
+    <filter id="shadow-a" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="32" stdDeviation="34" flood-color="#0c362b" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="214" fill="url(#bg-a)"/>
+  <path d="M194 208c76-80 211-114 324-83 148 40 280 158 325 304 41 134-2 284-103 365-105 85-272 91-403 24-128-66-223-198-235-338-9-103 24-201 92-272Z" fill="#ffffff" opacity="0.22"/>
+  <g filter="url(#shadow-a)">
+    <rect x="236" y="252" width="484" height="420" rx="58" fill="url(#drawer-a)"/>
+    <rect x="282" y="319" width="392" height="78" rx="28" fill="#0f6f5b" opacity="0.16"/>
+    <rect x="282" y="453" width="392" height="78" rx="28" fill="#0f6f5b" opacity="0.13"/>
+    <rect x="282" y="587" width="304" height="58" rx="24" fill="#0f6f5b" opacity="0.12"/>
+    <rect x="373" y="341" width="210" height="22" rx="11" fill="#116c59"/>
+    <rect x="373" y="475" width="210" height="22" rx="11" fill="#116c59" opacity="0.78"/>
+  </g>
+  <circle cx="679" cy="657" r="142" fill="#17312c" opacity="0.14"/>
+  <circle cx="656" cy="631" r="118" fill="none" stroke="#0b5f51" stroke-width="56"/>
+  <path d="m735 718 92 92" fill="none" stroke="#0b5f51" stroke-width="64" stroke-linecap="round"/>
+  <path d="m594 628 42 43 90-104" fill="none" stroke="#ffffff" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
