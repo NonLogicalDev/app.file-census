@@ -4,7 +4,7 @@ queue:
   subject: file-census production rebuild and acceptance
   coordinator: root
   created_at: 2026-07-15T05:45:00Z
-  updated_at: 2026-07-15T08:41:00Z
+  updated_at: 2026-07-15T08:45:00Z
 tasks:
   - id: rebuild-requirements-ledger
     work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
@@ -51,6 +51,18 @@ tasks:
       - source: /Applications/file-census.app/Contents/Resources/icon.icns
       - sha256: 32d3f29f5a3e39595149ff50172db18a53e866ab8d6a83be480be4e5514fdd6e
       - config: src/native_app/tauri.conf.json
+
+  - id: reproducible-build-inputs
+    work: Establish approved, canonical Nix/npm/Cargo inputs and bounded artifact paths before the first end-to-end build proof.
+    status: open
+    prerequisites:
+      - structured-source-recovery
+      - native-bundle-icon-assets
+    priority: 96
+    created_at: 2026-07-15T08:45:00Z
+    outcome: Read-only audit found an empty ui/dist, no UI dependency lock or node_modules, no flake.lock, no ambient Node/Rust toolchain, and an external untracked Cargo.lock. This work needs explicit approval before network or high-disk writes.
+    resources:
+      - user-approval-for-network-and-build-artifacts
 
   - id: backend-domain-foundation
     work: Build the Rust/SQLite domain and JSON-RPC/browser-server foundation for locations, scans, files, scan visibility, and live progress.
@@ -120,6 +132,7 @@ tasks:
       - scan-exclude-filter-contract
       - duplicates-tasks-search-options
       - native-bundle-icon-assets
+      - reproducible-build-inputs
     priority: 80
     created_at: 2026-07-15T05:45:00Z
 

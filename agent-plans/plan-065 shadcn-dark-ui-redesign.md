@@ -32,7 +32,7 @@ The original visual reference image and prototype commit are missing. Build real
 1. [x] Recreate requirements, task queue, reference-asset recovery gate, and a clean recovery checkpoint.
 2. [x] Produce a direct-event source-recovery manifest with a fixed pre-deletion cutoff and duplicate-safe ordering.
 3. [x] Extract the latest verified whole-file snapshot per path into a reproducible temporary source tree, without claiming it is a coherent final build.
-4. [ ] Recover the final workspace backbone, frontend boot closure, and historic plan evidence as strict composite temporary trees using verified source snapshots as file-local horizons; promote only validated, coherent source into this checkout.
+4. [x] Recover the final workspace backbone, frontend boot closure, and historic plan evidence as strict composite temporary trees using verified source snapshots as file-local horizons; promote only validated, coherent source into this checkout.
 5. [ ] Build the SQLite domain and JSON-RPC/browser-server foundation for locations, scans, files, and live progress.
 6. [ ] Build the shared dark shell, persisted collapsible sidebar, routing, and main-top-bar Cmd-K.
 7. [ ] Build the scan workspace with directory-only tree/folder navigation, main files/File tree modes, inspector, safe actions, and non-destructive exclusions.
@@ -44,6 +44,9 @@ The original visual reference image and prototype commit are missing. Build real
 1. [x] Add scan-owned pattern persistence, normalization/deduplication, matcher helpers, and explicit physical-versus-visible record types without deleting `files` rows.
 2. [x] Change scan/update ingestion so every discovered row remains indexed while per-scan patterns are copied and applied only at query/action visibility boundaries.
 3. [ ] Apply one shared visibility rule to scan tree/files, search/occurrences/details, duplicates, delete check, thumbnails, reuse, and guarded path actions.
+   1. [ ] Filter per-scan and cross-scan query/aggregate surfaces after raw-row retrieval and before pagination/counts.
+   2. [ ] Add scan-aware guards to open/reveal/folder/delete-path and scan context to details/occurrences.
+   3. [ ] Preserve raw rows/counts and update-scan metadata reuse; do not filter ingestion or raw maintenance paths.
 4. [x] Add identical browser and native RPC handlers for get/set/append plus `scan_excludes_updated`; retain active-scan semantics explicitly rather than silently changing scan contents.
 5. [ ] Keep Exclude in the main workspace action menu, correct destructive modal copy, and prove sidebar/tree navigation remains directory-only.
 6. [ ] Add migration, DB, scanner, CLI, RPC, and UI regression evidence that patterns persist and rows remain physically indexed.
@@ -64,7 +67,7 @@ The original visual reference image and prototype commit are missing. Build real
 - The recovery tool now supports safe `--path` scopes so obsolete root/POC history cannot block final architecture paths. It never writes the active checkout.
 - Historical project plans use `agent-plans/`; no project `.agent-plans/` entries were found in the canonical source logs. `plan-061` and `plan-066` have direct successful baselines; `plan-065` has a successful Add baseline but needs success-gated replay for its later state.
 - The empty checkout now contains the recovered final-architecture source baseline: Rust workspace/backend/native shell, React UI, component preview entry, and direct closure modules. Static relative-import and Rust module-declaration checks pass without installing/building dependencies.
-- Exact replay still stops at historical formatting/state transitions in `scanner.rs`, `ui/src/App.jsx`, and `cli.rs`. Their promoted versions are the latest verified snapshot or exact pre-conflict prefix, never fuzzy merges. Native bundle PNG/ICNS icons remain unrecovered.
+- Exact replay still stops at historical formatting/state transitions in `scanner.rs`, `ui/src/App.jsx`, and `cli.rs`. Their promoted versions are the latest verified snapshot or exact pre-conflict prefix, never fuzzy merges. The native PNG/ICNS icon slots are now recovered from the installed File Census bundle rather than inferred from historical source.
 - A source-horizon recovery of `ui/src/style.css` reached a clean latest direct event on 2026-07-12 (`call_TXYQr7ri2wPK6Ttq04uMA7mx`), replayed three success-gated later changes without conflict, and exactly restored the compact neutral-dark global tokens. Its promoted SHA-256 is `306a72f5f6a78b52741d72ffc2e7c7229cbc90fc925e33dc49ce19d7c23d8800`.
 - The React source graph is closed (46 reachable local files, no missing relative imports), but it cannot be run or built in this environment yet: Node/npm, `ui/node_modules`, lockfiles, Tailwind/PostCSS configuration, and `ui/dist` are absent. The Vite configuration also has no backend proxy, so a standalone Vite page would not prove real behavior.
 - Backend compilation is intentionally blocked until a UI build exists because `src/backend/src/web.rs` embeds `../../ui/dist`; native/Tauri is independently blocked by that missing artifact. The recovered SVG icon candidates must not be silently substituted for bundle assets.
@@ -79,6 +82,8 @@ The original visual reference image and prototype commit are missing. Build real
 - The exact helper fragment compiles gitignore-style patterns rooted at `/` and prunes matched directories. Its adjacent historical persistence code deletes matching indexed file rows, which conflicts with the explicit product invariant that excludes are non-destructive per-scan filters for every operation. Rebuild the matcher, persistence, and query predicates intentionally; do not transplant that cleanup behavior.
 - The user authorized reuse of the installed `/Applications/file-census.app` bundle icon. Its `icon.icns` was copied byte-for-byte into `src/native_app/icons/icon.icns`; macOS `iconutil` produced the four configured PNG sizes (32, 128, 256 @2x, and 512 px). The ICNS SHA-256 is `32d3f29f5a3e39595149ff50172db18a53e866ab8d6a83be480be4e5514fdd6e`; this resolves the macOS native icon-input blocker without modifying the installed app.
 - The first rebuilt exclusion foundation is intentionally partial: schema/API/matcher, non-pruning scanner ingestion, matching browser/native RPC methods, events, and truthful modal text are present. No shared visibility predicate has yet been wired into scan tree/files, search, details, duplicates, delete checks, thumbnails, reuse, or guarded path actions; these surfaces must not be claimed compliant before that work and regression proof.
+- The visibility/action audit establishes the implementation boundary: fetch raw candidates, compile one matcher per involved scan, filter before pagination/counts/grouping, retain raw maintenance/reuse paths, and require `scan_id` for scan-relative open/reveal/folder/details/occurrences operations. `dupes.list` must honor its already-sent `scan_ids` scope. Legacy HTTP and CLI direct-DB paths need the same visible-row methods.
+- The end-to-end build audit found an empty ignored `ui/dist`, no `ui/node_modules` or frontend lockfile, no host Node/Cargo/Rustfmt, no `flake.lock`, and an untracked externally created `Cargo.lock`. The installed icon assets are valid, but build input restoration requires an explicit, disk-aware approval because Nix/npm/Cargo/Tauri can download and write substantial caches/artifacts.
 
 # Work Log
 
@@ -103,18 +108,18 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-15 01:27 - Extracted the exact matcher contract and rejected the historical destructive cleanup semantics; retained the user-required non-destructive per-scan filter model.
 - [x] 2026-07-15 01:38 - Recovered the configured macOS native icon assets from the installed File Census bundle, byte-verified the ICNS copy, and validated all configured PNG dimensions.
 - [x] 2026-07-15 01:41 - Integrated and statically audited the partial non-destructive exclusion foundation: scan-owned persistence/matcher, physical-row scanner ingestion, dual transport RPC/event handlers, and truthful modal copy. The audit explicitly retained visibility/action filtering and regression coverage as unfinished.
-- [ ] 2026-07-15 00:22 - Resolve the remaining `cli.rs` source horizon, compatible database exclusion helpers, native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
-- [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
+- [x] 2026-07-15 01:45 - Mapped every currently known exclusion query/action surface and the reproducible build inputs; narrowed the next implementation wave to a shared scan-visibility predicate plus scan-aware action contracts.
+- [ ] 2026-07-15 01:45 - Finish the shared visibility/action implementation and regression coverage before marking excludes compliant.
+- [ ] 2026-07-15 01:45 - Resolve the remaining `cli.rs` recovery/compatibility gap and restore approved reproducible build inputs before treating the checkout as runnable.
 
 # Unfinished Work
 
 - [ ] Recover the deleted visual reference/prototype evidence from the user.
 - [ ] Use the verified snapshot index and complete-read seeds to finish strict later-patch recovery for the promoted backend/native closure; do not fuzzy-merge conflicted histories.
-- [ ] Finish the post-promotion recovery closure: resolve exact conflicted path horizons, missing native bundle assets, and source/runtime mismatches before implementing new behavior.
-- [ ] Rebuild the scanner/database exclusion boundary coherently from the verified domain contract if no later complete `db.rs` source horizon appears; preserve the non-destructive per-scan semantics.
+- [ ] Finish the post-promotion recovery closure: resolve exact conflicted path horizons and source/runtime mismatches before claiming end-to-end behavior.
 - [ ] Wire one scan-scoped visibility/action predicate through every listed result, aggregate, and path-action boundary before treating the rebuilt exclusion foundation as complete.
 - [ ] Keep the 25 unrecoverable historical plan paths absent rather than fabricating them; use the archival manifest as provenance if a later recovery source appears.
 - [ ] Recover or deliberately re-establish reproducible Node/Rust dependency inputs before the first bounded UI/backend build; keep `ui/dist`, build caches, and generated assets out of source recovery evidence.
 - [ ] Run the first native bundle validation using the recovered, installed-app-derived PNG/ICNS assets after reproducible toolchain/UI-dist inputs are restored.
-- [ ] Keep `flake.lock`, alternate Nix shell files, and nested `.gitignore` paths absent until direct historical evidence proves their full content; keep externally created package-manager artifacts unmodified until provenance is known.
+- [ ] Keep external package-manager artifacts unmodified until provenance is known; obtain explicit approval before creating canonical lockfiles or downloading toolchains/dependencies.
 - [ ] Complete every implementation and verification step above.
