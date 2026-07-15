@@ -115,16 +115,9 @@ pub fn build_thumbnails(
     prefix: &str,
     recursive: bool,
 ) -> Result<BuildThumbnailsResult> {
-    let scan_root = scan_root_path(db, scan_id)?;
+    scan_root_path(db, scan_id)?;
     let candidates = db.thumbnail_candidates(scan_id, prefix, recursive)?;
-    build_thumbnails_for_candidates(
-        db,
-        scan_id,
-        &scan_root,
-        prefix,
-        recursive,
-        candidates,
-    )
+    build_thumbnails_for_candidates(db, scan_id, prefix, recursive, candidates)
 }
 
 pub fn build_thumbnails_for_paths(
@@ -134,22 +127,14 @@ pub fn build_thumbnails_for_paths(
     path: &str,
     recursive: bool,
 ) -> Result<BuildThumbnailsResult> {
-    let scan_root = scan_root_path(db, scan_id)?;
+    scan_root_path(db, scan_id)?;
     let candidates = db.thumbnail_candidates_paths(scan_id, paths, recursive)?;
-    build_thumbnails_for_candidates(
-        db,
-        scan_id,
-        &scan_root,
-        path,
-        recursive,
-        candidates,
-    )
+    build_thumbnails_for_candidates(db, scan_id, path, recursive, candidates)
 }
 
 fn build_thumbnails_for_candidates(
     db: &Database,
     scan_id: &str,
-    scan_root: &Path,
     path: &str,
     recursive: bool,
     candidates: Vec<ThumbnailCandidate>,
@@ -165,8 +150,25 @@ fn build_thumbnails_for_candidates(
     };
 
     for candidate in candidates {
-        let candidate_path = indexed_entry_path(scan_root, &candidate.path)?;
-        match build_thumbnail_for_candidate(db, &candidate, &candidate_path) {
+        let target =
+            match db.resolve_visible_scan_action_target_if_visible(scan_id, &candidate.path) {
+            Ok(Some(target)) if target.kind == "file" => target,
+            Ok(_) => {
+                // Candidates are selected from a prior visibility snapshot. A
+                // concurrent exclude update must turn the stale candidate into
+                // a normal skip rather than reading its source file.
+                result.skipped += 1;
+                continue;
+            }
+            Err(error) => {
+                result.skipped += 1;
+                if result.errors.len() < 20 {
+                    result.errors.push(format!("{}: {error}", candidate.path));
+                }
+                continue;
+            }
+        };
+        match build_thumbnail_for_candidate(db, &candidate, &target.filesystem_path) {
             Ok(Some(_)) => result.built += 1,
             Ok(None) => result.skipped += 1,
             Err(error) => {
@@ -440,7 +442,7 @@ fn is_probably_image(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{LocationInput, LocationType};
+    use crate::db::{LocationInput, LocationType, NewFile};
 
     #[test]
     fn media_paths_stay_under_a_nested_scan_offset() {
@@ -489,6 +491,57 @@ mod tests {
             normalized_stored_relative_path(r"nested\album", "stored path").unwrap(),
             "nested/album"
         );
+    }
+
+    #[test]
+    fn thumbnail_build_reauthorizes_candidates_after_an_exclude_update() {
+        let root = test_root("thumbnail-reauthorization");
+        let location_root = root.join("location");
+        let image_path = location_root.join("later.png");
+        std::fs::create_dir_all(&location_root).unwrap();
+        image::RgbImage::from_pixel(1, 1, image::Rgb([12, 34, 56]))
+            .save(&image_path)
+            .unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "source".to_string(),
+                root_path: location_root,
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+        db.insert_file_batch(&[NewFile {
+            scan_id: scan_id.clone(),
+            kind: "file".to_string(),
+            path: "later.png".to_string(),
+            name: "later.png".to_string(),
+            size: 3,
+            blake3: "later-hash".to_string(),
+            sha256: "later-hash".to_string(),
+            ctime: None,
+            mtime: None,
+            mode: None,
+            error: None,
+        }])
+        .unwrap();
+
+        let candidates = db.thumbnail_candidates(&scan_id, "", true).unwrap();
+        assert_eq!(candidates.len(), 1);
+        db.set_scan_excludes(&scan_id, vec!["/later.png".to_string()])
+            .unwrap();
+
+        let result = build_thumbnails_for_candidates(&db, &scan_id, "", true, candidates)
+            .unwrap();
+
+        assert_eq!(result.considered, 1);
+        assert_eq!(result.built, 0);
+        assert_eq!(result.skipped, 1);
+        assert!(result.errors.is_empty());
+        assert!(db.thumbnail("later-hash", 3).unwrap().is_none());
     }
 
     #[test]

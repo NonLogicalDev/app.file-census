@@ -4,7 +4,7 @@ queue:
   subject: file-census production rebuild and acceptance
   coordinator: root
   created_at: 2026-07-15T05:45:00Z
-  updated_at: 2026-07-15T12:18:00Z
+  updated_at: 2026-07-15T12:30:00Z
 tasks:
   - id: rebuild-requirements-ledger
     work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
@@ -75,7 +75,7 @@ tasks:
     claim:
       owner: root
       started_at: 2026-07-15T08:41:00Z
-    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, a legacy-safe Unknown location-kind migration, scan-aware folder authorization, and one DB-level visible action resolver for open/reveal. Browser/native details use visible media sources and WebSocket lag is recoverable. Remaining work is Rust compile proof, thumbnail revalidation/parity P2s, plus real scanner controls/dashboard/shell contracts; none imply runtime success.
+    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, a legacy-safe Unknown location-kind migration, scan-aware folder authorization, and one DB-level visible action resolver for open/reveal. Thumbnail batches reauthorize each candidate and browser/native source tests now assert equivalent visible-offset and excluded-path behavior. Browser/native details use visible media sources and WebSocket lag is recoverable. Remaining work is Rust compile proof plus real scanner controls/dashboard/shell contracts; none imply runtime success.
 
   - id: production-shell-and-routing
     work: Build the real dark application shell, routing, persisted collapsible sidebar, and main-top-bar Cmd-K foundation.

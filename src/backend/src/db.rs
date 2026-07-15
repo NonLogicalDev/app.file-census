@@ -1164,6 +1164,29 @@ impl Database {
         path: &str,
     ) -> Result<VisibleScanActionTarget> {
         let path = normalize_scan_action_path(path)?;
+        self.resolve_visible_scan_action_target_normalized(scan_id, &path)?
+            .with_context(|| format!("path not found or excluded from scan: {path}"))
+    }
+
+    /// Resolves an OS action target if the indexed path is still visible.
+    ///
+    /// This keeps a stale work item distinct from a failed authorization: a
+    /// missing, excluded, or errored entry returns `None`, while malformed
+    /// paths and database/transaction failures remain errors.
+    pub fn resolve_visible_scan_action_target_if_visible(
+        &self,
+        scan_id: &str,
+        path: &str,
+    ) -> Result<Option<VisibleScanActionTarget>> {
+        let path = normalize_scan_action_path(path)?;
+        self.resolve_visible_scan_action_target_normalized(scan_id, &path)
+    }
+
+    fn resolve_visible_scan_action_target_normalized(
+        &self,
+        scan_id: &str,
+        path: &str,
+    ) -> Result<Option<VisibleScanActionTarget>> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (root_path, offset_path): (String, String) = tx
@@ -1217,7 +1240,8 @@ impl Database {
                     |row| row.get(0),
                 )?;
                 if !has_visible_descendants {
-                    anyhow::bail!("path not found or excluded from scan: {path}");
+                    tx.commit()?;
+                    return Ok(None);
                 }
                 "dir".to_string()
             }
@@ -1228,7 +1252,7 @@ impl Database {
             kind,
         };
         tx.commit()?;
-        Ok(target)
+        Ok(Some(target))
     }
 
     pub fn scan_excludes(&self, scan_id: &str) -> Result<Vec<ScanExclude>> {
@@ -4785,6 +4809,13 @@ mod tests {
             file.filesystem_path,
             location_root.join("scan-subdirectory").join("visible.txt")
         );
+        assert_eq!(
+            db.resolve_visible_scan_action_target_if_visible(&scan_id, "visible.txt")
+                .unwrap()
+                .unwrap()
+                .kind,
+            "file"
+        );
 
         let direct_dir = db
             .resolve_visible_scan_action_target(&scan_id, "empty-dir")
@@ -4859,6 +4890,12 @@ mod tests {
                     .is_err(),
                 "{path} must not resolve to an action target"
             );
+            assert!(
+                db.resolve_visible_scan_action_target_if_visible(&scan_id, path)
+                    .unwrap()
+                    .is_none(),
+                "{path} must be a normal stale/hidden result"
+            );
         }
         for path in [
             "",
@@ -4878,7 +4915,17 @@ mod tests {
                     .is_err(),
                 "unsafe path {path:?} must not resolve"
             );
+            assert!(
+                db.resolve_visible_scan_action_target_if_visible(&scan_id, path)
+                    .is_err(),
+                "unsafe path {path:?} must remain an error"
+            );
         }
+        assert!(
+            db.resolve_visible_scan_action_target_if_visible("missing-scan", "visible.txt")
+                .is_err(),
+            "missing scan must remain an error"
+        );
 
         assert_eq!(db.scan_exclude_patterns(&scan_id).unwrap(), excludes_before);
         let raw_file_count: u64 = db
@@ -4919,6 +4966,9 @@ mod tests {
 
         assert!(db
             .resolve_visible_scan_action_target(&scan_id, "visible.txt")
+            .is_err());
+        assert!(db
+            .resolve_visible_scan_action_target_if_visible(&scan_id, "visible.txt")
             .is_err());
     }
 

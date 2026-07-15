@@ -529,10 +529,44 @@ fn normalized_scan_offset_path(offset_path: &str) -> Result<PathBuf> {
     )?))
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SYSTEM_ACTIONS: std::cell::RefCell<Vec<(String, PathBuf)>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+#[cfg(test)]
+fn record_test_system_action(kind: &str, path: &FsPath) {
+    TEST_SYSTEM_ACTIONS.with(|actions| {
+        actions
+            .borrow_mut()
+            .push((kind.to_string(), path.to_path_buf()));
+    });
+}
+
+#[cfg(test)]
+fn take_test_system_actions() -> Vec<(String, PathBuf)> {
+    TEST_SYSTEM_ACTIONS.with(|actions| std::mem::take(&mut *actions.borrow_mut()))
+}
+
+#[cfg(test)]
+fn open_in_system(path: &FsPath) -> Result<()> {
+    record_test_system_action("open", path);
+    Ok(())
+}
+
+#[cfg(not(test))]
 fn open_in_system(path: &FsPath) -> Result<()> {
     open::that(path).with_context(|| format!("opening {}", path.display()))
 }
 
+#[cfg(test)]
+fn reveal_in_system(path: &FsPath) -> Result<()> {
+    record_test_system_action("reveal", path);
+    Ok(())
+}
+
+#[cfg(not(test))]
 fn reveal_in_system(path: &FsPath) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -761,6 +795,137 @@ mod tests {
         assert!(scan_folder_path(&db, &scan_id, Some("hidden-dir")).is_err());
         assert!(scan_child_path(&db, &scan_id, "hidden-dir").is_err());
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn scan_action_fixture(prefix: &str) -> (PathBuf, PathBuf, String) {
+        let root = std::env::temp_dir().join(format!(
+            "file-census-{prefix}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let location_root = root.join("location-root");
+        let scan_root = location_root.join("nested/album");
+        std::fs::create_dir_all(scan_root.join("visible-dir")).unwrap();
+        std::fs::create_dir_all(scan_root.join("excluded-dir")).unwrap();
+        std::fs::write(scan_root.join("visible-file.txt"), "visible").unwrap();
+        std::fs::write(scan_root.join("excluded-file.txt"), "excluded").unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "source".to_string(),
+                root_path: location_root.clone(),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db
+            .start_scan(&location, std::path::Path::new("/nested/album"))
+            .unwrap();
+        let entry = |kind: &str, path: &str| NewFile {
+            scan_id: scan_id.clone(),
+            kind: kind.to_string(),
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            size: 0,
+            blake3: String::new(),
+            sha256: String::new(),
+            ctime: None,
+            mtime: None,
+            mode: None,
+            error: None,
+        };
+        db.insert_file_batch(&[
+            entry("file", "visible-file.txt"),
+            entry("dir", "visible-dir"),
+            entry("file", "excluded-file.txt"),
+            entry("dir", "excluded-dir"),
+        ])
+        .unwrap();
+        db.set_scan_excludes(
+            &scan_id,
+            vec!["/excluded-file.txt".to_string(), "/excluded-dir/".to_string()],
+        )
+        .unwrap();
+
+        (root, location_root, scan_id)
+    }
+
+    #[tokio::test]
+    async fn native_rpc_scan_actions_enforce_visible_offset_scope() {
+        let (root, location_root, scan_id) = scan_action_fixture("app-action-rpc");
+        let app = AppCore::open(root.join("state.db")).unwrap();
+        let action_root = location_root.join("nested/album");
+
+        assert_eq!(
+            app.handle(
+                "files.open",
+                Some(serde_json::json!({
+                    "scan_id": scan_id.clone(),
+                    "path": "visible-file.txt"
+                })),
+            )
+            .await
+            .unwrap(),
+            serde_json::json!({ "opened": true })
+        );
+        assert_eq!(
+            app.handle(
+                "files.reveal",
+                Some(serde_json::json!({
+                    "scan_id": scan_id.clone(),
+                    "path": "visible-file.txt"
+                })),
+            )
+            .await
+            .unwrap(),
+            serde_json::json!({ "revealed": true })
+        );
+        assert_eq!(
+            app.handle(
+                "scans.open_folder",
+                Some(serde_json::json!({
+                    "scan_id": scan_id.clone(),
+                    "path": "visible-dir"
+                })),
+            )
+            .await
+            .unwrap(),
+            serde_json::json!({ "opened": true })
+        );
+        assert_eq!(
+            take_test_system_actions(),
+            vec![
+                ("open".to_string(), action_root.join("visible-file.txt")),
+                ("reveal".to_string(), action_root.join("visible-file.txt")),
+                ("open".to_string(), action_root.join("visible-dir")),
+            ]
+        );
+
+        for (method, params) in [
+            (
+                "files.open",
+                serde_json::json!({ "scan_id": scan_id.clone(), "path": "excluded-file.txt" }),
+            ),
+            (
+                "files.reveal",
+                serde_json::json!({ "scan_id": scan_id.clone(), "path": "excluded-file.txt" }),
+            ),
+            (
+                "scans.open_folder",
+                serde_json::json!({ "scan_id": scan_id.clone(), "path": "excluded-dir" }),
+            ),
+        ] {
+            let error = app.handle(method, Some(params)).await.unwrap_err();
+            assert!(
+                error.to_string().contains("not found or excluded"),
+                "{method}: {error:#}"
+            );
+        }
+        assert!(take_test_system_actions().is_empty());
+
+        drop(app);
         let _ = std::fs::remove_dir_all(root);
     }
 
