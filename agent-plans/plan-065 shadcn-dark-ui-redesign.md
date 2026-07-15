@@ -63,6 +63,7 @@ The original visual reference image and prototype commit are missing. Build real
 - The latest known source for `cli.rs` had 1,812 lines, while the recovered 1,778-line file is a mismatching pre-conflict forensic prefix. Direct tail reads cannot be safely appended. The simplified CLI scan shape and Ratatui progress interface were only a source-contract request before deletion, not recovered implementation evidence.
 - The complete-read recovery tool now accepts only declared `sed` ranges with exact multi-line overlap and validates range coverage; optional per-segment source logs retain backwards compatibility with existing root-level seed logs. Its full-seed validation passed after adding the June 14 `App.jsx` seed.
 - `ui/src/App.jsx` is now promoted from that June 14 complete-read seed (1,737 lines, 69,800 bytes, SHA-256 `2b15df6cfc1d9c16df27e375450293e20b5eed4ba09dc7a3c94131f8bd0395db`). Its 47-file/113-edge reachable relative-import closure has no unresolved edge. It supersedes the earlier June 13 App snapshot without relying on the historic patch conflict.
+- `src/backend/src/scanner.rs` is now promoted from a later June 13 complete-read seed (1,385 lines, 44,905 bytes, SHA-256 `c4f329308c5cf95cbfef88c335289cc1cc6d313842a1de48af793ea0dd674579`). Static module resolution found its new `ignore` dependency declared, but confirmed that `db::build_scan_exclude_matcher` and `db::scan_path_is_excluded` are absent from the currently recovered `db.rs`; recover a compatible later database horizon before any compile claim.
 
 # Work Log
 
@@ -81,7 +82,8 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-15 00:35 - Completed a read-only runtime-closure audit: static React imports close, while missing pinned toolchains, UI build artifact, lockfiles/config, and native bundle assets block every build/runtime claim; no dependencies were installed.
 - [x] 2026-07-15 00:47 - Promoted 41 exact-replayed historical plan files plus provenance/report into `agent-plans/recovered/historical/`; verified all 41 manifest hashes and recorded the 25 deliberate omissions.
 - [x] 2026-07-15 00:59 - Extended the complete-read verifier with strict declared-range multi-line overlap support, materialized the later June 14 `App.jsx` seed, promoted it byte-for-byte, and rechecked the 47-file React import closure.
-- [ ] 2026-07-15 00:22 - Resolve the remaining formatter/state-conflicted path horizons (`scanner.rs`, `cli.rs`), native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
+- [x] 2026-07-15 01:11 - Materialized and promoted the later exact 1,385-line `scanner.rs` seed, byte-verified it, and identified the two missing exclusion helpers required from a compatible `db.rs` horizon.
+- [ ] 2026-07-15 00:22 - Resolve the remaining `cli.rs` source horizon, compatible database exclusion helpers, native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
 # Unfinished Work

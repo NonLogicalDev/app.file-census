@@ -3,16 +3,21 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use ignore::gitignore::Gitignore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::db::{Database, Location, NewFile, ReusableFile};
+use crate::db::{
+    build_scan_exclude_matcher, scan_path_is_excluded, Database, Location, NewFile, ReusableFile,
+};
 use crate::events::EventHub;
 
 #[derive(Clone, Debug)]
@@ -38,9 +43,26 @@ pub struct ScanProgress {
     pub total_bytes: u64,
     pub current_path: Option<String>,
     pub message: Option<String>,
+    pub pools: ScanPools,
     pub log: Vec<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ScanPools {
+    pub discovery: ScanPoolProgress,
+    pub metadata: ScanPoolProgress,
+    pub hashing: ScanPoolProgress,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ScanPoolProgress {
+    pub queued: u64,
+    pub active: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub current_path: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -76,6 +98,7 @@ impl ScanProgressStore {
             total_bytes: 0,
             current_path: None,
             message: None,
+            pools: ScanPools::default(),
             log: vec![match &scan.reuse_from_scan_id {
                 Some(source_scan_id) => format!(
                     "Started update scan of {} ({}) from {} at {}",
@@ -287,6 +310,52 @@ pub struct PreparedScan {
     reusable_files: HashMap<String, ReusableFile>,
 }
 
+#[derive(Clone, Copy)]
+enum PoolKind {
+    Discovery,
+    Metadata,
+    Hashing,
+}
+
+#[derive(Clone, Copy)]
+enum WorkKind {
+    File,
+    Dir,
+}
+
+struct WorkItem {
+    absolute_path: PathBuf,
+    relative_path: String,
+    stored_path: String,
+    name: String,
+    kind: WorkKind,
+}
+
+struct HashJob {
+    absolute_path: PathBuf,
+    relative_path: String,
+    stored_path: String,
+    name: String,
+    metadata: HashedFileMetadata,
+}
+
+enum PipelineResult {
+    Directory {
+        row: Option<NewFile>,
+    },
+    File {
+        row: NewFile,
+        reused: bool,
+        relative_path: String,
+    },
+    Error {
+        row: NewFile,
+        message: String,
+        relative_path: String,
+    },
+    WalkError(String),
+}
+
 pub fn scan_location(db: &Database, slug: &str, offset_path: &Path) -> Result<ScanSummary> {
     let prepared = prepare_scan(db, slug, offset_path)?;
     run_prepared_scan(db, prepared, None)
@@ -318,6 +387,7 @@ pub fn prepare_update_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
     let offset_path = PathBuf::from(&source_scan.offset_path);
     let scan_root = normalize_scan_root(&location.root_path, &offset_path);
     let scan_id = db.start_scan(&location, &offset_path)?;
+    db.copy_scan_excludes(source_scan_id, &scan_id)?;
     Ok(PreparedScan {
         scan_id,
         location,
@@ -341,172 +411,147 @@ pub fn run_prepared_scan(
     let mut dir_count = 0;
     let mut error_count = 0;
     let mut total_bytes = 0;
-    let mut stopped = false;
+    let exclude_patterns = db.scan_exclude_patterns(&prepared.scan_id)?;
+    let exclude_matcher = build_scan_exclude_matcher(&exclude_patterns)?;
+    let metadata_workers = 2;
+    let hash_workers = hash_worker_count();
+    let (work_tx, work_rx) = sync_channel::<WorkItem>(512);
+    let (hash_tx, hash_rx) = sync_channel::<HashJob>(128);
+    let (result_tx, result_rx) = sync_channel::<PipelineResult>(256);
+    let work_rx = Arc::new(Mutex::new(work_rx));
+    let hash_rx = Arc::new(Mutex::new(hash_rx));
 
-    for entry in WalkDir::new(&prepared.scan_root).follow_links(false) {
-        if progress
-            .as_ref()
-            .is_some_and(|progress| progress.is_stop_requested(&prepared.scan_id))
-        {
-            stopped = true;
-            break;
-        }
-
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(err) => {
-                error_count += 1;
-                if let Some(progress) = &progress {
-                    progress.update(&prepared.scan_id, |state| {
-                        state.error_count = error_count;
-                        state.message = Some(err.to_string());
-                        push_log(state, format!("Walk error: {err}"));
-                    });
-                }
-                eprintln!("walk error: {err}");
-                continue;
-            }
-        };
-
-        if entry.file_type().is_dir() {
-            dir_count += 1;
-            let absolute_path = entry.path();
-            let relative_path = absolute_path
-                .strip_prefix(&prepared.scan_root)
-                .unwrap_or(absolute_path)
-                .to_string_lossy()
-                .to_string();
-            if !relative_path.is_empty() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let metadata = path_metadata(absolute_path).ok();
-                batch.push(NewFile {
-                    scan_id: prepared.scan_id.clone(),
-                    kind: "dir".to_string(),
-                    path: relative_path,
-                    name,
-                    size: 0,
-                    blake3: String::new(),
-                    sha256: String::new(),
-                    ctime: metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.ctime.clone()),
-                    mtime: metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.mtime.clone()),
-                    mode: metadata.as_ref().and_then(|metadata| metadata.mode),
-                    error: None,
-                });
-            }
-            if dir_count % 100 == 0 {
-                if let Some(progress) = &progress {
-                    progress.update(&prepared.scan_id, |state| {
-                        state.dir_count = dir_count;
-                    });
-                }
-            }
-            continue;
-        }
-
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
-        let absolute_path = entry.path();
-        let canonical_path = absolute_path.canonicalize().ok();
-        if canonical_path == db_path
-            || canonical_path == db_wal_path
-            || canonical_path == db_shm_path
-        {
-            continue;
-        }
-
-        let relative_path = absolute_path
-            .strip_prefix(&prepared.scan_root)
-            .unwrap_or(absolute_path)
-            .to_string_lossy()
-            .to_string();
-        let name = entry.file_name().to_string_lossy().to_string();
-        let stored_path = if relative_path.is_empty() {
-            name.clone()
-        } else {
-            relative_path.clone()
-        };
-        if let Some(progress) = &progress {
-            progress.update(&prepared.scan_id, |state| {
-                state.current_path = Some(relative_path.clone());
-                push_log(state, format!("processed {relative_path}"));
+    thread::scope(|scope| {
+        for _ in 0..hash_workers {
+            let hash_rx = Arc::clone(&hash_rx);
+            let result_tx = result_tx.clone();
+            let progress = progress.clone();
+            let scan_id = prepared.scan_id.clone();
+            scope.spawn(move || {
+                hash_worker(hash_rx, result_tx, progress, scan_id);
             });
         }
 
-        match reusable_or_hash_file(absolute_path, prepared.reusable_files.get(&stored_path)) {
-            Ok(hashed) => {
-                file_count += 1;
-                total_bytes += hashed.size;
-                batch.push(NewFile {
-                    scan_id: prepared.scan_id.clone(),
-                    kind: "file".to_string(),
-                    path: stored_path.clone(),
-                    name,
-                    size: hashed.size,
-                    blake3: hashed.blake3,
-                    sha256: hashed.sha256,
-                    ctime: hashed.ctime,
-                    mtime: hashed.mtime,
-                    mode: hashed.mode,
-                    error: None,
-                });
-                if hashed.reused {
+        for _ in 0..metadata_workers {
+            let work_rx = Arc::clone(&work_rx);
+            let hash_tx = hash_tx.clone();
+            let result_tx = result_tx.clone();
+            let progress = progress.clone();
+            let scan_id = prepared.scan_id.clone();
+            let reusable_files = &prepared.reusable_files;
+            let db_path = db_path.as_ref();
+            let db_wal_path = db_wal_path.as_ref();
+            let db_shm_path = db_shm_path.as_ref();
+            scope.spawn(move || {
+                metadata_worker(
+                    work_rx,
+                    hash_tx,
+                    result_tx,
+                    progress,
+                    scan_id,
+                    reusable_files,
+                    db_path,
+                    db_wal_path,
+                    db_shm_path,
+                );
+            });
+        }
+        drop(hash_tx);
+
+        let discovery_progress = progress.clone();
+        let discovery_scan_id = prepared.scan_id.clone();
+        let scan_root = &prepared.scan_root;
+        let discovery_result_tx = result_tx.clone();
+        scope.spawn(move || {
+            discovery_worker(
+                scan_root,
+                &exclude_matcher,
+                work_tx,
+                discovery_result_tx,
+                discovery_progress,
+                discovery_scan_id,
+            );
+        });
+        drop(result_tx);
+
+        for result in result_rx {
+            match result {
+                PipelineResult::Directory { row } => {
+                    dir_count += 1;
+                    if let Some(row) = row {
+                        batch.push(row);
+                    }
+                }
+                PipelineResult::File {
+                    row,
+                    reused,
+                    relative_path,
+                } => {
+                    file_count += 1;
+                    total_bytes += row.size;
+                    batch.push(row);
                     if let Some(progress) = &progress {
                         progress.update(&prepared.scan_id, |state| {
-                            push_log(state, format!("reused metadata for {relative_path}"));
+                            state.current_path = Some(relative_path.clone());
+                            push_log(state, format!("processed {relative_path}"));
+                            if reused {
+                                push_log(state, format!("reused metadata for {relative_path}"));
+                            }
                         });
                     }
                 }
+                PipelineResult::Error {
+                    row,
+                    message,
+                    relative_path,
+                } => {
+                    error_count += 1;
+                    batch.push(row);
+                    if let Some(progress) = &progress {
+                        progress.update(&prepared.scan_id, |state| {
+                            state.message = Some(message.clone());
+                            push_log(
+                                state,
+                                format!("Error processing {relative_path}: {message}"),
+                            );
+                        });
+                    }
+                }
+                PipelineResult::WalkError(message) => {
+                    error_count += 1;
+                    if let Some(progress) = &progress {
+                        progress.update(&prepared.scan_id, |state| {
+                            state.message = Some(message.clone());
+                            push_log(state, format!("Walk error: {message}"));
+                        });
+                    }
+                    eprintln!("walk error: {message}");
+                }
             }
-            Err(err) => {
-                error_count += 1;
-                batch.push(NewFile {
-                    scan_id: prepared.scan_id.clone(),
-                    kind: "file".to_string(),
-                    path: relative_path,
-                    name,
-                    size: 0,
-                    blake3: String::new(),
-                    sha256: String::new(),
-                    ctime: None,
-                    mtime: None,
-                    mode: None,
-                    error: Some(err.to_string()),
-                });
-            }
-        }
 
-        if batch.len() >= flush_size {
-            db.insert_file_batch(&batch)?;
-            batch.clear();
-            db.update_scan_counts(
+            flush_scan_batch(
+                db,
+                &prepared.scan_id,
+                &mut batch,
+                flush_size,
+                file_count,
+                dir_count,
+                error_count,
+                total_bytes,
+                progress.as_ref(),
+            )?;
+            update_progress_counts(
+                progress.as_ref(),
                 &prepared.scan_id,
                 file_count,
                 dir_count,
                 error_count,
                 total_bytes,
-            )?;
-            if let Some(progress) = &progress {
-                progress.update(&prepared.scan_id, |state| {
-                    push_log(state, format!("Flushed {file_count} files to SQLite"));
-                });
-            }
+            );
         }
 
-        if let Some(progress) = &progress {
-            progress.update(&prepared.scan_id, |state| {
-                state.file_count = file_count;
-                state.dir_count = dir_count;
-                state.error_count = error_count;
-                state.total_bytes = total_bytes;
-            });
-        }
-    }
+        Ok::<(), anyhow::Error>(())
+    })?;
 
     if !batch.is_empty() {
         db.insert_file_batch(&batch)?;
@@ -519,6 +564,9 @@ pub fn run_prepared_scan(
         total_bytes,
     )?;
 
+    let stopped = progress
+        .as_ref()
+        .is_some_and(|progress| progress.is_stop_requested(&prepared.scan_id));
     let status = if stopped {
         "stopped"
     } else if file_count == 0 && error_count > 0 {
@@ -545,6 +593,479 @@ pub fn run_prepared_scan(
     })
 }
 
+fn discovery_worker(
+    scan_root: &Path,
+    exclude_matcher: &Option<Gitignore>,
+    work_tx: SyncSender<WorkItem>,
+    result_tx: SyncSender<PipelineResult>,
+    progress: Option<ScanProgressStore>,
+    scan_id: String,
+) {
+    pool_activate(progress.as_ref(), &scan_id, PoolKind::Discovery, ".");
+
+    for entry in WalkDir::new(scan_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            let relative_path = entry
+                .path()
+                .strip_prefix(scan_root)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .to_string();
+            !scan_path_is_excluded(exclude_matcher, &relative_path, entry.file_type().is_dir())
+        })
+    {
+        if progress
+            .as_ref()
+            .is_some_and(|progress| progress.is_stop_requested(&scan_id))
+        {
+            break;
+        }
+
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                pool_fail(progress.as_ref(), &scan_id, PoolKind::Discovery);
+                let _ = result_tx.send(PipelineResult::WalkError(err.to_string()));
+                continue;
+            }
+        };
+
+        let Some(work_item) = work_item_from_entry(scan_root, entry) else {
+            continue;
+        };
+        let path = progress_path(&work_item.relative_path);
+        pool_queue(progress.as_ref(), &scan_id, PoolKind::Metadata, &path);
+        if work_tx.send(work_item).is_err() {
+            break;
+        }
+        pool_complete(progress.as_ref(), &scan_id, PoolKind::Discovery);
+        pool_activate(progress.as_ref(), &scan_id, PoolKind::Discovery, &path);
+    }
+
+    pool_deactivate(progress.as_ref(), &scan_id, PoolKind::Discovery);
+}
+
+fn metadata_worker(
+    work_rx: Arc<Mutex<Receiver<WorkItem>>>,
+    hash_tx: SyncSender<HashJob>,
+    result_tx: SyncSender<PipelineResult>,
+    progress: Option<ScanProgressStore>,
+    scan_id: String,
+    reusable_files: &HashMap<String, ReusableFile>,
+    db_path: Option<&PathBuf>,
+    db_wal_path: Option<&PathBuf>,
+    db_shm_path: Option<&PathBuf>,
+) {
+    loop {
+        let item = {
+            let work_rx = work_rx.lock().expect("scan work receiver lock poisoned");
+            work_rx.recv()
+        };
+        let item = match item {
+            Ok(item) => item,
+            Err(_) => break,
+        };
+
+        let path = progress_path(&item.relative_path);
+        pool_start(progress.as_ref(), &scan_id, PoolKind::Metadata, &path);
+
+        match item.kind {
+            WorkKind::Dir => {
+                let metadata = path_metadata(&item.absolute_path).ok();
+                let row = if item.relative_path.is_empty() {
+                    None
+                } else {
+                    Some(NewFile {
+                        scan_id: scan_id.clone(),
+                        kind: "dir".to_string(),
+                        path: item.relative_path,
+                        name: item.name,
+                        size: 0,
+                        blake3: String::new(),
+                        sha256: String::new(),
+                        ctime: metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.ctime.clone()),
+                        mtime: metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.mtime.clone()),
+                        mode: metadata.as_ref().and_then(|metadata| metadata.mode),
+                        error: None,
+                    })
+                };
+                if result_tx.send(PipelineResult::Directory { row }).is_err() {
+                    break;
+                }
+                pool_complete(progress.as_ref(), &scan_id, PoolKind::Metadata);
+            }
+            WorkKind::File => {
+                if is_database_sidecar(&item.absolute_path, db_path, db_wal_path, db_shm_path) {
+                    pool_complete(progress.as_ref(), &scan_id, PoolKind::Metadata);
+                    continue;
+                }
+
+                match file_metadata(&item.absolute_path) {
+                    Ok(metadata) => {
+                        if let Some(hashed) =
+                            reusable_hashed_file(reusable_files.get(&item.stored_path), &metadata)
+                        {
+                            let row =
+                                file_row(&scan_id, &item.stored_path, &item.name, hashed.clone());
+                            if result_tx
+                                .send(PipelineResult::File {
+                                    row,
+                                    reused: hashed.reused,
+                                    relative_path: item.relative_path,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        } else {
+                            pool_queue(
+                                progress.as_ref(),
+                                &scan_id,
+                                PoolKind::Hashing,
+                                &progress_path(&item.relative_path),
+                            );
+                            if hash_tx
+                                .send(HashJob {
+                                    absolute_path: item.absolute_path,
+                                    relative_path: item.relative_path,
+                                    stored_path: item.stored_path,
+                                    name: item.name,
+                                    metadata,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        pool_complete(progress.as_ref(), &scan_id, PoolKind::Metadata);
+                    }
+                    Err(err) => {
+                        pool_fail(progress.as_ref(), &scan_id, PoolKind::Metadata);
+                        let message = err.to_string();
+                        let row = error_file_row(
+                            &scan_id,
+                            &item.stored_path,
+                            &item.name,
+                            message.clone(),
+                        );
+                        if result_tx
+                            .send(PipelineResult::Error {
+                                row,
+                                message,
+                                relative_path: item.relative_path,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn hash_worker(
+    hash_rx: Arc<Mutex<Receiver<HashJob>>>,
+    result_tx: SyncSender<PipelineResult>,
+    progress: Option<ScanProgressStore>,
+    scan_id: String,
+) {
+    loop {
+        let job = {
+            let hash_rx = hash_rx.lock().expect("scan hash receiver lock poisoned");
+            hash_rx.recv()
+        };
+        let job = match job {
+            Ok(job) => job,
+            Err(_) => break,
+        };
+
+        let path = progress_path(&job.relative_path);
+        pool_start(progress.as_ref(), &scan_id, PoolKind::Hashing, &path);
+
+        match hash_file_with_metadata(&job.absolute_path, job.metadata) {
+            Ok(hashed) => {
+                let row = file_row(&scan_id, &job.stored_path, &job.name, hashed.clone());
+                if result_tx
+                    .send(PipelineResult::File {
+                        row,
+                        reused: hashed.reused,
+                        relative_path: job.relative_path,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                pool_complete(progress.as_ref(), &scan_id, PoolKind::Hashing);
+            }
+            Err(err) => {
+                pool_fail(progress.as_ref(), &scan_id, PoolKind::Hashing);
+                let message = err.to_string();
+                let row = error_file_row(&scan_id, &job.stored_path, &job.name, message.clone());
+                if result_tx
+                    .send(PipelineResult::Error {
+                        row,
+                        message,
+                        relative_path: job.relative_path,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn work_item_from_entry(scan_root: &Path, entry: walkdir::DirEntry) -> Option<WorkItem> {
+    let kind = if entry.file_type().is_dir() {
+        WorkKind::Dir
+    } else if entry.file_type().is_file() {
+        WorkKind::File
+    } else {
+        return None;
+    };
+    let absolute_path = entry.path().to_path_buf();
+    let relative_path = absolute_path
+        .strip_prefix(scan_root)
+        .unwrap_or(&absolute_path)
+        .to_string_lossy()
+        .to_string();
+    let name = entry.file_name().to_string_lossy().to_string();
+    let stored_path = if relative_path.is_empty() {
+        name.clone()
+    } else {
+        relative_path.clone()
+    };
+    Some(WorkItem {
+        absolute_path,
+        relative_path,
+        stored_path,
+        name,
+        kind,
+    })
+}
+
+fn is_database_sidecar(
+    path: &Path,
+    db_path: Option<&PathBuf>,
+    db_wal_path: Option<&PathBuf>,
+    db_shm_path: Option<&PathBuf>,
+) -> bool {
+    let canonical_path = path.canonicalize().ok();
+    canonical_path.as_ref().is_some_and(|path| {
+        Some(path) == db_path || Some(path) == db_wal_path || Some(path) == db_shm_path
+    })
+}
+
+fn reusable_hashed_file(
+    reusable: Option<&ReusableFile>,
+    metadata: &HashedFileMetadata,
+) -> Option<HashedFile> {
+    let reusable = reusable?;
+    if reusable.size == metadata.size
+        && reusable.ctime == metadata.ctime
+        && reusable.mtime == metadata.mtime
+        && reusable.mode == metadata.mode
+    {
+        Some(HashedFile {
+            size: reusable.size,
+            blake3: reusable.blake3.clone(),
+            sha256: reusable.sha256.clone(),
+            ctime: reusable.ctime.clone(),
+            mtime: reusable.mtime.clone(),
+            mode: reusable.mode,
+            reused: true,
+        })
+    } else {
+        None
+    }
+}
+
+fn file_row(scan_id: &str, path: &str, name: &str, hashed: HashedFile) -> NewFile {
+    NewFile {
+        scan_id: scan_id.to_string(),
+        kind: "file".to_string(),
+        path: path.to_string(),
+        name: name.to_string(),
+        size: hashed.size,
+        blake3: hashed.blake3,
+        sha256: hashed.sha256,
+        ctime: hashed.ctime,
+        mtime: hashed.mtime,
+        mode: hashed.mode,
+        error: None,
+    }
+}
+
+fn error_file_row(scan_id: &str, path: &str, name: &str, message: String) -> NewFile {
+    NewFile {
+        scan_id: scan_id.to_string(),
+        kind: "file".to_string(),
+        path: path.to_string(),
+        name: name.to_string(),
+        size: 0,
+        blake3: String::new(),
+        sha256: String::new(),
+        ctime: None,
+        mtime: None,
+        mode: None,
+        error: Some(message),
+    }
+}
+
+fn flush_scan_batch(
+    db: &Database,
+    scan_id: &str,
+    batch: &mut Vec<NewFile>,
+    flush_size: usize,
+    file_count: u64,
+    dir_count: u64,
+    error_count: u64,
+    total_bytes: u64,
+    progress: Option<&ScanProgressStore>,
+) -> Result<()> {
+    if batch.len() < flush_size {
+        return Ok(());
+    }
+    db.insert_file_batch(batch)?;
+    batch.clear();
+    db.update_scan_counts(scan_id, file_count, dir_count, error_count, total_bytes)?;
+    if let Some(progress) = progress {
+        progress.update(scan_id, |state| {
+            push_log(state, format!("Flushed {file_count} files to SQLite"));
+        });
+    }
+    Ok(())
+}
+
+fn update_progress_counts(
+    progress: Option<&ScanProgressStore>,
+    scan_id: &str,
+    file_count: u64,
+    dir_count: u64,
+    error_count: u64,
+    total_bytes: u64,
+) {
+    if let Some(progress) = progress {
+        progress.update(scan_id, |state| {
+            state.file_count = file_count;
+            state.dir_count = dir_count;
+            state.error_count = error_count;
+            state.total_bytes = total_bytes;
+        });
+    }
+}
+
+fn hash_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().saturating_sub(1).clamp(1, 4))
+        .unwrap_or(2)
+}
+
+fn pool_queue(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind, path: &str) {
+    let Some(progress) = progress else {
+        return;
+    };
+    let path = path.to_string();
+    progress.update(scan_id, move |state| {
+        let pool = scan_pool_mut(&mut state.pools, kind);
+        pool.queued += 1;
+        pool.current_path = Some(path);
+    });
+}
+
+fn pool_start(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind, path: &str) {
+    let Some(progress) = progress else {
+        return;
+    };
+    let path = path.to_string();
+    progress.update(scan_id, move |state| {
+        let pool = scan_pool_mut(&mut state.pools, kind);
+        pool.queued = pool.queued.saturating_sub(1);
+        pool.active += 1;
+        pool.current_path = Some(path.clone());
+        state.current_path = Some(path);
+    });
+}
+
+fn pool_activate(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind, path: &str) {
+    let Some(progress) = progress else {
+        return;
+    };
+    let path = path.to_string();
+    progress.update(scan_id, move |state| {
+        let pool = scan_pool_mut(&mut state.pools, kind);
+        if pool.active == 0 {
+            pool.active = 1;
+        }
+        pool.current_path = Some(path.clone());
+        state.current_path = Some(path);
+    });
+}
+
+fn pool_deactivate(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind) {
+    let Some(progress) = progress else {
+        return;
+    };
+    progress.update(scan_id, move |state| {
+        let pool = scan_pool_mut(&mut state.pools, kind);
+        pool.active = 0;
+        pool.current_path = None;
+    });
+}
+
+fn pool_complete(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind) {
+    let Some(progress) = progress else {
+        return;
+    };
+    progress.update(scan_id, move |state| {
+        let pool = scan_pool_mut(&mut state.pools, kind);
+        pool.active = pool.active.saturating_sub(1);
+        pool.completed += 1;
+        if pool.active == 0 {
+            pool.current_path = None;
+        }
+    });
+}
+
+fn pool_fail(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind) {
+    let Some(progress) = progress else {
+        return;
+    };
+    progress.update(scan_id, move |state| {
+        let pool = scan_pool_mut(&mut state.pools, kind);
+        pool.active = pool.active.saturating_sub(1);
+        pool.failed += 1;
+        if pool.active == 0 {
+            pool.current_path = None;
+        }
+    });
+}
+
+fn scan_pool_mut(pools: &mut ScanPools, kind: PoolKind) -> &mut ScanPoolProgress {
+    match kind {
+        PoolKind::Discovery => &mut pools.discovery,
+        PoolKind::Metadata => &mut pools.metadata,
+        PoolKind::Hashing => &mut pools.hashing,
+    }
+}
+
+fn progress_path(path: &str) -> String {
+    if path.is_empty() {
+        ".".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
 fn sidecar_path(path: &Path, suffix: &str) -> Option<PathBuf> {
     Some(PathBuf::from(format!("{}-{suffix}", path.to_str()?)))
 }
@@ -560,6 +1081,7 @@ fn normalize_scan_root(root: &Path, offset: &Path) -> PathBuf {
     }
 }
 
+#[derive(Clone)]
 struct HashedFile {
     size: u64,
     blake3: String,
@@ -568,28 +1090,6 @@ struct HashedFile {
     mtime: Option<String>,
     mode: Option<u32>,
     reused: bool,
-}
-
-fn reusable_or_hash_file(path: &Path, reusable: Option<&ReusableFile>) -> Result<HashedFile> {
-    let metadata = file_metadata(path)?;
-    if let Some(reusable) = reusable {
-        if reusable.size == metadata.size
-            && reusable.ctime == metadata.ctime
-            && reusable.mtime == metadata.mtime
-            && reusable.mode == metadata.mode
-        {
-            return Ok(HashedFile {
-                size: reusable.size,
-                blake3: reusable.blake3.clone(),
-                sha256: reusable.sha256.clone(),
-                ctime: reusable.ctime.clone(),
-                mtime: reusable.mtime.clone(),
-                mode: reusable.mode,
-                reused: true,
-            });
-        }
-    }
-    hash_file_with_metadata(path, metadata)
 }
 
 fn hash_file_with_metadata(path: &Path, metadata: HashedFileMetadata) -> Result<HashedFile> {
@@ -749,6 +1249,126 @@ mod tests {
         let remaining = db.scan_files(&scan.scan_id, 10).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].path, "two.txt");
+    }
+
+    #[test]
+    fn scan_skips_files_and_prunes_folders_matching_excludes() {
+        let root = test_root("scan-excludes");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(location_root.join("skip-dir")).unwrap();
+        std::fs::write(location_root.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(location_root.join("skip.tmp"), b"skip").unwrap();
+        std::fs::write(location_root.join("skip-dir/hidden.txt"), b"hidden").unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+
+        let prepared = prepare_scan(&db, "test", Path::new("/")).unwrap();
+        db.set_scan_excludes(
+            &prepared.scan_id,
+            vec!["*.tmp".to_string(), "skip-dir/".to_string()],
+        )
+        .unwrap();
+        let summary = run_prepared_scan(&db, prepared, None).unwrap();
+
+        assert_eq!(summary.file_count, 1);
+        let paths = db
+            .scan_files(&summary.scan_id, 10)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["keep.txt"]);
+        assert!(db
+            .scan_tree(&summary.scan_id, "")
+            .unwrap()
+            .iter()
+            .all(|entry| entry.path != "skip-dir"));
+    }
+
+    #[test]
+    fn update_scan_copies_excludes_and_does_not_restore_excluded_paths() {
+        let root = test_root("update-respects-excludes");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(location_root.join("sub")).unwrap();
+        std::fs::write(location_root.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(location_root.join("sub/restore.txt"), b"restore").unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+
+        let initial = scan_location(&db, "test", Path::new("/")).unwrap();
+        db.append_exact_scan_exclude(&initial.scan_id, "sub", "dir")
+            .unwrap();
+
+        let prepared = prepare_update_scan(&db, &initial.scan_id).unwrap();
+        assert_eq!(
+            db.scan_excludes(&prepared.scan_id)
+                .unwrap()
+                .iter()
+                .map(|exclude| exclude.pattern.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/sub/"]
+        );
+        let updated = run_prepared_scan(&db, prepared, None).unwrap();
+
+        assert_eq!(updated.file_count, 1);
+        let paths = db
+            .scan_files(&updated.scan_id, 10)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["keep.txt"]);
+    }
+
+    #[test]
+    fn scan_progress_reports_worker_pool_counters() {
+        let root = test_root("scan-progress-pools");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(location_root.join("nested")).unwrap();
+        std::fs::write(location_root.join("one.txt"), b"one").unwrap();
+        std::fs::write(location_root.join("nested/two.txt"), b"two").unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+
+        let prepared = prepare_scan(&db, "test", Path::new("/")).unwrap();
+        let scan_id = prepared.scan_id.clone();
+        let progress = ScanProgressStore::default();
+        progress.start(&prepared);
+        let summary = run_prepared_scan(&db, prepared, Some(progress.clone())).unwrap();
+        assert_eq!(summary.file_count, 2);
+
+        let state = progress.get(&scan_id).unwrap();
+        assert_eq!(state.pools.discovery.active, 0);
+        assert_eq!(state.pools.metadata.active, 0);
+        assert_eq!(state.pools.hashing.active, 0);
+        assert!(state.pools.discovery.completed >= 3);
+        assert!(state.pools.metadata.completed >= 3);
+        assert_eq!(state.pools.hashing.completed, 2);
+        assert_eq!(state.pools.hashing.failed, 0);
     }
 
     fn test_root(name: &str) -> PathBuf {
