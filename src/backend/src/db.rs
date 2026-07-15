@@ -1046,20 +1046,55 @@ impl Database {
         total_bytes: u64,
         status: &str,
     ) -> Result<()> {
-        let conn = self.connect()?;
-        conn.execute(
-            "UPDATE scans SET finished_at = ?1, file_count = ?2, dir_count = ?3, error_count = ?4, total_bytes = ?5, status = ?6 WHERE id = ?7",
-            params![
-                Utc::now().to_rfc3339(),
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        write_scan_terminal_state(
+            &tx,
+            scan_id,
+            file_count,
+            dir_count,
+            error_count,
+            total_bytes,
+            status,
+        )?;
+        if let Err(invalidation_error) = invalidate_duplicate_cache_conn(&tx) {
+            // Do not leave a terminal scan as `running` solely because a
+            // cache DELETE failed. The failed transaction rolls back first;
+            // the fallback below writes only the terminal scan state. Any
+            // retained cache run is safe to keep: the current-scope
+            // fingerprint includes terminal status, counts, and finished_at,
+            // so current_duplicate_cache_status reports that old run as
+            // `stale`, never as a usable matching cache.
+            drop(tx);
+            let fallback = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .with_context(|| {
+                    format!(
+                        "duplicate cache invalidation failed while finalizing scan {scan_id}: {invalidation_error:#}; unable to begin status-only fallback"
+                    )
+                })?;
+            write_scan_terminal_state(
+                &fallback,
+                scan_id,
                 file_count,
                 dir_count,
                 error_count,
                 total_bytes,
                 status,
-                scan_id,
-            ],
-        )?;
-        invalidate_duplicate_cache_conn(&conn)?;
+            )
+            .with_context(|| {
+                format!(
+                    "duplicate cache invalidation failed while finalizing scan {scan_id}: {invalidation_error:#}; status-only fallback failed"
+                )
+            })?;
+            fallback.commit().with_context(|| {
+                format!(
+                    "duplicate cache invalidation failed while finalizing scan {scan_id}: {invalidation_error:#}; unable to commit status-only fallback"
+                )
+            })?;
+            return Ok(());
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1071,12 +1106,14 @@ impl Database {
         error_count: u64,
         total_bytes: u64,
     ) -> Result<()> {
-        let conn = self.connect()?;
-        conn.execute(
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "UPDATE scans SET file_count = ?1, dir_count = ?2, error_count = ?3, total_bytes = ?4 WHERE id = ?5",
             params![file_count, dir_count, error_count, total_bytes, scan_id],
         )?;
-        invalidate_duplicate_cache_conn(&conn)?;
+        invalidate_duplicate_cache_conn(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3488,6 +3525,35 @@ fn duplicate_cache_ancestor_paths(path: &str) -> Vec<String> {
     (1..parts.len()).map(|index| parts[..index].join("/")).collect()
 }
 
+fn write_scan_terminal_state(
+    conn: &Connection,
+    scan_id: &str,
+    file_count: u64,
+    dir_count: u64,
+    error_count: u64,
+    total_bytes: u64,
+    status: &str,
+) -> Result<()> {
+    let updated = conn.execute(
+        "UPDATE scans SET finished_at = ?1, file_count = ?2, dir_count = ?3, error_count = ?4, total_bytes = ?5, status = ?6 WHERE id = ?7",
+        params![
+            Utc::now().to_rfc3339(),
+            file_count,
+            dir_count,
+            error_count,
+            total_bytes,
+            status,
+            scan_id,
+        ],
+    )?;
+    if updated != 1 {
+        anyhow::bail!(
+            "expected to finalize exactly one scan {scan_id}, but updated {updated} rows"
+        );
+    }
+    Ok(())
+}
+
 fn invalidate_duplicate_cache_conn(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM duplicate_cache_runs", [])?;
     Ok(())
@@ -4250,6 +4316,189 @@ mod tests {
         assert_eq!(reservation.location.root_path, stored_root);
         assert_eq!(db.locations().unwrap().len(), 1);
         assert_eq!(db.scans().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn cached_scan_with_invalidation_failure(name: &str) -> (PathBuf, Database, String) {
+        let root = test_root(name);
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Archive".to_string(),
+                slug: "archive".to_string(),
+                root_path: root.join("location"),
+                notes: None,
+        })
+        .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+        db.set_representative_scan(&scan_id).unwrap();
+        db.rebuild_duplicate_cache_for_current_scope()
+            .unwrap()
+            .expect("the representative running scan has a cache scope");
+        assert_eq!(db.current_duplicate_cache_status().unwrap().status, "ready");
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER force_duplicate_cache_invalidation_failure
+            BEFORE DELETE ON duplicate_cache_runs
+            BEGIN
+                SELECT RAISE(ABORT, 'forced duplicate cache invalidation failure');
+            END;
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        (root, db, scan_id)
+    }
+
+    #[test]
+    fn update_scan_counts_rolls_back_when_cache_invalidation_fails() {
+        let (root, db, scan_id) =
+            cached_scan_with_invalidation_failure("update-scan-counts-cache-rollback");
+
+        let error = db
+            .update_scan_counts(&scan_id, 7, 2, 1, 42)
+            .expect_err("cache invalidation failure must roll back progress counts");
+        assert!(
+            error
+                .to_string()
+                .contains("forced duplicate cache invalidation failure"),
+            "{error:#}"
+        );
+
+        let scan = db.scan_by_id(&scan_id).unwrap().unwrap();
+        assert_eq!(scan.status, "running");
+        assert!(scan.finished_at.is_none());
+        assert_eq!(scan.file_count, 0);
+        assert_eq!(scan.dir_count, 0);
+        assert_eq!(scan.error_count, 0);
+        assert_eq!(scan.total_bytes, 0);
+
+        let conn = db.connect().unwrap();
+        let cache_runs: u64 = conn
+            .query_row("SELECT COUNT(*) FROM duplicate_cache_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache_runs, 1);
+        drop(conn);
+        assert_eq!(db.current_duplicate_cache_status().unwrap().status, "ready");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn finish_scan_persists_terminal_state_when_cache_invalidation_fails() {
+        for (case, status, file_count, dir_count, error_count, total_bytes) in [
+            ("complete", "complete", 7_u64, 2_u64, 1_u64, 42_u64),
+            ("failed", "failed", 0_u64, 0_u64, 1_u64, 0_u64),
+        ] {
+            let (root, db, scan_id) = cached_scan_with_invalidation_failure(&format!(
+                "finish-scan-cache-status-{case}"
+            ));
+
+            db.finish_scan(
+                &scan_id,
+                file_count,
+                dir_count,
+                error_count,
+                total_bytes,
+                status,
+            )
+            .expect("terminal fallback must preserve the intended scan status");
+
+            let scan = db.scan_by_id(&scan_id).unwrap().unwrap();
+            assert_eq!(scan.status, status);
+            assert!(scan.finished_at.is_some());
+            assert_eq!(scan.file_count, file_count);
+            assert_eq!(scan.dir_count, dir_count);
+            assert_eq!(scan.error_count, error_count);
+            assert_eq!(scan.total_bytes, total_bytes);
+
+            let conn = db.connect().unwrap();
+            let cache_runs: u64 = conn
+                .query_row("SELECT COUNT(*) FROM duplicate_cache_runs", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(cache_runs, 1);
+            drop(conn);
+            assert_eq!(db.current_duplicate_cache_status().unwrap().status, "stale");
+
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn finish_scan_rejects_a_missing_scan_without_invalidating_cache() {
+        let (root, db, _) =
+            cached_scan_with_invalidation_failure("finish-scan-missing-scan");
+
+        let error = db
+            .finish_scan("missing-scan", 7, 2, 1, 42, "complete")
+            .expect_err("a deleted scan must not look successfully finalized");
+        assert!(
+            error
+                .to_string()
+                .contains("expected to finalize exactly one scan missing-scan"),
+            "{error:#}"
+        );
+
+        let conn = db.connect().unwrap();
+        let cache_runs: u64 = conn
+            .query_row("SELECT COUNT(*) FROM duplicate_cache_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache_runs, 1);
+        drop(conn);
+        assert_eq!(db.current_duplicate_cache_status().unwrap().status, "ready");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn finish_scan_propagates_terminal_update_failure_without_fallback() {
+        let root = test_root("finish-scan-update-failure");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Archive".to_string(),
+                slug: "archive".to_string(),
+                root_path: root.join("location"),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER force_terminal_update_failure
+            BEFORE UPDATE OF status ON scans
+            WHEN NEW.status = 'complete'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced terminal update failure');
+            END;
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = db
+            .finish_scan(&scan_id, 7, 2, 1, 42, "complete")
+            .expect_err("a terminal UPDATE failure must propagate");
+        assert!(
+            error
+                .to_string()
+                .contains("forced terminal update failure"),
+            "{error:#}"
+        );
+
+        let scan = db.scan_by_id(&scan_id).unwrap().unwrap();
+        assert_eq!(scan.status, "running");
+        assert!(scan.finished_at.is_none());
+        assert_eq!(scan.file_count, 0);
+        assert_eq!(scan.dir_count, 0);
+        assert_eq!(scan.error_count, 0);
+        assert_eq!(scan.total_bytes, 0);
 
         let _ = std::fs::remove_dir_all(root);
     }

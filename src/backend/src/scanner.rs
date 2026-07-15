@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -179,8 +179,17 @@ impl ScanProgressStore {
     }
 
     pub fn finish(&self, summary: &ScanSummary) {
+        // `run_prepared_scan` owns the persisted terminal status and returns
+        // it in the summary. Its caller owns exactly one progress terminal
+        // transition, so preserve that status here instead of turning a
+        // completed-with-errors scan into a false "complete" event.
+        let terminal_event = match summary.status.as_str() {
+            "failed" => "scan_failed",
+            "stopped" => "scan_stopped",
+            _ => "scan_finished",
+        };
         self.update(&summary.scan_id, |progress| {
-            progress.status = "complete".to_string();
+            progress.status = summary.status.clone();
             progress.file_count = summary.file_count;
             progress.dir_count = summary.dir_count;
             progress.error_count = summary.error_count;
@@ -188,16 +197,36 @@ impl ScanProgressStore {
             progress.current_path = None;
             progress.active_operations.clear();
             progress.finished_at = Some(Utc::now().to_rfc3339());
-            push_log(
-                progress,
-                format!(
-                    "Completed: {} files, {} dirs, {} errors, {} bytes",
-                    summary.file_count, summary.dir_count, summary.error_count, summary.total_bytes
+            let terminal_log = match summary.status.as_str() {
+                "failed" => format!(
+                    "Failed: {} files, {} dirs, {} errors, {} bytes",
+                    summary.file_count,
+                    summary.dir_count,
+                    summary.error_count,
+                    summary.total_bytes
                 ),
-            );
+                "stopped" => format!(
+                    "Stopped: {} files, {} dirs, {} errors, {} bytes",
+                    summary.file_count,
+                    summary.dir_count,
+                    summary.error_count,
+                    summary.total_bytes
+                ),
+                _ => format!(
+                    "Completed: {} files, {} dirs, {} errors, {} bytes",
+                    summary.file_count,
+                    summary.dir_count,
+                    summary.error_count,
+                    summary.total_bytes
+                ),
+            };
+            if summary.status == "failed" {
+                progress.message = Some(terminal_log.clone());
+            }
+            push_log(progress, terminal_log);
         });
         if let Some(progress) = self.get(&summary.scan_id) {
-            self.emit("scan_finished", progress);
+            self.emit(terminal_event, progress);
         }
         self.cancel
             .lock()
@@ -419,7 +448,7 @@ struct HashJob {
     relative_path: String,
     stored_path: String,
     name: String,
-    metadata: HashedFileMetadata,
+    reusable: Option<ReusableFile>,
 }
 
 enum PipelineResult {
@@ -538,15 +567,25 @@ pub fn run_prepared_scan(
     prepared: PreparedScan,
     progress: Option<ScanProgressStore>,
 ) -> Result<ScanSummary> {
-    let db_path = db.path().canonicalize().ok();
-    let db_wal_path = sidecar_path(db.path(), "wal").and_then(|path| path.canonicalize().ok());
-    let db_shm_path = sidecar_path(db.path(), "shm").and_then(|path| path.canonicalize().ok());
     let flush_size = if progress.is_some() { 25 } else { 500 };
     let mut batch = Vec::with_capacity(flush_size);
     let mut file_count = 0;
     let mut dir_count = 0;
     let mut error_count = 0;
     let mut total_bytes = 0;
+    let scan_id = prepared.scan_id.clone();
+
+    // A prepared scan already has a persisted `running` row. Keep every
+    // ordinary fallible path inside this closure so the outer match can make a
+    // best-effort terminal transition without masking the original failure.
+    let result = (|| -> Result<ScanSummary> {
+    // Workers keep this canonical root for their own rechecks. Discovery's
+    // `follow_links(false)` is not sufficient once a discovered path reaches
+    // a later worker and the filesystem may have changed underneath it.
+    let canonical_scan_root = canonical_directory(&prepared.scan_root, "scan root")?;
+    let db_path = db.path().canonicalize().ok();
+    let db_wal_path = sidecar_path(db.path(), "wal").and_then(|path| path.canonicalize().ok());
+    let db_shm_path = sidecar_path(db.path(), "shm").and_then(|path| path.canonicalize().ok());
     let exclude_patterns = db.scan_exclude_patterns(&prepared.scan_id)?;
     // Excludes remain scan-scoped policy, but they must not suppress physical
     // indexing. Validate them here; query surfaces apply visibility later.
@@ -565,8 +604,9 @@ pub fn run_prepared_scan(
             let result_tx = result_tx.clone();
             let progress = progress.clone();
             let scan_id = prepared.scan_id.clone();
+            let scan_root = &canonical_scan_root;
             scope.spawn(move || {
-                hash_worker(hash_rx, result_tx, progress, scan_id);
+                hash_worker(hash_rx, result_tx, progress, scan_id, scan_root);
             });
         }
 
@@ -580,6 +620,7 @@ pub fn run_prepared_scan(
             let db_path = db_path.as_ref();
             let db_wal_path = db_wal_path.as_ref();
             let db_shm_path = db_shm_path.as_ref();
+            let scan_root = &canonical_scan_root;
             scope.spawn(move || {
                 metadata_worker(
                     work_rx,
@@ -591,6 +632,7 @@ pub fn run_prepared_scan(
                     db_path,
                     db_wal_path,
                     db_shm_path,
+                    scan_root,
                 );
             });
         }
@@ -598,7 +640,7 @@ pub fn run_prepared_scan(
 
         let discovery_progress = progress.clone();
         let discovery_scan_id = prepared.scan_id.clone();
-        let scan_root = &prepared.scan_root;
+        let scan_root = &canonical_scan_root;
         let discovery_result_tx = result_tx.clone();
         scope.spawn(move || {
             discovery_worker(
@@ -728,6 +770,26 @@ pub fn run_prepared_scan(
         error_count,
         total_bytes,
     })
+    })();
+
+    match result {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            match db.finish_scan(
+                &scan_id,
+                file_count,
+                dir_count,
+                error_count,
+                total_bytes,
+                "failed",
+            ) {
+                Ok(()) => Err(error),
+                Err(finalize_error) => Err(error.context(format!(
+                    "also failed to finalize scan {scan_id} as failed: {finalize_error:#}"
+                ))),
+            }
+        }
+    }
 }
 
 fn discovery_worker(
@@ -787,6 +849,7 @@ fn metadata_worker(
     db_path: Option<&PathBuf>,
     db_wal_path: Option<&PathBuf>,
     db_shm_path: Option<&PathBuf>,
+    canonical_scan_root: &Path,
 ) {
     loop {
         let item = {
@@ -803,103 +866,136 @@ fn metadata_worker(
 
         match item.kind {
             WorkKind::Dir => {
-                let metadata = path_metadata(&item.absolute_path).ok();
-                let row = if item.relative_path.is_empty() {
-                    None
-                } else {
-                    Some(NewFile {
-                        scan_id: scan_id.clone(),
-                        kind: "dir".to_string(),
-                        path: item.relative_path,
-                        name: item.name,
-                        size: 0,
-                        blake3: String::new(),
-                        sha256: String::new(),
-                        ctime: metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.ctime.clone()),
-                        mtime: metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.mtime.clone()),
-                        mode: metadata.as_ref().and_then(|metadata| metadata.mode),
-                        error: None,
-                    })
-                };
-                if result_tx.send(PipelineResult::Directory { row }).is_err() {
-                    pool_fail(
-                        progress.as_ref(),
-                        &scan_id,
-                        PoolKind::Metadata,
-                        operation_id,
-                    );
-                    break;
-                }
-                pool_complete(
-                    progress.as_ref(),
-                    &scan_id,
-                    PoolKind::Metadata,
-                    operation_id,
-                );
-            }
-            WorkKind::File => {
-                if is_database_sidecar(&item.absolute_path, db_path, db_wal_path, db_shm_path) {
-                    pool_complete(
-                        progress.as_ref(),
-                        &scan_id,
-                        PoolKind::Metadata,
-                        operation_id,
-                    );
-                    continue;
-                }
-
-                match file_metadata(&item.absolute_path) {
+                // WalkDir's no-follow discovery guarantee ends when this
+                // queued work item is consumed. Recheck directories too so a
+                // late replacement cannot import metadata from outside root.
+                match checked_directory_metadata(&item.absolute_path, canonical_scan_root) {
                     Ok(metadata) => {
-                        if let Some(hashed) =
-                            reusable_hashed_file(reusable_files.get(&item.stored_path), &metadata)
-                        {
-                            let row =
-                                file_row(&scan_id, &item.stored_path, &item.name, hashed.clone());
+                        let row = if item.relative_path.is_empty() {
+                            None
+                        } else {
+                            Some(NewFile {
+                                scan_id: scan_id.clone(),
+                                kind: "dir".to_string(),
+                                path: item.relative_path,
+                                name: item.name,
+                                size: 0,
+                                blake3: String::new(),
+                                sha256: String::new(),
+                                ctime: metadata.ctime,
+                                mtime: metadata.mtime,
+                                mode: metadata.mode,
+                                error: None,
+                            })
+                        };
+                        if result_tx.send(PipelineResult::Directory { row }).is_err() {
+                            pool_fail(
+                                progress.as_ref(),
+                                &scan_id,
+                                PoolKind::Metadata,
+                                operation_id,
+                            );
+                            break;
+                        }
+                        pool_complete(
+                            progress.as_ref(),
+                            &scan_id,
+                            PoolKind::Metadata,
+                            operation_id,
+                        );
+                    }
+                    Err(err) => {
+                        pool_fail(
+                            progress.as_ref(),
+                            &scan_id,
+                            PoolKind::Metadata,
+                            operation_id,
+                        );
+                        let message = err.to_string();
+                        if item.relative_path.is_empty() {
+                            // The scan root is not represented by a `files`
+                            // row. Retain the failure count/log without
+                            // fabricating a directory row for it.
                             if result_tx
-                                .send(PipelineResult::File {
-                                    row,
-                                    reused: hashed.reused,
-                                    relative_path: item.relative_path,
-                                })
+                                .send(PipelineResult::WalkError(format!(
+                                    "directory recheck failed at {}: {message}",
+                                    item.absolute_path.display()
+                                )))
                                 .is_err()
                             {
-                                pool_fail(
-                                    progress.as_ref(),
-                                    &scan_id,
-                                    PoolKind::Metadata,
-                                    operation_id,
-                                );
                                 break;
                             }
                         } else {
-                            pool_queue(
-                                progress.as_ref(),
+                            let row = error_directory_row(
                                 &scan_id,
-                                PoolKind::Hashing,
-                                &progress_path(&item.relative_path),
+                                &item.stored_path,
+                                &item.name,
+                                message.clone(),
                             );
-                            if hash_tx
-                                .send(HashJob {
-                                    absolute_path: item.absolute_path,
+                            if result_tx
+                                .send(PipelineResult::Error {
+                                    row,
+                                    message,
                                     relative_path: item.relative_path,
-                                    stored_path: item.stored_path,
-                                    name: item.name,
-                                    metadata,
                                 })
                                 .is_err()
                             {
-                                pool_fail(
-                                    progress.as_ref(),
-                                    &scan_id,
-                                    PoolKind::Metadata,
-                                    operation_id,
-                                );
                                 break;
                             }
+                        }
+                    }
+                }
+            }
+            WorkKind::File => {
+                // Recheck each discovered file before reading metadata. A path
+                // may have been replaced with a symlink after WalkDir saw it.
+                match checked_file_metadata(&item.absolute_path, canonical_scan_root) {
+                    Ok(metadata) => {
+                        if is_database_sidecar(
+                            &item.absolute_path,
+                            db_path,
+                            db_wal_path,
+                            db_shm_path,
+                        ) {
+                            pool_complete(
+                                progress.as_ref(),
+                                &scan_id,
+                                PoolKind::Metadata,
+                                operation_id,
+                            );
+                            continue;
+                        }
+
+                        // Reuse remains an optimization, but the hash worker
+                        // validates it against metadata from the opened file
+                        // descriptor rather than this path stat.
+                        let reusable = reusable_files
+                            .get(&item.stored_path)
+                            .filter(|candidate| reusable_matches(candidate, &metadata))
+                            .cloned();
+                        pool_queue(
+                            progress.as_ref(),
+                            &scan_id,
+                            PoolKind::Hashing,
+                            &progress_path(&item.relative_path),
+                        );
+                        if hash_tx
+                            .send(HashJob {
+                                absolute_path: item.absolute_path,
+                                relative_path: item.relative_path,
+                                stored_path: item.stored_path,
+                                name: item.name,
+                                reusable,
+                            })
+                            .is_err()
+                        {
+                            pool_fail(
+                                progress.as_ref(),
+                                &scan_id,
+                                PoolKind::Metadata,
+                                operation_id,
+                            );
+                            break;
                         }
                         pool_complete(
                             progress.as_ref(),
@@ -944,6 +1040,7 @@ fn hash_worker(
     result_tx: SyncSender<PipelineResult>,
     progress: Option<ScanProgressStore>,
     scan_id: String,
+    canonical_scan_root: &Path,
 ) {
     loop {
         let job = {
@@ -958,7 +1055,17 @@ fn hash_worker(
         let path = progress_path(&job.relative_path);
         let operation_id = pool_start(progress.as_ref(), &scan_id, PoolKind::Hashing, &path);
 
-        match hash_file_with_metadata(&job.absolute_path, job.metadata) {
+        let hashed = (|| -> Result<HashedFile> {
+            // Recheck again immediately before opening. Metadata stored in a
+            // successful row always comes from this opened descriptor.
+            let (file, metadata) = open_checked_file(&job.absolute_path, canonical_scan_root)?;
+            if let Some(hashed) = reusable_hashed_file(job.reusable.as_ref(), &metadata) {
+                return Ok(hashed);
+            }
+            hash_open_file(file, metadata)
+        })();
+
+        match hashed {
             Ok(hashed) => {
                 let row = file_row(&scan_id, &job.stored_path, &job.name, hashed.clone());
                 if result_tx
@@ -1054,23 +1161,27 @@ fn reusable_hashed_file(
     metadata: &HashedFileMetadata,
 ) -> Option<HashedFile> {
     let reusable = reusable?;
-    if reusable.size == metadata.size
+    if !reusable_matches(reusable, metadata) {
+        return None;
+    }
+    Some(HashedFile {
+        // These values came from the descriptor the hash worker opened, not
+        // from the metadata-stage path check.
+        size: metadata.size,
+        blake3: reusable.blake3.clone(),
+        sha256: reusable.sha256.clone(),
+        ctime: metadata.ctime.clone(),
+        mtime: metadata.mtime.clone(),
+        mode: metadata.mode,
+        reused: true,
+    })
+}
+
+fn reusable_matches(reusable: &ReusableFile, metadata: &HashedFileMetadata) -> bool {
+    reusable.size == metadata.size
         && reusable.ctime == metadata.ctime
         && reusable.mtime == metadata.mtime
         && reusable.mode == metadata.mode
-    {
-        Some(HashedFile {
-            size: reusable.size,
-            blake3: reusable.blake3.clone(),
-            sha256: reusable.sha256.clone(),
-            ctime: reusable.ctime.clone(),
-            mtime: reusable.mtime.clone(),
-            mode: reusable.mode,
-            reused: true,
-        })
-    } else {
-        None
-    }
 }
 
 fn file_row(scan_id: &str, path: &str, name: &str, hashed: HashedFile) -> NewFile {
@@ -1090,9 +1201,23 @@ fn file_row(scan_id: &str, path: &str, name: &str, hashed: HashedFile) -> NewFil
 }
 
 fn error_file_row(scan_id: &str, path: &str, name: &str, message: String) -> NewFile {
+    error_path_row(scan_id, "file", path, name, message)
+}
+
+fn error_directory_row(scan_id: &str, path: &str, name: &str, message: String) -> NewFile {
+    error_path_row(scan_id, "dir", path, name, message)
+}
+
+fn error_path_row(
+    scan_id: &str,
+    kind: &str,
+    path: &str,
+    name: &str,
+    message: String,
+) -> NewFile {
     NewFile {
         scan_id: scan_id.to_string(),
-        kind: "file".to_string(),
+        kind: kind.to_string(),
         path: path.to_string(),
         name: name.to_string(),
         size: 0,
@@ -1340,9 +1465,115 @@ struct HashedFile {
     reused: bool,
 }
 
-fn hash_file_with_metadata(path: &Path, metadata: HashedFileMetadata) -> Result<HashedFile> {
-    let mut reader =
-        BufReader::new(File::open(path).with_context(|| format!("open {}", path.display()))?);
+#[derive(Clone, Copy)]
+enum CheckedPathKind {
+    File,
+    Directory,
+}
+
+fn checked_file_metadata(path: &Path, canonical_scan_root: &Path) -> Result<HashedFileMetadata> {
+    let metadata = checked_regular_file(path, canonical_scan_root)?;
+    Ok(hashed_file_metadata(&metadata))
+}
+
+fn checked_directory_metadata(
+    path: &Path,
+    canonical_scan_root: &Path,
+) -> Result<HashedFileMetadata> {
+    let metadata = checked_path_metadata(path, canonical_scan_root, CheckedPathKind::Directory)?;
+    Ok(hashed_file_metadata(&metadata))
+}
+
+/// Best-effort path recheck before reading metadata or opening a file.
+/// It rejects direct symlinks and any canonical target outside the scan root.
+/// On Unix the hash path additionally proves its opened descriptor identity.
+fn checked_regular_file(path: &Path, canonical_scan_root: &Path) -> Result<Metadata> {
+    checked_path_metadata(path, canonical_scan_root, CheckedPathKind::File)
+}
+
+fn checked_path_metadata(
+    path: &Path,
+    canonical_scan_root: &Path,
+    expected_kind: CheckedPathKind,
+) -> Result<Metadata> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("lstat {}", path.display()))?;
+    let expected_label = match expected_kind {
+        CheckedPathKind::File => "file",
+        CheckedPathKind::Directory => "directory",
+    };
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("refusing symlink {expected_label} {}", path.display());
+    }
+    let has_expected_kind = match expected_kind {
+        CheckedPathKind::File => metadata.is_file(),
+        CheckedPathKind::Directory => metadata.is_dir(),
+    };
+    if !has_expected_kind {
+        anyhow::bail!("refusing non-{expected_label} path {}", path.display());
+    }
+
+    let canonical_path = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {expected_label} {}", path.display()))?;
+    if !canonical_path.starts_with(canonical_scan_root) {
+        anyhow::bail!(
+            "{expected_label} {} resolves outside canonical scan root {}: {}",
+            path.display(),
+            canonical_scan_root.display(),
+            canonical_path.display()
+        );
+    }
+    Ok(metadata)
+}
+
+fn open_checked_file(path: &Path, canonical_scan_root: &Path) -> Result<(File, HashedFileMetadata)> {
+    // These checks stay adjacent to File::open: WalkDir's earlier no-follow
+    // traversal does not protect against a later replacement.
+    let pre_open_metadata = checked_regular_file(path, canonical_scan_root)?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .with_context(|| format!("metadata for opened {}", path.display()))?;
+    if !opened_metadata.is_file() {
+        anyhow::bail!("opened non-file path {}", path.display());
+    }
+    let post_open_metadata = checked_regular_file(path, canonical_scan_root)?;
+
+    #[cfg(unix)]
+    {
+        ensure_same_unix_file_identity(&pre_open_metadata, &opened_metadata, path)?;
+        ensure_same_unix_file_identity(&post_open_metadata, &opened_metadata, path)?;
+    }
+    #[cfg(not(unix))]
+    {
+        // Rust's portable file API has no descriptor-relative no-follow open
+        // or stable file identity. The adjacent second lstat/canonical-root
+        // check above confirms the path is currently a regular in-root file,
+        // but cannot prove it is the same object as the opened handle under
+        // concurrent replacement. Metadata and bytes remain descriptor-based;
+        // callers must treat this as best-effort TOCTOU mitigation.
+        let _ = (&pre_open_metadata, &post_open_metadata);
+    }
+    Ok((file, hashed_file_metadata(&opened_metadata)))
+}
+
+#[cfg(unix)]
+fn ensure_same_unix_file_identity(
+    expected: &Metadata,
+    opened: &Metadata,
+    path: &Path,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if expected.dev() != opened.dev() || expected.ino() != opened.ino() {
+        anyhow::bail!("file changed while opening {}", path.display());
+    }
+    Ok(())
+}
+
+fn hash_open_file(file: File, metadata: HashedFileMetadata) -> Result<HashedFile> {
+    let mut reader = BufReader::new(file);
     let mut blake3_hasher = blake3::Hasher::new();
     let mut sha256_hasher = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
@@ -1374,24 +1605,13 @@ struct HashedFileMetadata {
     mode: Option<u32>,
 }
 
-fn file_metadata(path: &Path) -> Result<HashedFileMetadata> {
-    let metadata = path_metadata(path)?;
-    Ok(HashedFileMetadata {
-        size: metadata.size,
-        ctime: metadata.ctime,
-        mtime: metadata.mtime,
-        mode: metadata.mode,
-    })
-}
-
-fn path_metadata(path: &Path) -> Result<HashedFileMetadata> {
-    let metadata = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    Ok(HashedFileMetadata {
+fn hashed_file_metadata(metadata: &Metadata) -> HashedFileMetadata {
+    HashedFileMetadata {
         size: metadata.len(),
-        ctime: ctime(&metadata),
+        ctime: ctime(metadata),
         mtime: metadata.modified().ok().map(system_time_to_rfc3339),
-        mode: mode(&metadata),
-    })
+        mode: mode(metadata),
+    }
 }
 
 fn system_time_to_rfc3339(time: SystemTime) -> String {
@@ -1783,6 +2003,242 @@ mod tests {
         assert_eq!(summary.file_count, 3);
         let paths = physical_file_paths(&db, &summary.scan_id);
         assert_eq!(paths, vec!["keep.txt", "skip-dir/hidden.txt", "skip.tmp"]);
+    }
+
+    #[test]
+    fn run_prepared_scan_marks_reserved_scan_failed_after_an_ordinary_error() {
+        let root = test_root("scan-finalization-on-error");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(&location_root).unwrap();
+        std::fs::write(location_root.join("one.txt"), b"one").unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+        let prepared = prepare_scan(&db, "test", Path::new("/")).unwrap();
+        let scan_id = prepared.scan_id.clone();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER force_running_scan_count_failure
+            BEFORE UPDATE OF file_count ON scans
+            WHEN NEW.status = 'running'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced running scan count failure');
+            END;
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = run_prepared_scan(&db, prepared, None)
+            .expect_err("the trigger should force a normal scan error");
+        assert!(
+            error
+                .to_string()
+                .contains("forced running scan count failure"),
+            "{error:#}"
+        );
+        let scan = db.scan_by_id(&scan_id).unwrap().unwrap();
+        assert_eq!(scan.status, "failed");
+        assert!(scan.finished_at.is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn progress_finish_honors_a_failed_summary_with_one_failed_terminal_event() {
+        let terminal_events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded_events = Arc::clone(&terminal_events);
+        let progress = ScanProgressStore::with_events(EventHub::with_recorder(move |event| {
+            if matches!(
+                event.kind.as_str(),
+                "scan_finished" | "scan_failed" | "scan_stopped"
+            ) {
+                recorded_events.lock().unwrap().push(event.kind.clone());
+            }
+        }));
+        let prepared = PreparedScan {
+            scan_id: "failed-summary-progress".to_string(),
+            location: Location {
+                id: "location".to_string(),
+                slug: "test".to_string(),
+                name: "Test".to_string(),
+                kind: LocationType::Local,
+                root_path: PathBuf::from("/tmp"),
+                notes: None,
+                representative_scan_id: None,
+                disabled: false,
+                created_at: "2026-07-15T00:00:00Z".to_string(),
+            },
+            scan_root: PathBuf::from("/tmp"),
+            reuse_from_scan_id: None,
+            reusable_files: HashMap::new(),
+        };
+        progress.start(&prepared);
+        progress.finish(&ScanSummary {
+            scan_id: prepared.scan_id.clone(),
+            status: "failed".to_string(),
+            file_count: 0,
+            dir_count: 1,
+            error_count: 1,
+            total_bytes: 0,
+        });
+
+        let state = progress.get(&prepared.scan_id).unwrap();
+        assert_eq!(state.status, "failed");
+        assert_eq!(state.file_count, 0);
+        assert_eq!(state.dir_count, 1);
+        assert_eq!(state.error_count, 1);
+        assert!(state
+            .message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Failed:")));
+        assert_eq!(
+            *terminal_events.lock().unwrap(),
+            vec!["scan_failed".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_recheck_turns_a_late_symlink_replacement_into_an_error_row() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("late-symlink-replacement");
+        let scan_root = root.join("scan");
+        let outside = root.join("outside.txt");
+        std::fs::create_dir_all(&scan_root).unwrap();
+        std::fs::write(scan_root.join("candidate.txt"), b"inside").unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+
+        let (work_tx, work_rx) = sync_channel(1);
+        work_tx
+            .send(WorkItem {
+                absolute_path: scan_root.join("candidate.txt"),
+                relative_path: "candidate.txt".to_string(),
+                stored_path: "candidate.txt".to_string(),
+                name: "candidate.txt".to_string(),
+                kind: WorkKind::File,
+            })
+            .unwrap();
+        std::fs::remove_file(scan_root.join("candidate.txt")).unwrap();
+        symlink(&outside, scan_root.join("candidate.txt")).unwrap();
+        drop(work_tx);
+
+        let (hash_tx, _hash_rx) = sync_channel(1);
+        let (result_tx, result_rx) = sync_channel(1);
+        metadata_worker(
+            Arc::new(Mutex::new(work_rx)),
+            hash_tx,
+            result_tx,
+            None,
+            "scan".to_string(),
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            &scan_root.canonicalize().unwrap(),
+        );
+
+        match result_rx.recv().unwrap() {
+            PipelineResult::Error { row, message, .. } => {
+                assert!(message.contains("refusing symlink file"), "{message}");
+                assert_eq!(row.path, "candidate.txt");
+                assert!(row.error.is_some());
+                assert!(row.blake3.is_empty());
+                assert!(row.sha256.is_empty());
+            }
+            _ => panic!("late symlink must not become a successful file row"),
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_metadata_recheck_turns_a_late_symlink_replacement_into_a_dir_error_row() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("late-directory-symlink-replacement");
+        let scan_root = root.join("scan");
+        let outside = root.join("outside");
+        let candidate = scan_root.join("candidate");
+        std::fs::create_dir_all(&candidate).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let (work_tx, work_rx) = sync_channel(1);
+        work_tx
+            .send(WorkItem {
+                absolute_path: candidate.clone(),
+                relative_path: "candidate".to_string(),
+                stored_path: "candidate".to_string(),
+                name: "candidate".to_string(),
+                kind: WorkKind::Dir,
+            })
+            .unwrap();
+        std::fs::remove_dir(&candidate).unwrap();
+        symlink(&outside, &candidate).unwrap();
+        drop(work_tx);
+
+        let (hash_tx, _hash_rx) = sync_channel(1);
+        let (result_tx, result_rx) = sync_channel(1);
+        metadata_worker(
+            Arc::new(Mutex::new(work_rx)),
+            hash_tx,
+            result_tx,
+            None,
+            "scan".to_string(),
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            &scan_root.canonicalize().unwrap(),
+        );
+
+        match result_rx.recv().unwrap() {
+            PipelineResult::Error { row, message, .. } => {
+                assert!(message.contains("refusing symlink directory"), "{message}");
+                assert_eq!(row.kind, "dir");
+                assert_eq!(row.path, "candidate");
+                assert!(row.error.is_some());
+                assert_eq!(row.size, 0);
+                assert!(row.ctime.is_none());
+                assert!(row.mtime.is_none());
+                assert!(row.mode.is_none());
+            }
+            _ => panic!("late symlink must not become a successful directory row"),
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_identity_check_rejects_a_file_replacement_between_recheck_and_open() {
+        let root = test_root("late-file-replacement");
+        let scan_root = root.join("scan");
+        std::fs::create_dir_all(&scan_root).unwrap();
+        let candidate = scan_root.join("candidate.txt");
+        let replacement = scan_root.join("replacement.txt");
+        std::fs::write(&candidate, b"old").unwrap();
+        std::fs::write(&replacement, b"replacement").unwrap();
+        let canonical_root = scan_root.canonicalize().unwrap();
+
+        let expected = checked_regular_file(&candidate, &canonical_root).unwrap();
+        std::fs::rename(&replacement, &candidate).unwrap();
+        let opened = File::open(&candidate).unwrap().metadata().unwrap();
+        let error = ensure_same_unix_file_identity(&expected, &opened, &candidate)
+            .expect_err("replacement between check and open must be rejected");
+        assert!(error.to_string().contains("file changed while opening"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

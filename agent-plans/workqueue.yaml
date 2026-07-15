@@ -4,7 +4,7 @@ queue:
   subject: file-census production rebuild and acceptance
   coordinator: root
   created_at: 2026-07-15T05:45:00Z
-  updated_at: 2026-07-15T12:31:00Z
+  updated_at: 2026-07-15T12:59:00Z
 tasks:
   - id: rebuild-requirements-ledger
     work: Recreate durable product requirements, plans, AGENTS guidance, and a clean acceptance ledger with no inherited implementation claims.
@@ -60,7 +60,7 @@ tasks:
       - native-bundle-icon-assets
     priority: 96
     created_at: 2026-07-15T08:45:00Z
-    outcome: Exact PostCSS and Tailwind source configs are restored, and root Justfile recipes now enter the declared Nix shell for both frontend and Rust commands. The remaining gate is an empty ui/dist, an incomplete ignored ui/node_modules store with no executable Vite links, no canonical frontend lockfile, no ambient Node/Rust toolchain, and an external untracked Cargo.lock. An unproven working-tree flake.lock is present but is not yet canonical evidence; preserve it without staging and verify its provenance under explicit build-input approval. Full macOS app packaging also needs full Xcode rather than Command Line Tools. This work needs explicit approval before network or high-disk writes.
+    outcome: Exact PostCSS and Tailwind source configs are restored, and root Justfile recipes now enter the declared Nix shell for both frontend and Rust commands. A fresh read-only audit confirms the host has only nix/just, ui/dist is empty, ui/node_modules has no usable Vite/Tauri executables, no canonical frontend lockfile exists, target contains no backend/native executable or app, and full Xcode is not selected. An external untracked Cargo.lock and working-tree flake.lock remain unproven; preserve them without staging and verify their provenance under explicit build-input approval. This work needs explicit approval before network or high-disk writes.
     resources:
       - user-approval-for-network-and-build-artifacts
 
@@ -75,7 +75,7 @@ tasks:
     claim:
       owner: root
       started_at: 2026-07-15T08:41:00Z
-    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, a legacy-safe Unknown location-kind migration, scan-aware folder authorization, and one DB-level visible action resolver for open/reveal. Thumbnail batches reauthorize each candidate and browser/native source tests now assert equivalent visible-offset and excluded-path behavior. Browser/native details use visible media sources and WebSocket lag is recoverable. Remaining work is Rust compile proof plus real scanner controls/dashboard/shell contracts; none imply runtime success.
+    outcome: The database now supplies snapshot-scoped tree/search/occurrence pages, protected visible deletion, duplicate-cache status, update-scan seed/create support, a legacy-safe Unknown location-kind migration, scan-aware folder authorization, and one DB-level visible action resolver for open/reveal. Thumbnail batches reauthorize each candidate and browser/native source tests now assert equivalent visible-offset and excluded-path behavior. Browser/native details use visible media sources and WebSocket lag is recoverable. Scanner source now has independently reviewed ordinary-error finalization, failed-summary terminal-event parity, transactional progress-count/cache updates, cache-delete-only terminal fallback, directory rechecks, and bounded file replacement checks. Compilation and runtime proof remain pending.
 
   - id: production-shell-and-routing
     work: Build the real dark application shell, routing, persisted collapsible sidebar, and main-top-bar Cmd-K foundation.
@@ -160,16 +160,19 @@ tasks:
     claim:
       owner: root
       started_at: 2026-07-15T11:27:00Z
-    outcome: Bounded authoritative active-operation telemetry is now present in source with stable oldest-first projection and cleanup coverage. The Ratatui/Crossterm dependency, renderer, and terminal acceptance remain intentionally unstarted until approved reproducible inputs are available.
+    outcome: Bounded authoritative active-operation telemetry is now present in source with stable oldest-first projection and cleanup coverage. A read-only seam audit confirms `run_prepared_scan_cli` owns the local worker, event stream, progress store, and final summary; `--tui` should be limited to local scan runners, conflict with JSON, and fall back to plain output on non-TTY. The Ratatui/Crossterm dependency, renderer, and terminal acceptance remain intentionally unstarted until approved reproducible inputs are available.
 
   - id: scanner-containment-atomicity
-    work: "Eliminate or explicitly constrain the remaining scanner P2s: post-discovery filesystem replacement races and update-scan setup orphan records. Use a durable, reviewed design; do not claim final quality while either remains unresolved."
-    status: open
+    work: "Eliminate or explicitly constrain remaining scanner lifecycle risks: persistent runner-error finalization (P1), post-discovery filesystem replacement races (P2), and update-scan setup atomicity. Use a durable, reviewed design; do not claim final quality while any remains unresolved."
+    status: claimed
     prerequisites:
       - backend-domain-foundation
     priority: 85
     created_at: 2026-07-15T09:27:00Z
-    outcome: Static root containment is complete. Portable no-follow descriptor traversal needs an explicit design decision, while update-scan setup should use a short atomic database seed transaction.
+    claim:
+      owner: root
+      started_at: 2026-07-15T12:59:00Z
+    outcome: Update-scan setup is source-atomic for ordinary setup failures. The reviewed scanner repair now finalizes ordinary runner errors, preserves failed terminal events, atomically couples progress counts to cache invalidation, safely falls back to terminal status on a cache-delete-only failure, and bounds late file/directory replacement. Portable descriptor-relative no-follow traversal, crash/panic stale-run reconciliation, and toolchain-backed tests remain open.
 
   - id: browser-native-accessibility-matrix
     work: Prove browser-server, native/Tauri, keyboard/accessibility, destructive-fixture, and transport behavior on the rebuilt product.
