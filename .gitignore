@@ -1,0 +1,11 @@
+target/
+src/native_app/target/
+src/native_app/gen/
+ui/node_modules/
+ui/dist/
+.vite/
+*.db
+*.db.bak
+*.db-shm
+*.db-wal
+.DS_Store

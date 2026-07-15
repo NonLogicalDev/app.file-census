@@ -64,6 +64,8 @@ The original visual reference image and prototype commit are missing. Build real
 - The complete-read recovery tool now accepts only declared `sed` ranges with exact multi-line overlap and validates range coverage; optional per-segment source logs retain backwards compatibility with existing root-level seed logs. Its full-seed validation passed after adding the June 14 `App.jsx` seed.
 - `ui/src/App.jsx` is now promoted from that June 14 complete-read seed (1,737 lines, 69,800 bytes, SHA-256 `2b15df6cfc1d9c16df27e375450293e20b5eed4ba09dc7a3c94131f8bd0395db`). Its 47-file/113-edge reachable relative-import closure has no unresolved edge. It supersedes the earlier June 13 App snapshot without relying on the historic patch conflict.
 - `src/backend/src/scanner.rs` is now promoted from a later June 13 complete-read seed (1,385 lines, 44,905 bytes, SHA-256 `c4f329308c5cf95cbfef88c335289cc1cc6d313842a1de48af793ea0dd674579`). Static module resolution found its new `ignore` dependency declared, but confirmed that `db::build_scan_exclude_matcher` and `db::scan_path_is_excluded` are absent from the currently recovered `db.rs`; recover a compatible later database horizon before any compile claim.
+- The checkout currently has no `flake.nix`, `flake.lock`, `shell.nix`, or historical `.gitignore` hierarchy, even though the historical `Justfile` expects `nix develop -c cargo`. The user raised these as likely deleted source artifacts; recovery is now searching only direct pre-deletion evidence before any replacement is considered.
+- Exact direct evidence restored root `flake.nix` (53 lines, SHA-256 `67e971487a4c253bdd71bf1a5b390fff0f09ab8eefb9e3b47783a0668a9b7752`) and root `.gitignore` (11 lines, SHA-256 `4e8ceb4b4ae47e01a6e8c1da7e6f81cd61e14b1580ae41bceb8a81aa3774ba55`). `flake.lock` is only known to have been generated/staged, so it remains absent; no nested ignore or alternate shell file is claimed without further evidence.
 
 # Work Log
 
@@ -83,6 +85,7 @@ The original visual reference image and prototype commit are missing. Build real
 - [x] 2026-07-15 00:47 - Promoted 41 exact-replayed historical plan files plus provenance/report into `agent-plans/recovered/historical/`; verified all 41 manifest hashes and recorded the 25 deliberate omissions.
 - [x] 2026-07-15 00:59 - Extended the complete-read verifier with strict declared-range multi-line overlap support, materialized the later June 14 `App.jsx` seed, promoted it byte-for-byte, and rechecked the 47-file React import closure.
 - [x] 2026-07-15 01:11 - Materialized and promoted the later exact 1,385-line `scanner.rs` seed, byte-verified it, and identified the two missing exclusion helpers required from a compatible `db.rs` horizon.
+- [x] 2026-07-15 01:20 - Recovered and byte-verified exact root `flake.nix` and `.gitignore` blobs from direct successful evidence; left unrecoverable `flake.lock` and unproven nested artifacts absent.
 - [ ] 2026-07-15 00:22 - Resolve the remaining `cli.rs` source horizon, compatible database exclusion helpers, native bundle assets, and then run bounded dependency/build validation before treating the recovered checkout as runnable.
 - [ ] 2026-07-15 00:08 - Produce strict, source-only temporary closures for backend/native, React boot, and recoverable `agent-plans/` entries before any checkout promotion.
 
@@ -94,4 +97,5 @@ The original visual reference image and prototype commit are missing. Build real
 - [ ] Keep the 25 unrecoverable historical plan paths absent rather than fabricating them; use the archival manifest as provenance if a later recovery source appears.
 - [ ] Recover or deliberately re-establish reproducible Node/Rust dependency inputs before the first bounded UI/backend build; keep `ui/dist`, build caches, and generated assets out of source recovery evidence.
 - [ ] Recover or obtain approval for the missing native PNG/ICNS bundle assets; do not substitute the recovered SVG candidates automatically.
+- [ ] Keep `flake.lock`, alternate Nix shell files, and nested `.gitignore` paths absent until direct historical evidence proves their full content; keep externally created package-manager artifacts unmodified until provenance is known.
 - [ ] Complete every implementation and verification step above.
