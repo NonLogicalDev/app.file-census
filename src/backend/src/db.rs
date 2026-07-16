@@ -3718,6 +3718,18 @@ fn delete_check_for_selection(
                    ) AS scan_id
             FROM locations l
             WHERE l.disabled = 0 AND l.id != (SELECT location_id FROM selected_scan)
+        ),
+        -- Materialize the set of (blake3, size) present in any other in-scope
+        -- location exactly once, instead of a correlated per-candidate-file
+        -- subquery over the whole files table (plan-036 `other_hashes` CTE).
+        other_hashes AS (
+            SELECT DISTINCT other.blake3, other.size
+            FROM files other
+            LEFT JOIN excluded_file_ids excluded_other ON excluded_other.id = other.id
+            JOIN duplicate_scope ds ON ds.scan_id = other.scan_id
+            WHERE excluded_other.id IS NULL
+              AND other.kind = 'file'
+              AND other.error IS NULL
         )
         SELECT f.name, f.path, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode
         FROM files f
@@ -3743,14 +3755,9 @@ fn delete_check_for_selection(
           )
           AND NOT EXISTS (
               SELECT 1
-              FROM files other
-              LEFT JOIN excluded_file_ids excluded_other ON excluded_other.id = other.id
-              JOIN duplicate_scope ds ON ds.scan_id = other.scan_id
-              WHERE excluded_other.id IS NULL
-                AND other.kind = 'file'
-                AND other.error IS NULL
-                AND other.size = f.size
-                AND other.blake3 = f.blake3
+              FROM other_hashes oh
+              WHERE oh.blake3 = f.blake3
+                AND oh.size = f.size
           )
         ORDER BY f.path
         "#,
