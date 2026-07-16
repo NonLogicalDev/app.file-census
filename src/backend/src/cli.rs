@@ -856,7 +856,36 @@ fn run_scans(
     server: Option<&str>,
 ) -> Result<()> {
     match command.command {
-        ScanSubcommand::BenchmarkDiscovery(_) => unavailable_command("scans benchmark-discovery"),
+        ScanSubcommand::BenchmarkDiscovery(args) => {
+            let stop_after = args.stop_after_ms.map(Duration::from_millis);
+            let excludes = if args.excludes.is_empty() {
+                None
+            } else {
+                Some(args.excludes.as_slice())
+            };
+            let stats =
+                scanner::benchmark_discovery(&args.path, excludes, args.threads, stop_after)?;
+            emit(&stats, json, |stats| {
+                println!(
+                    "discovered {} entries ({} files, {} dirs, {} errors) in {} ms",
+                    stats.entries, stats.files, stats.dirs, stats.errors, stats.elapsed_ms
+                );
+                println!(
+                    "  {:.0} entries/s | first entry {} ms | first file {} ms | {} threads",
+                    stats.entries_per_sec,
+                    stats.first_entry_ms.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
+                    stats.first_file_ms.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
+                    stats.threads
+                );
+                if stats.stop_requested {
+                    println!(
+                        "  stop requested; took effect in {} ms",
+                        stats.stop_latency_ms.unwrap_or(0)
+                    );
+                }
+                Ok(())
+            })
+        }
         ScanSubcommand::Running => run_server_scan_request(server, "scans.running", None, json),
         ScanSubcommand::Progress(args) => run_server_scan_request(
             server,

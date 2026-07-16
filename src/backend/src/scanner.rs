@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -718,6 +718,93 @@ pub fn prepare_repair_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         seeded_file_count,
         seeded_total_bytes,
     })
+}
+
+/// Discovery-only traversal measurements for benchmarking file-census against
+/// tools like `dua-cli`/DaisyDisk (plan-036). No metadata, hashing, or DB work.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DiscoveryStats {
+    pub entries: u64,
+    pub files: u64,
+    pub dirs: u64,
+    pub errors: u64,
+    pub elapsed_ms: u64,
+    pub first_entry_ms: Option<u64>,
+    pub first_file_ms: Option<u64>,
+    pub first_dir_ms: Option<u64>,
+    pub entries_per_sec: f64,
+    pub files_per_sec: f64,
+    pub dirs_per_sec: f64,
+    pub threads: usize,
+    pub stop_requested: bool,
+    pub stop_latency_ms: Option<u64>,
+}
+
+/// Walks `source` and records discovery latency/throughput. When `stop_after`
+/// is set, requests a stop once that budget elapses and records how long the
+/// stop took to take effect (`Duration::ZERO` is a deterministic stop probe).
+pub fn benchmark_discovery(
+    source: &Path,
+    excludes: Option<&[String]>,
+    threads: Option<usize>,
+    stop_after: Option<Duration>,
+) -> Result<DiscoveryStats> {
+    let canonical = canonical_directory(source, "benchmark source")?;
+    let matcher = build_scan_exclude_matcher(excludes.unwrap_or(&[]))?;
+    let mut stats = DiscoveryStats {
+        threads: threads.unwrap_or_else(hash_worker_count).max(1),
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let mut stop_requested_at: Option<Instant> = None;
+
+    for entry in WalkDir::new(&canonical).follow_links(false) {
+        if let Some(after) = stop_after {
+            if stop_requested_at.is_none() && started.elapsed() >= after {
+                stop_requested_at = Some(Instant::now());
+                stats.stop_requested = true;
+            }
+        }
+        if let Some(at) = stop_requested_at {
+            stats.stop_latency_ms = Some(at.elapsed().as_millis() as u64);
+            break;
+        }
+
+        match entry {
+            Ok(entry) => {
+                let is_dir = entry.file_type().is_dir();
+                if let Some(matcher) = &matcher {
+                    let relative = entry.path().strip_prefix(&canonical).unwrap_or(entry.path());
+                    if !relative.as_os_str().is_empty()
+                        && matcher
+                            .matched_path_or_any_parents(relative, is_dir)
+                            .is_ignore()
+                    {
+                        continue;
+                    }
+                }
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                stats.entries += 1;
+                stats.first_entry_ms.get_or_insert(elapsed_ms);
+                if is_dir {
+                    stats.dirs += 1;
+                    stats.first_dir_ms.get_or_insert(elapsed_ms);
+                } else if entry.file_type().is_file() {
+                    stats.files += 1;
+                    stats.first_file_ms.get_or_insert(elapsed_ms);
+                }
+            }
+            Err(_) => stats.errors += 1,
+        }
+    }
+
+    let elapsed = started.elapsed();
+    stats.elapsed_ms = elapsed.as_millis() as u64;
+    let secs = elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+    stats.entries_per_sec = stats.entries as f64 / secs;
+    stats.files_per_sec = stats.files as f64 / secs;
+    stats.dirs_per_sec = stats.dirs as f64 / secs;
+    Ok(stats)
 }
 
 pub fn run_prepared_scan(
@@ -1852,6 +1939,28 @@ mod tests {
         control.request_stop();
         handle.join().unwrap();
         assert!(control.is_stopped());
+    }
+
+    #[test]
+    fn benchmark_discovery_counts_entries_and_supports_stop_probe() {
+        let root = test_root("benchmark-discovery");
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a.txt"), b"a").unwrap();
+        std::fs::write(src.join("sub/b.txt"), b"b").unwrap();
+
+        let stats = benchmark_discovery(&src, None, Some(2), None).unwrap();
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.files, 2);
+        assert!(stats.dirs >= 1);
+        assert!(stats.first_entry_ms.is_some());
+
+        // Deterministic stop probe: stop is requested up front.
+        let stopped = benchmark_discovery(&src, None, Some(2), Some(Duration::ZERO)).unwrap();
+        assert!(stopped.stop_requested);
+        assert!(stopped.stop_latency_ms.is_some());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn physical_file_paths(db: &Database, scan_id: &str) -> Vec<String> {
