@@ -121,7 +121,7 @@ feature or perf loss; **P3** cleanup.
 | 8 | **UI recovery-horizon gap** — promoted production UI is pre-redesign June source; the July shadcn redesign survives only as excluded diff events. Being backfilled by re-porting the prototype screen-by-screen. | 065 | Tasks + Locations ported (commits 4066e66, c71ab0b) | P2 |
 | 11 | **Scanner throughput regressions (plan-036)** — DONE(batch): write batch was `25` for progress scans / `500` CLI (plan-036 set **2,048** for both) — fixed. DEFERRED(arch): discovery→metadata handoff bounded at `sync_channel(512)` and hash queue `sync_channel(128)` (plan-036/041 unbounded), and scanning is interleaved rather than two-phase (discover-all → enrich); coupled + memory-sensitive, needs a scanner-architecture plan. | 036,041 | scanner.rs:570,595-596 | P2 |
 | 9 | ✅ DONE — `scans nickname`. Added `Database::update_scan_nickname` (the `nickname` column already existed) and wired the CLI; empty string clears. Verified end-to-end. | — | cli.rs:958 | P3 |
-| 10 | Redundant test-only `scan_tree` still computes duplicate counts inline (slow subqueries); only used by 2 tests. Remove or unify with `scan_tree_page`. | 032 | db.rs:1664 | P3 |
+| 10 | ✅ DONE — Removed the redundant `scan_tree` (inline dup-count subqueries); migrated its 2 tests to `scan_tree_page`. Also removed the now-dead `unavailable_command` helper — every previously-stubbed CLI command is implemented. | 032 | db.rs | P3 |
 
 ## Unfinished Work
 

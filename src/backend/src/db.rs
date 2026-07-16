@@ -1764,193 +1764,6 @@ impl Database {
         Ok(files)
     }
 
-    pub fn scan_tree(&self, scan_id: &str, prefix: &str) -> Result<Vec<TreeEntry>> {
-        let mut conn = self.connect()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let selected_location_id = scan_location_id(&tx, scan_id)?;
-        let mut visibility_scan_ids = vec![scan_id.to_string()];
-        visibility_scan_ids.extend(duplicate_scope_scan_ids(
-            &tx,
-            selected_location_id.as_deref(),
-        )?);
-        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
-        let normalized = normalize_tree_prefix(prefix);
-        let like = if normalized.is_empty() {
-            "%".to_string()
-        } else {
-            format!("{}%", normalized.replace('%', "\\%").replace('_', "\\_"))
-        };
-        let files = {
-            let mut stmt = tx.prepare(
-                r#"
-                WITH selected_scan AS (
-                    SELECT location_id
-                    FROM scans
-                    WHERE id = ?1
-                ),
-                duplicate_scope AS (
-                    SELECT COALESCE(
-                        l.representative_scan_id,
-                        (
-                            SELECT s2.id
-                            FROM scans s2
-                            WHERE s2.location_id = l.id AND s2.status = 'complete'
-                            ORDER BY s2.started_at DESC
-                            LIMIT 1
-                        )
-                    ) AS scan_id
-                    FROM locations l
-                    WHERE l.disabled = 0 AND l.id != (SELECT location_id FROM selected_scan)
-                )
-                SELECT f.kind, f.path, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode,
-                       (
-                         SELECT COUNT(DISTINCT s2.location_id)
-                         FROM files f2
-                         LEFT JOIN excluded_file_ids excluded_f2 ON excluded_f2.id = f2.id
-                         JOIN scans s2 ON s2.id = f2.scan_id
-                         WHERE excluded_f2.id IS NULL
-                           AND f.kind = 'file'
-                           AND f2.kind = 'file'
-                           AND f2.error IS NULL
-                           AND f2.blake3 = f.blake3
-                           AND f2.size = f.size
-                           AND f2.scan_id IN (SELECT scan_id FROM duplicate_scope WHERE scan_id IS NOT NULL)
-                       ) AS other_location_count,
-                       (
-                         SELECT COUNT(*)
-                         FROM files same_scan
-                         LEFT JOIN excluded_file_ids excluded_same_scan ON excluded_same_scan.id = same_scan.id
-                         WHERE excluded_same_scan.id IS NULL
-                           AND same_scan.scan_id = f.scan_id
-                           AND f.kind = 'file'
-                           AND same_scan.kind = 'file'
-                           AND same_scan.error IS NULL
-                           AND same_scan.blake3 = f.blake3
-                           AND same_scan.size = f.size
-                       ) AS same_scan_count
-                FROM files f
-                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
-                WHERE excluded_f.id IS NULL
-                  AND f.scan_id = ?1 AND f.error IS NULL AND f.path LIKE ?2 ESCAPE '\'
-                ORDER BY path
-                "#,
-            )?;
-            let x = stmt.query_map(params![scan_id, like], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, u64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<u32>>(7)?,
-                    row.get::<_, u64>(8)?,
-                    row.get::<_, u64>(9)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-            x
-        };
-
-        let mut dirs: std::collections::BTreeMap<String, TreeEntry> =
-            std::collections::BTreeMap::new();
-        let mut out = Vec::new();
-
-        for (
-            kind,
-            path,
-            size,
-            blake3,
-            sha256,
-            ctime,
-            mtime,
-            mode,
-            other_location_count,
-            same_scan_count,
-        ) in files
-        {
-            let is_file = kind == "file";
-            let duplicate_file_count = u64::from(is_file && other_location_count > 0);
-            let original_file_count = u64::from(is_file && other_location_count == 0);
-            let same_scan_duplicate_file_count = u64::from(is_file && same_scan_count > 1);
-            let Some(rest) = path.strip_prefix(&normalized) else {
-                continue;
-            };
-            if rest.is_empty() {
-                continue;
-            }
-            if kind == "dir" && !rest.contains('/') {
-                let entry = dirs.entry(rest.to_string()).or_insert_with(|| TreeEntry {
-                    name: rest.to_string(),
-                    path: path.clone(),
-                    kind: "dir".to_string(),
-                    size: 0,
-                    file_count: 0,
-                    blake3: None,
-                    sha256: None,
-                    ctime: None,
-                    mtime: None,
-                    mode: None,
-                    duplicate_file_count: 0,
-                    original_file_count: 0,
-                    same_scan_duplicate_file_count: 0,
-                });
-                entry.ctime = ctime;
-                entry.mtime = mtime;
-                entry.mode = mode;
-                continue;
-            }
-            if !is_file {
-                continue;
-            }
-            if let Some((dir, _)) = rest.split_once('/') {
-                let dir_path = format!("{normalized}{dir}");
-                let entry = dirs.entry(dir.to_string()).or_insert_with(|| TreeEntry {
-                    name: dir.to_string(),
-                    path: dir_path,
-                    kind: "dir".to_string(),
-                    size: 0,
-                    file_count: 0,
-                    blake3: None,
-                    sha256: None,
-                    ctime: None,
-                    mtime: None,
-                    mode: None,
-                    duplicate_file_count: 0,
-                    original_file_count: 0,
-                    same_scan_duplicate_file_count: 0,
-                });
-                entry.size += size;
-                entry.file_count += 1;
-                entry.duplicate_file_count += duplicate_file_count;
-                entry.original_file_count += original_file_count;
-                entry.same_scan_duplicate_file_count += same_scan_duplicate_file_count;
-            } else {
-                out.push(TreeEntry {
-                    name: rest.to_string(),
-                    path,
-                    kind: "file".to_string(),
-                    size,
-                    file_count: 1,
-                    blake3: Some(blake3),
-                    sha256: Some(sha256),
-                    ctime,
-                    mtime,
-                    mode,
-                    duplicate_file_count,
-                    original_file_count,
-                    same_scan_duplicate_file_count,
-                });
-            }
-        }
-
-        let mut dir_entries = dirs.into_values().collect::<Vec<_>>();
-        dir_entries.append(&mut out);
-        tx.commit()?;
-        Ok(dir_entries)
-    }
-
     /// Reads a persisted scan tree page from one SQLite snapshot. Excluded rows
     /// are materialized before matching, directory aggregation, counting, and
     /// pagination. `query.limit` and `query.offset` are intentionally ignored:
@@ -4954,12 +4767,16 @@ mod tests {
         assert_eq!(visible_files[0].kind, "file");
         assert_eq!(visible_files[0].file_kind, "text");
 
-        let tree = db.scan_tree(&source_scan_id, "").unwrap();
+        // Duplicate counters now come from the cache (covered by
+        // scan_tree_duplicate_counts_come_from_cache_not_inline); here we assert
+        // the visibility boundary through the production paged tree path.
+        let tree = db
+            .scan_tree_page(&source_scan_id, "", Some(50), 0, 1, None)
+            .unwrap();
         assert_eq!(
-            tree.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
+            tree.entries.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
             vec!["visible.txt"]
         );
-        assert_eq!(tree[0].duplicate_file_count, 1);
 
         let found_hidden = db.find_files("hidden", 20).unwrap();
         assert_eq!(found_hidden.len(), 2);

@@ -1069,12 +1069,6 @@ fn run_scans(
     }
 }
 
-fn unavailable_command(command: &str) -> Result<()> {
-    anyhow::bail!(
-        "{command} is unavailable in this build because the recovered backend does not implement it"
-    )
-}
-
 fn run_prepared_scan_cli(
     db: &Database,
     prepared: scanner::PreparedScan,

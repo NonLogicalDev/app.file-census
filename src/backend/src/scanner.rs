@@ -2240,8 +2240,10 @@ mod tests {
 
         let deleted = db.delete_scan_path(&initial.scan_id, "sub").unwrap();
         assert_eq!(deleted, 2);
-        let after_delete = db.scan_tree(&initial.scan_id, "").unwrap();
-        assert!(after_delete.iter().all(|entry| entry.path != "sub"));
+        let after_delete = db
+            .scan_tree_page(&initial.scan_id, "", Some(50), 0, 1, None)
+            .unwrap();
+        assert!(after_delete.entries.iter().all(|entry| entry.path != "sub"));
 
         let prepared = prepare_update_scan(&db, &initial.scan_id).unwrap();
         let updated = run_prepared_scan(&db, prepared, None).unwrap();
