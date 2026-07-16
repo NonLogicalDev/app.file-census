@@ -63,6 +63,8 @@ pub async fn serve_listener(db_path: PathBuf, listener: tokio::net::TcpListener)
         .route("/api/scans/running", get(running_scans))
         .route("/api/scans/:id/progress", get(scan_progress))
         .route("/api/scans/:id/stop", post(stop_scan))
+        .route("/api/scans/:id/pause", post(pause_scan))
+        .route("/api/scans/:id/resume", post(resume_scan))
         .route("/api/scans/:id/files", get(scan_files))
         .route("/api/scans/:id/tree", get(scan_tree))
         .route("/api/scans/:id", delete(delete_scan))
@@ -254,6 +256,16 @@ async fn handle_rpc_result(
                 }),
             );
             Ok(serde_json::json!({ "stop_requested": requested }))
+        }
+        "scans.pause" => {
+            let params: ScanIdParams = decode_params(params)?;
+            let paused = state.progress.pause(&params.scan_id);
+            Ok(serde_json::json!({ "paused": paused }))
+        }
+        "scans.resume" => {
+            let params: ScanIdParams = decode_params(params)?;
+            let resumed = state.progress.resume(&params.scan_id);
+            Ok(serde_json::json!({ "resumed": resumed }))
         }
         "scans.delete" => {
             let params: ScanIdParams = decode_params(params)?;
@@ -928,6 +940,22 @@ async fn stop_scan(
         "scan_id": scan_id,
         "stop_requested": requested,
     })))
+}
+
+async fn pause_scan(
+    State(state): State<AppState>,
+    Path(scan_id): Path<String>,
+) -> ApiResult<Json<impl Serialize>> {
+    let paused = state.progress.pause(&scan_id);
+    Ok(Json(serde_json::json!({ "scan_id": scan_id, "paused": paused })))
+}
+
+async fn resume_scan(
+    State(state): State<AppState>,
+    Path(scan_id): Path<String>,
+) -> ApiResult<Json<impl Serialize>> {
+    let resumed = state.progress.resume(&scan_id);
+    Ok(Json(serde_json::json!({ "scan_id": scan_id, "resumed": resumed })))
 }
 
 #[derive(Deserialize)]

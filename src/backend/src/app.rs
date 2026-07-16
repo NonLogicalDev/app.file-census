@@ -140,6 +140,17 @@ impl AppCore {
                 );
                 Ok(serde_json::json!({ "stop_requested": requested }))
             }
+            "scans.pause" => {
+                let params: ScanIdParams = decode_params(params)?;
+                // pause() emits scan_paused when it takes effect.
+                let paused = self.progress.pause(&params.scan_id);
+                Ok(serde_json::json!({ "paused": paused }))
+            }
+            "scans.resume" => {
+                let params: ScanIdParams = decode_params(params)?;
+                let resumed = self.progress.resume(&params.scan_id);
+                Ok(serde_json::json!({ "resumed": resumed }))
+            }
             "scans.delete" => {
                 let params: ScanIdParams = decode_params(params)?;
                 self.progress.remove(&params.scan_id);

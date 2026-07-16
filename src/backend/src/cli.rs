@@ -864,8 +864,18 @@ fn run_scans(
             Some(serde_json::json!({ "scan_id": args.scan_id })),
             json,
         ),
-        ScanSubcommand::Pause(_) => unavailable_command("scans pause"),
-        ScanSubcommand::Resume(_) => unavailable_command("scans resume"),
+        ScanSubcommand::Pause(args) => run_server_scan_request(
+            server,
+            "scans.pause",
+            Some(serde_json::json!({ "scan_id": args.scan_id })),
+            json,
+        ),
+        ScanSubcommand::Resume(args) => run_server_scan_request(
+            server,
+            "scans.resume",
+            Some(serde_json::json!({ "scan_id": args.scan_id })),
+            json,
+        ),
         ScanSubcommand::Stop(args) => {
             run_server_scan_request(
                 server,
@@ -1397,6 +1407,16 @@ fn run_server_scan_request(
         "scans.stop" => {
             let scan_id = server_scan_id(params.as_ref())?;
             let path = format!("/api/scans/{}/stop", encode_path_segment(scan_id));
+            request_server_json(server, "POST", &path)?
+        }
+        "scans.pause" => {
+            let scan_id = server_scan_id(params.as_ref())?;
+            let path = format!("/api/scans/{}/pause", encode_path_segment(scan_id));
+            request_server_json(server, "POST", &path)?
+        }
+        "scans.resume" => {
+            let scan_id = server_scan_id(params.as_ref())?;
+            let path = format!("/api/scans/{}/resume", encode_path_segment(scan_id));
             request_server_json(server, "POST", &path)?
         }
         _ => anyhow::bail!("{method} is not supported by the running server API"),

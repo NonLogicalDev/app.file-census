@@ -4,7 +4,7 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::SystemTime;
 
@@ -79,10 +79,52 @@ pub struct ScanPoolProgress {
     pub current_path: Option<String>,
 }
 
+/// Per-scan control shared with the worker pools. Stop is a one-way latch;
+/// pause is reversible and parks cooperating workers on the condvar until they
+/// are resumed or stopped.
+#[derive(Default)]
+pub struct ScanControl {
+    stop: AtomicBool,
+    paused: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl ScanControl {
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // Wake any parked workers so they observe the stop and drain/exit.
+        let _guard = self.paused.lock().expect("scan pause lock poisoned");
+        self.wake.notify_all();
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    fn set_paused(&self, value: bool) {
+        let mut paused = self.paused.lock().expect("scan pause lock poisoned");
+        *paused = value;
+        self.wake.notify_all();
+    }
+
+    fn is_paused(&self) -> bool {
+        *self.paused.lock().expect("scan pause lock poisoned")
+    }
+
+    /// Blocks while paused, returning as soon as the scan is resumed or stopped.
+    /// Cheap (one short lock) when not paused.
+    fn wait_while_paused(&self) {
+        let mut paused = self.paused.lock().expect("scan pause lock poisoned");
+        while *paused && !self.stop.load(Ordering::Relaxed) {
+            paused = self.wake.wait(paused).expect("scan pause wait poisoned");
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ScanProgressStore {
     inner: Arc<Mutex<std::collections::HashMap<String, ScanProgress>>>,
-    cancel: Arc<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
+    cancel: Arc<Mutex<std::collections::HashMap<String, Arc<ScanControl>>>>,
     events: Option<EventHub>,
 }
 
@@ -99,7 +141,7 @@ impl ScanProgressStore {
         self.cancel
             .lock()
             .expect("scan cancel lock poisoned")
-            .insert(scan.scan_id.clone(), Arc::new(AtomicBool::new(false)));
+            .insert(scan.scan_id.clone(), Arc::new(ScanControl::default()));
         let progress = ScanProgress {
             scan_id: scan.scan_id.clone(),
             location_slug: scan.location.slug.clone(),
@@ -253,15 +295,17 @@ impl ScanProgressStore {
             .remove(scan_id);
     }
 
-    pub fn stop(&self, scan_id: &str) -> bool {
-        let cancel = self
-            .cancel
+    fn control(&self, scan_id: &str) -> Option<Arc<ScanControl>> {
+        self.cancel
             .lock()
             .expect("scan cancel lock poisoned")
             .get(scan_id)
-            .cloned();
-        if let Some(cancel) = cancel {
-            cancel.store(true, Ordering::Relaxed);
+            .cloned()
+    }
+
+    pub fn stop(&self, scan_id: &str) -> bool {
+        if let Some(control) = self.control(scan_id) {
+            control.request_stop();
             self.update(scan_id, |progress| {
                 progress.status = "stopping".to_string();
                 progress.message = Some("Stop requested".to_string());
@@ -276,12 +320,64 @@ impl ScanProgressStore {
         }
     }
 
+    /// Requests a reversible pause. Returns false when the scan is unknown or
+    /// already stopping.
+    pub fn pause(&self, scan_id: &str) -> bool {
+        let Some(control) = self.control(scan_id) else {
+            return false;
+        };
+        if control.is_stopped() || control.is_paused() {
+            return false;
+        }
+        control.set_paused(true);
+        self.update(scan_id, |progress| {
+            progress.status = "paused".to_string();
+            progress.message = Some("Paused".to_string());
+            push_log(progress, "Pause requested".to_string());
+        });
+        if let Some(progress) = self.get(scan_id) {
+            self.emit("scan_paused", progress);
+        }
+        true
+    }
+
+    /// Resumes a paused scan. Returns false when the scan is unknown, stopping,
+    /// or not paused.
+    pub fn resume(&self, scan_id: &str) -> bool {
+        let Some(control) = self.control(scan_id) else {
+            return false;
+        };
+        if control.is_stopped() || !control.is_paused() {
+            return false;
+        }
+        control.set_paused(false);
+        self.update(scan_id, |progress| {
+            progress.status = "running".to_string();
+            progress.message = None;
+            push_log(progress, "Resumed".to_string());
+        });
+        if let Some(progress) = self.get(scan_id) {
+            self.emit("scan_resumed", progress);
+        }
+        true
+    }
+
+    /// Blocks the calling worker while the scan is paused. No-op when the scan
+    /// has no live control (e.g. a progress-less CLI/test scan).
+    pub fn wait_while_paused(&self, scan_id: &str) {
+        if let Some(control) = self.control(scan_id) {
+            control.wait_while_paused();
+        }
+    }
+
+    pub fn is_paused(&self, scan_id: &str) -> bool {
+        self.control(scan_id)
+            .is_some_and(|control| control.is_paused())
+    }
+
     pub fn is_stop_requested(&self, scan_id: &str) -> bool {
-        self.cancel
-            .lock()
-            .expect("scan cancel lock poisoned")
-            .get(scan_id)
-            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        self.control(scan_id)
+            .is_some_and(|control| control.is_stopped())
     }
 
     pub fn stopped(&self, scan_id: &str) {
@@ -812,6 +908,9 @@ fn discovery_worker(
         {
             break;
         }
+        if let Some(progress) = progress.as_ref() {
+            progress.wait_while_paused(&scan_id);
+        }
 
         let entry = match entry {
             Ok(entry) => entry,
@@ -863,6 +962,9 @@ fn metadata_worker(
             Ok(item) => item,
             Err(_) => break,
         };
+        if let Some(progress) = progress.as_ref() {
+            progress.wait_while_paused(&scan_id);
+        }
 
         let path = progress_path(&item.relative_path);
         let operation_id = pool_start(progress.as_ref(), &scan_id, PoolKind::Metadata, &path);
@@ -1054,6 +1156,9 @@ fn hash_worker(
             Ok(job) => job,
             Err(_) => break,
         };
+        if let Some(progress) = progress.as_ref() {
+            progress.wait_while_paused(&scan_id);
+        }
 
         let path = progress_path(&job.relative_path);
         let operation_id = pool_start(progress.as_ref(), &scan_id, PoolKind::Hashing, &path);
@@ -1649,6 +1754,32 @@ fn mode(_metadata: &std::fs::Metadata) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::db::{Location, LocationInput, LocationType};
+
+    #[test]
+    fn scan_control_parks_while_paused_and_wakes_on_resume_or_stop() {
+        use std::time::Duration;
+
+        let control = Arc::new(ScanControl::default());
+        assert!(!control.is_paused());
+
+        // A parked worker stays blocked until resumed.
+        control.set_paused(true);
+        let parked = control.clone();
+        let handle = thread::spawn(move || parked.wait_while_paused());
+        thread::sleep(Duration::from_millis(40));
+        assert!(!handle.is_finished(), "worker should still be parked while paused");
+        control.set_paused(false);
+        handle.join().unwrap();
+
+        // Stop while paused unblocks immediately, even though still paused.
+        control.set_paused(true);
+        let parked = control.clone();
+        let handle = thread::spawn(move || parked.wait_while_paused());
+        thread::sleep(Duration::from_millis(20));
+        control.request_stop();
+        handle.join().unwrap();
+        assert!(control.is_stopped());
+    }
 
     fn physical_file_paths(db: &Database, scan_id: &str) -> Vec<String> {
         let conn = db.connect().unwrap();
