@@ -129,7 +129,9 @@ export default function TasksPage({
   backgroundTasks = [],
   eventLog = [],
   busy = false,
-  onStopScan
+  onStopScan,
+  onPauseScan,
+  onResumeScan
 }) {
   const canStopScan = typeof onStopScan === 'function';
 
@@ -319,6 +321,16 @@ export default function TasksPage({
                   </div>
                 </div>
                 <div className="flex flex-none items-center gap-2">
+                  {selectedTask.isScan && selectedTask.status === 'paused' && typeof onResumeScan === 'function' && (
+                    <Button variant="secondary" onClick={() => onResumeScan(selectedTask.id)} disabled={busy} icon={<Icon name="refresh" />}>
+                      Resume
+                    </Button>
+                  )}
+                  {selectedTask.isScan && selectedTask.status === 'running' && typeof onPauseScan === 'function' && (
+                    <Button variant="secondary" onClick={() => onPauseScan(selectedTask.id)} disabled={busy} icon={<Icon name="pause" />}>
+                      Pause
+                    </Button>
+                  )}
                   {selectedTask.isScan && canStopScan && selectedTask.status !== 'stopping' && (
                     <Button variant="warning" onClick={() => onStopScan(selectedTask.id)} disabled={busy} icon={<Icon name="stop" />}>
                       Stop

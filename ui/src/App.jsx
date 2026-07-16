@@ -1226,6 +1226,35 @@ export default function App() {
     }
   }
 
+  async function startRepairScan(sourceScanId) {
+    setBusy(true);
+    try {
+      setDeleteCheck(null);
+      const sourceScan = latest.current.scans.find((scan) => scan.id === sourceScanId);
+      const result = await rpc('scans.repair', { scan_id: sourceScanId });
+      const slug = sourceScan?.location_slug || selectedLocationSlug;
+      const location = slug ? locationBySlug(slug) : selectedLocationValue;
+      setActiveTab('locations');
+      if (slug) setSelectedLocationSlug(slug);
+      setSelectedScanId(result.scan_id);
+      setSelectedPath('');
+      setScanSubviewState('files');
+      setSelectedGridPaths([]);
+      Object.assign(latest.current, { activeTab: 'locations', selectedLocationSlug: slug, selectedScanId: result.scan_id, selectedPath: '', scanSubview: 'files', selectedGridPaths: [] });
+      routeTo();
+      setScanProgress((current) => ({ ...current, [result.scan_id]: { scan_id: result.scan_id, location_slug: slug || '', location_name: location?.name || slug || '', status: 'running', file_count: 0, dir_count: 0, error_count: 0, total_bytes: 0, current_path: null, log: [`Repair scan queued from ${sourceScanId}`] } }));
+      setScans((current) => [{ id: result.scan_id, location_slug: slug || '', location_name: location?.name || slug || '', is_representative: false, status: 'running', file_count: 0, dir_count: 0, error_count: 0, total_bytes: 0, offset_path: sourceScan?.offset_path || '/', started_at: new Date().toISOString(), finished_at: null, notes: null }, ...current]);
+      setMessage('Repair scan started.');
+      hydrateProgress(result.scan_id);
+      scheduleTreeReload();
+      await loadTree('', { updateHistory: false });
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function chooseLocation(slug) {
     setDeleteCheck(null);
     setSelectedLocationSlug(slug);
@@ -1307,6 +1336,34 @@ export default function App() {
       const result = await rpc('scans.stop', { scan_id: scanId });
       if (result?.stop_requested) {
         markScanControlStatus(scanId, 'stopping', 'Stop requested');
+      }
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pauseScan(scanId) {
+    setBusy(true);
+    try {
+      const result = await rpc('scans.pause', { scan_id: scanId });
+      if (result?.paused) {
+        markScanControlStatus(scanId, 'paused', 'Paused');
+      }
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resumeScan(scanId) {
+    setBusy(true);
+    try {
+      const result = await rpc('scans.resume', { scan_id: scanId });
+      if (result?.resumed) {
+        markScanControlStatus(scanId, 'running', 'Resumed');
       }
     } catch (error) {
       setMessage(error.message);
@@ -1904,7 +1961,10 @@ export default function App() {
     onStartScan: startScan,
     onSelectScan: selectScan,
     onStopScan: stopScan,
+    onPauseScan: pauseScan,
+    onResumeScan: resumeScan,
     onUpdateScan: startUpdateScan,
+    onRepairScan: startRepairScan,
     onSetRepresentative: setRepresentativeScan,
     onClearRepresentative: clearRepresentativeScan,
     onRunDeleteCheck: runDeleteCheck,
@@ -2326,6 +2386,8 @@ export default function App() {
           eventLog={eventLog}
           busy={busy}
           onStopScan={stopScan}
+          onPauseScan={pauseScan}
+          onResumeScan={resumeScan}
         />
       )}
       {activeTab === 'locations' && <LocationsPage {...commonLocationProps} />}

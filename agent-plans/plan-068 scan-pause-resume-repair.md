@@ -44,9 +44,9 @@ files, respecting excludes.
 3. [x] Cooperative `wait_while_paused` at the top of discovery/metadata/hash worker loops.
 4. [x] RPC `scans.pause`/`scans.resume` in AppCore (native) + web dispatch.
 5. [x] CLI `scans pause`/`scans resume` via the server RPC client (un-stub).
-6. [ ] `Database::prepare_repair_scan` + repair skip logic + `scans.repair` RPC/CLI.
-7. [ ] UI: replace the "unavailable" callouts with real Pause/Resume/Repair actions.
-8. [x] Tests: pause/resume/stop-while-paused control-state test; repair seeding test.
+6. [x] `scanner::prepare_repair_scan` + seed-and-skip logic + `scans.repair` RPC (AppCore/web) + CLI.
+7. [x] UI: real Pause/Resume/Repair in FileExplorer toolbar + callouts, plus Pause/Resume in the Tasks console; command-palette guard test inverted.
+8. [x] Tests: pause/resume/stop-while-paused control-state test; repair seeding test; E2E repair.
 
 ## Learning Log
 
@@ -58,8 +58,11 @@ files, respecting excludes.
 ## Work Log
 
 - [x] 2026-07-16 00:50 - Created plan; mapped current stop-only control + worker loops.
+- [x] 2026-07-16 01:05 - Pause/resume: ScanControl + worker parking + RPC + CLI + control test.
+- [x] 2026-07-16 01:25 - Repair: prepare_repair_scan seed-and-skip + honest counts + RPC/CLI + seeding test + E2E.
+- [x] 2026-07-16 01:40 - UI: Pause/Resume/Repair in FileExplorer + Tasks; inverted guard test; UI build + 138 tests pass.
 
 ## Unfinished Work
 
-- [ ] Repair (step 6) + UI (step 7).
-- [ ] Native (Tauri) pause/resume/repair buttons parity (shared AppCore RPC covers dispatch).
+- [ ] Native (Tauri) surfaces call the shared AppCore RPCs already; verify the desktop UI exposes the new buttons (React is shared, so it does) under `just desktop-check` when build inputs are approved.
+- [ ] Optional: durable DB `paused` status for cross-process visibility (currently in-memory; a crash while paused yields an interrupted scan, handled by recovery).

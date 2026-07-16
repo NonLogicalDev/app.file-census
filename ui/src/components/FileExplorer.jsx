@@ -50,7 +50,10 @@ export default function FileExplorer(props) {
     searchFilters = [],
     locations = [],
     onStopScan,
+    onPauseScan,
+    onResumeScan,
     onUpdateScan,
+    onRepairScan,
     onSetRepresentative,
     onClearRepresentative,
     onRunDeleteCheck,
@@ -94,7 +97,6 @@ export default function FileExplorer(props) {
   const canBuildThumbnails = Boolean(location?.connected && activeScan);
   const canStopScan = typeof onStopScan === 'function';
   const activeScanStatus = isActiveStatus(activeScan.status);
-  const hasUnavailableScanControlStatus = activeScan.status === 'paused' || activeScan.status === 'repairing';
   const scanRole = activeScan.is_representative
     ? 'Representative scan'
     : activeScanStatus
@@ -268,9 +270,27 @@ export default function FileExplorer(props) {
               Stop
             </Button>
           )}
+          {activeScan.status === 'paused' ? (
+            typeof onResumeScan === 'function' && (
+              <Button variant="secondary" size="sm" onClick={() => onResumeScan(activeScan.id)} disabled={busy} icon={<Icon name="refresh" />}>
+                Resume
+              </Button>
+            )
+          ) : (
+            activeScanStatus && activeScan.status !== 'stopping' && typeof onPauseScan === 'function' && (
+              <Button variant="secondary" size="sm" onClick={() => onPauseScan(activeScan.id)} disabled={busy} icon={<Icon name="pause" />}>
+                Pause
+              </Button>
+            )
+          )}
           {!activeScanStatus && (
             <Button variant="secondary" size="sm" onClick={() => onUpdateScan(activeScan.id)} disabled={busy} icon={<Icon name="update" />}>
               Update scan
+            </Button>
+          )}
+          {!activeScanStatus && typeof onRepairScan === 'function' && (
+            <Button variant="secondary" size="sm" onClick={() => onRepairScan(activeScan.id)} disabled={busy} icon={<Icon name="repair" />}>
+              Repair scan
             </Button>
           )}
           {activeScan.is_representative ? (
@@ -300,19 +320,27 @@ export default function FileExplorer(props) {
         <div className="my-2.5 flex flex-wrap items-center justify-between gap-3 rounded-panel border border-warning bg-warning-soft px-3 py-2.5 text-warning">
           <div className="min-w-0">
             <strong>Scan was interrupted</strong>
-            <span className="ml-2 text-muted-strong">Repair is unavailable in this build. Use a new scan to create a complete index.</span>
+            <span className="ml-2 text-muted-strong">Repair reprocesses only the missing or incomplete entries; a full update rescans everything.</span>
           </div>
+          {typeof onRepairScan === 'function' && (
+            <Button variant="secondary" size="sm" onClick={() => onRepairScan(activeScan.id)} disabled={busy} icon={<Icon name="repair" />}>
+              Repair scan
+            </Button>
+          )}
         </div>
       )}
 
-      {hasUnavailableScanControlStatus && (
-        <div className="my-2.5 rounded-panel border border-warning bg-warning-soft px-3 py-2.5 text-warning">
-          <strong>{activeScan.status === 'paused' ? 'Pause and resume unavailable' : 'Repair unavailable'}</strong>
-          <span className="ml-2 text-muted-strong">
-            {activeScan.status === 'paused'
-              ? 'Pause and resume are unavailable in this build. Use a new scan to refresh this location.'
-              : 'Repair is unavailable in this build. Use a new scan to refresh this location.'}
-          </span>
+      {activeScan.status === 'paused' && (
+        <div className="my-2.5 flex flex-wrap items-center justify-between gap-3 rounded-panel border border-warning bg-warning-soft px-3 py-2.5 text-warning">
+          <div className="min-w-0">
+            <strong>Scan paused</strong>
+            <span className="ml-2 text-muted-strong">Workers are parked. Resume to continue indexing.</span>
+          </div>
+          {typeof onResumeScan === 'function' && (
+            <Button variant="secondary" size="sm" onClick={() => onResumeScan(activeScan.id)} disabled={busy} icon={<Icon name="refresh" />}>
+              Resume
+            </Button>
+          )}
         </div>
       )}
 

@@ -15,9 +15,14 @@ test('production Cmd-K groups are derived from live routes, locations, scans, an
   assert.match(appSource, /onSelect: \(\) => setShowAddLocation\(true\)/);
 });
 
-test('production actions do not call the unavailable pause, resume, or repair RPCs', () => {
-  assert.doesNotMatch(appSource, /scans\.(?:pause|resume|repair)/);
-  assert.doesNotMatch(appSource, /function (?:pauseScan|resumeScan|startRepairScan)/);
+test('production wires the real pause, resume, and repair scan control RPCs', () => {
+  // These were restored in plan-068; the actions now call real backend RPCs.
+  assert.match(appSource, /rpc\('scans\.pause'/);
+  assert.match(appSource, /rpc\('scans\.resume'/);
+  assert.match(appSource, /rpc\('scans\.repair'/);
+  assert.match(appSource, /async function pauseScan\(/);
+  assert.match(appSource, /async function resumeScan\(/);
+  assert.match(appSource, /async function startRepairScan\(/);
 });
 
 test('dashboard and task pages receive live parent state and a real stop callback', () => {
