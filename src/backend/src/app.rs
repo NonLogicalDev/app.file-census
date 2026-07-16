@@ -127,6 +127,12 @@ impl AppCore {
                     self.start_update_scan_job(params.scan_id).await?,
                 )?)
             }
+            "scans.repair" => {
+                let params: ScanIdParams = decode_params(params)?;
+                Ok(serde_json::to_value(
+                    self.start_repair_scan_job(params.scan_id).await?,
+                )?)
+            }
             "scans.progress" => {
                 let params: ScanIdParams = decode_params(params)?;
                 Ok(serde_json::to_value(self.progress.get(&params.scan_id))?)
@@ -327,6 +333,16 @@ impl AppCore {
         source_scan_id: String,
     ) -> Result<ScanStartedResponse<'static>> {
         let prepared = scanner::prepare_update_scan(&self.db, &source_scan_id)?;
+        let source_scan_id_for_event = source_scan_id.clone();
+        self.run_prepared_scan(prepared, Some(source_scan_id_for_event))
+            .await
+    }
+
+    async fn start_repair_scan_job(
+        &self,
+        source_scan_id: String,
+    ) -> Result<ScanStartedResponse<'static>> {
+        let prepared = scanner::prepare_repair_scan(&self.db, &source_scan_id)?;
         let source_scan_id_for_event = source_scan_id.clone();
         self.run_prepared_scan(prepared, Some(source_scan_id_for_event))
             .await

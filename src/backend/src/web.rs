@@ -241,6 +241,12 @@ async fn handle_rpc_result(
                 start_update_scan_job(state, params.scan_id).await?,
             )?)
         }
+        "scans.repair" => {
+            let params: ScanIdParams = decode_params(params)?;
+            Ok(serde_json::to_value(
+                start_repair_scan_job(state, params.scan_id).await?,
+            )?)
+        }
         "scans.progress" => {
             let params: ScanIdParams = decode_params(params)?;
             Ok(serde_json::to_value(state.progress.get(&params.scan_id))?)
@@ -878,6 +884,42 @@ async fn start_update_scan_job(
     state.progress.start(&prepared);
     state.events.emit(
         "scan_update_started",
+        serde_json::json!({
+            "scan_id": scan_id,
+            "source_scan_id": source_scan_id,
+        }),
+    );
+
+    let db = (*state.db).clone();
+    let progress = state.progress.clone();
+    let events = state.events.clone();
+    let scan_id_for_task = scan_id.clone();
+    tokio::task::spawn_blocking(move || {
+        match scanner::run_prepared_scan(&db, prepared, Some(progress.clone())) {
+            Ok(summary) if summary.status == "stopped" => progress.stopped(&summary.scan_id),
+            Ok(summary) => {
+                progress.finish(&summary);
+                crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &events);
+            }
+            Err(error) => progress.fail(&scan_id_for_task, error.to_string()),
+        }
+    });
+
+    Ok(ScanStartedResponse {
+        scan_id,
+        status: "running",
+    })
+}
+
+async fn start_repair_scan_job(
+    state: AppState,
+    source_scan_id: String,
+) -> anyhow::Result<ScanStartedResponse<'static>> {
+    let prepared = scanner::prepare_repair_scan(&state.db, &source_scan_id)?;
+    let scan_id = prepared.scan_id.clone();
+    state.progress.start(&prepared);
+    state.events.emit(
+        "scan_repair_started",
         serde_json::json!({
             "scan_id": scan_id,
             "source_scan_id": source_scan_id,

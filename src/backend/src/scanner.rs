@@ -476,6 +476,14 @@ pub struct PreparedScan {
     pub scan_root: PathBuf,
     pub reuse_from_scan_id: Option<String>,
     reusable_files: HashMap<String, ReusableFile>,
+    /// Stored paths physically seeded by a repair scan; the walk skips these so
+    /// only missing/incomplete entries are (re)processed. Empty for fresh and
+    /// update scans.
+    seeded_paths: std::collections::HashSet<String>,
+    /// Counters for the physically-seeded rows, so a repair scan's final
+    /// file_count/total_bytes include the seeded files it skipped. 0 otherwise.
+    seeded_file_count: u64,
+    seeded_total_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -621,6 +629,9 @@ pub fn prepare_bootstrap_scan_with_started_at(
         scan_root,
         reuse_from_scan_id: None,
         reusable_files: HashMap::new(),
+        seeded_paths: std::collections::HashSet::new(),
+        seeded_file_count: 0,
+        seeded_total_bytes: 0,
     })
 }
 
@@ -642,6 +653,9 @@ fn prepare_scan_with_start(
         scan_root,
         reuse_from_scan_id: None,
         reusable_files: HashMap::new(),
+        seeded_paths: std::collections::HashSet::new(),
+        seeded_file_count: 0,
+        seeded_total_bytes: 0,
     })
 }
 
@@ -655,6 +669,54 @@ pub fn prepare_update_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         scan_root,
         reuse_from_scan_id: Some(seed.source_scan_id),
         reusable_files: seed.reusable_files,
+        seeded_paths: std::collections::HashSet::new(),
+        seeded_file_count: 0,
+        seeded_total_bytes: 0,
+    })
+}
+
+/// Prepares a non-destructive repair of an incomplete scan. Creates a new scan,
+/// physically seeds it with the valid rows (non-empty hash, no error) from the
+/// source scan, and records those paths so the walk skips them — only
+/// missing/incomplete entries are (re)processed. Valid rows whose files are now
+/// gone are preserved because the walk never revisits seeded paths.
+pub fn prepare_repair_scan(db: &Database, source_scan_id: &str) -> Result<PreparedScan> {
+    let seed = db.update_scan_seed(source_scan_id)?;
+    let scan_root = resolve_contained_scan_root(&seed.location.root_path, &seed.offset_path)?;
+    let scan_id = db.create_update_scan_from_seed(&seed)?;
+    let seeded_rows: Vec<NewFile> = seed
+        .reusable_files
+        .values()
+        .map(|reusable| NewFile {
+            scan_id: scan_id.clone(),
+            kind: "file".to_string(),
+            path: reusable.path.clone(),
+            name: reusable.name.clone(),
+            size: reusable.size,
+            blake3: reusable.blake3.clone(),
+            sha256: reusable.sha256.clone(),
+            ctime: reusable.ctime.clone(),
+            mtime: reusable.mtime.clone(),
+            mode: reusable.mode,
+            error: None,
+        })
+        .collect();
+    let seeded_paths: std::collections::HashSet<String> =
+        seed.reusable_files.keys().cloned().collect();
+    let seeded_file_count = seeded_rows.len() as u64;
+    let seeded_total_bytes = seeded_rows.iter().map(|row| row.size).sum();
+    if !seeded_rows.is_empty() {
+        db.insert_file_batch(&seeded_rows)?;
+    }
+    Ok(PreparedScan {
+        scan_id,
+        location: seed.location,
+        scan_root,
+        reuse_from_scan_id: Some(seed.source_scan_id),
+        reusable_files: HashMap::new(),
+        seeded_paths,
+        seeded_file_count,
+        seeded_total_bytes,
     })
 }
 
@@ -668,10 +730,12 @@ pub fn run_prepared_scan(
     // batch keeps scan throughput up without starving live progress.
     let flush_size = 2048;
     let mut batch = Vec::with_capacity(flush_size);
-    let mut file_count = 0;
+    // Repair scans physically seed valid rows that the pipeline never emits, so
+    // start the tallies at the seeded totals to keep the persisted counts honest.
+    let mut file_count = prepared.seeded_file_count;
     let mut dir_count = 0;
     let mut error_count = 0;
-    let mut total_bytes = 0;
+    let mut total_bytes = prepared.seeded_total_bytes;
     let scan_id = prepared.scan_id.clone();
 
     // A prepared scan already has a persisted `running` row. Keep every
@@ -716,6 +780,7 @@ pub fn run_prepared_scan(
             let progress = progress.clone();
             let scan_id = prepared.scan_id.clone();
             let reusable_files = &prepared.reusable_files;
+            let seeded_paths = &prepared.seeded_paths;
             let db_path = db_path.as_ref();
             let db_wal_path = db_wal_path.as_ref();
             let db_shm_path = db_shm_path.as_ref();
@@ -728,6 +793,7 @@ pub fn run_prepared_scan(
                     progress,
                     scan_id,
                     reusable_files,
+                    seeded_paths,
                     db_path,
                     db_wal_path,
                     db_shm_path,
@@ -948,6 +1014,7 @@ fn metadata_worker(
     progress: Option<ScanProgressStore>,
     scan_id: String,
     reusable_files: &HashMap<String, ReusableFile>,
+    seeded_paths: &std::collections::HashSet<String>,
     db_path: Option<&PathBuf>,
     db_wal_path: Option<&PathBuf>,
     db_shm_path: Option<&PathBuf>,
@@ -1052,6 +1119,12 @@ fn metadata_worker(
                 }
             }
             WorkKind::File => {
+                // Repair scans physically seed valid rows; skip re-processing
+                // them so only missing/incomplete entries are (re)walked.
+                if seeded_paths.contains(&item.stored_path) {
+                    pool_complete(progress.as_ref(), &scan_id, PoolKind::Metadata, operation_id);
+                    continue;
+                }
                 // Recheck each discovered file before reading metadata. A path
                 // may have been replaced with a symlink after WalkDir saw it.
                 match checked_file_metadata(&item.absolute_path, canonical_scan_root) {
@@ -2080,6 +2153,55 @@ mod tests {
     }
 
     #[test]
+    fn repair_scan_seeds_valid_rows_and_reprocesses_only_missing_ones() {
+        let root = test_root("repair-seeds");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(location_root.join("sub")).unwrap();
+        std::fs::write(location_root.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(location_root.join("sub/restore.txt"), b"restore").unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+
+        let initial = scan_location(&db, "test", Path::new("/")).unwrap();
+        assert_eq!(initial.file_count, 2);
+
+        // Simulate an incomplete scan: one valid file row is gone.
+        let deleted = db.delete_scan_path(&initial.scan_id, "sub/restore.txt").unwrap();
+        assert_eq!(deleted, 1);
+
+        let repaired = run_prepared_scan(
+            &db,
+            prepare_repair_scan(&db, &initial.scan_id).unwrap(),
+            None,
+        )
+        .unwrap();
+        // Final count includes the seeded valid row (keep.txt) plus the
+        // reprocessed missing one (sub/restore.txt).
+        assert_eq!(repaired.file_count, 2);
+
+        let repaired_paths = db
+            .scan_files(&repaired.scan_id, 10)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            repaired_paths,
+            ["keep.txt".to_string(), "sub/restore.txt".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
     fn deleting_a_file_from_scan_removes_only_that_scan_path() {
         let root = test_root("delete-scan-path");
         let location_root = root.join("location");
@@ -2214,6 +2336,9 @@ mod tests {
             scan_root: PathBuf::from("/tmp"),
             reuse_from_scan_id: None,
             reusable_files: HashMap::new(),
+            seeded_paths: std::collections::HashSet::new(),
+            seeded_file_count: 0,
+            seeded_total_bytes: 0,
         };
         progress.start(&prepared);
         progress.finish(&ScanSummary {
@@ -2275,6 +2400,7 @@ mod tests {
             None,
             "scan".to_string(),
             &HashMap::new(),
+            &std::collections::HashSet::new(),
             None,
             None,
             None,
@@ -2330,6 +2456,7 @@ mod tests {
             None,
             "scan".to_string(),
             &HashMap::new(),
+            &std::collections::HashSet::new(),
             None,
             None,
             None,
@@ -2547,6 +2674,9 @@ mod tests {
             scan_root: PathBuf::from("/tmp"),
             reuse_from_scan_id: None,
             reusable_files: HashMap::new(),
+            seeded_paths: std::collections::HashSet::new(),
+            seeded_file_count: 0,
+            seeded_total_bytes: 0,
         });
         (progress, scan_id)
     }

@@ -899,7 +899,11 @@ fn run_scans(
             let prepared = scanner::prepare_update_scan(&db, &args.scan_id)?;
             run_prepared_scan_cli(&db, prepared, json)
         }
-        ScanSubcommand::Repair(_) => unavailable_command("scans repair"),
+        ScanSubcommand::Repair(args) => {
+            let db = Database::open(db_path)?;
+            let prepared = scanner::prepare_repair_scan(&db, &args.scan_id)?;
+            run_prepared_scan_cli(&db, prepared, json)
+        }
         ScanSubcommand::Tree(args) => {
             let db = Database::open(db_path)?;
             if args.depth == 0 {
