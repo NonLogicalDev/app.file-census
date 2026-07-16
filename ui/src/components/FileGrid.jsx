@@ -46,9 +46,11 @@ export default function FileGrid({
   fullPathName = false,
   selectable = false,
   selectedPaths = [],
+  inspectedPath = null,
   canBuildThumbnails = true,
   onOpen,
   onInspect,
+  onInspectRow,
   onToggleSelection,
   onSetSelection,
   onBuildThumbnails,
@@ -139,12 +141,15 @@ export default function FileGrid({
           {table.getRowModel().rows.map((row, index) => (
             <tr
               key={row.id}
-              className={fileGridRowClassName({
+              className={`${fileGridRowClassName({
                 index,
                 kind: row.original.kind,
                 actionable: isActionableRow(row.original),
                 selected: selectedSet.has(row.original.path)
-              })}
+              })}${inspectedPath && row.original.path === inspectedPath ? ' !bg-surface-muted' : ''}`}
+              onClick={() => {
+                if (row.original.kind === 'file') onInspectRow?.(row.original);
+              }}
               onDoubleClick={() => {
                 if (row.original.kind === 'file') onInspect?.(row.original);
                 if (row.original.kind === 'dir' || row.original.kind === 'parent') onOpen?.(row.original);

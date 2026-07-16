@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import FileGrid from './FileGrid.jsx';
 import DirectoryTree from './DirectoryTree.jsx';
 import { Icon } from './Icon.jsx';
@@ -90,6 +91,9 @@ export default function FileExplorer(props) {
     onRequestDeletePath
   } = props;
 
+  const [inspected, setInspected] = useState(null);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+
   if (!activeScan) return <p className={emptyTextClassName}>Select or run a scan to browse this location.</p>;
   const showingDeleteCheck = scanSubview === 'delete-check';
   const showingFileTree = scanSubview === 'tree';
@@ -151,9 +155,11 @@ export default function FileExplorer(props) {
         fullPathName={showingDeleteCheck}
         selectable={!showingDeleteCheck}
         selectedPaths={selectedGridPaths}
+        inspectedPath={inspected?.path}
         canBuildThumbnails={canBuildThumbnails}
         onOpen={onOpenGridEntry}
         onInspect={onInspectFile}
+        onInspectRow={(entry) => { setInspected(entry); setInspectorOpen(true); }}
         onToggleSelection={onToggleGridSelection}
         onSetSelection={onSetGridSelection}
         onBuildThumbnails={showingDeleteCheck ? null : onRequestBuildThumbnailsForEntry}
@@ -172,6 +178,52 @@ export default function FileExplorer(props) {
         </p>
       )}
     </div>
+  );
+
+  const inspectorPane = (
+    <aside className="flex min-h-0 min-w-0 flex-col border border-sidebar-border bg-sidebar-bg" aria-label="File inspector">
+      <div className="flex h-8 flex-none items-center justify-between border-b border-sidebar-border px-3 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
+        <span>Inspector</span>
+        <button
+          type="button"
+          onClick={() => setInspectorOpen(false)}
+          className="grid h-5 w-5 place-items-center rounded text-text-tertiary transition-colors hover:text-text"
+          aria-label="Close inspector"
+        >
+          <Icon name="close" className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      {inspected ? (
+        <div className="min-h-0 overflow-auto p-3">
+          <div className="mb-3 flex items-start gap-2">
+            <Icon name="file" className="mt-0.5 h-[18px] w-[18px] flex-none text-text-tertiary" />
+            <div className="min-w-0">
+              <strong className="block truncate text-[12px] font-medium text-text">{inspected.name}</strong>
+              <span className="text-[11px] text-text-tertiary">{inspected.file_kind || 'File'}</span>
+            </div>
+          </div>
+          <dl className="grid gap-2.5 text-[11px]">
+            <InspectorField label="Path" value={inspected.path} />
+            <InspectorField label="Size" value={bytes(inspected.size)} />
+            <InspectorField label="Modified" value={formatInspectorDate(inspected.mtime)} />
+            <InspectorField label="Scan" value={activeScan.nickname || activeScan.id} />
+          </dl>
+          {typeof onInspectFile === 'function' && (
+            <button
+              type="button"
+              onClick={() => onInspectFile(inspected)}
+              className="mt-3 inline-flex items-center gap-1.5 text-[11px] text-muted transition-colors hover:text-text"
+            >
+              <Icon name="rowActions" className="h-3.5 w-3.5" /> Full details
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="grid min-h-0 flex-1 place-items-center p-4 text-center text-[11px] leading-relaxed text-text-tertiary">
+          Select a row to keep its file context visible while you work in this scan.
+        </div>
+      )}
+    </aside>
   );
 
   return (
@@ -259,6 +311,14 @@ export default function FileExplorer(props) {
           )}
           <button type="button" className={`${ctrlBtn} ${showColumns ? 'bg-surface text-text' : ''}`} onClick={onToggleColumns} aria-expanded={showColumns}>
             <Icon name="columns" className="h-3.5 w-3.5" /> Columns
+          </button>
+          <button
+            type="button"
+            className={`${ctrlBtn} ${inspectorOpen ? 'bg-surface text-text' : ''}`}
+            onClick={() => setInspectorOpen((open) => !open)}
+            aria-pressed={inspectorOpen}
+          >
+            <Icon name="sidebarOpen" className="h-3.5 w-3.5" /> Inspector
           </button>
         </div>
       </div>
@@ -416,7 +476,10 @@ export default function FileExplorer(props) {
           {resultsTable}
         </>
       ) : showingFileTree ? (
-        <div className="mt-2 grid min-h-[620px] overflow-hidden border border-sidebar-border bg-bg md:grid-cols-[minmax(190px,248px)_minmax(0,1fr)]">
+        <div
+          className="mt-2 grid min-h-[620px] overflow-hidden border border-sidebar-border bg-bg"
+          style={{ gridTemplateColumns: inspectorOpen ? 'minmax(190px,240px) minmax(0,1fr) 320px' : 'minmax(190px,240px) minmax(0,1fr)' }}
+        >
           <div className="flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
             <div className="flex flex-none items-center justify-between border-b border-sidebar-border px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
               <span>Folders</span>
@@ -431,16 +494,23 @@ export default function FileExplorer(props) {
               onLoadMore={onLoadMoreDirectoryTree}
             />
           </div>
-          <section className="flex min-w-0 flex-col">
+          <section className="flex min-w-0 flex-col border-r border-sidebar-border">
             {breadcrumbBar}
             {resultsTable}
           </section>
+          {inspectorOpen && inspectorPane}
         </div>
       ) : (
-        <>
-          {breadcrumbBar}
-          {resultsTable}
-        </>
+        <div
+          className="mt-2 grid overflow-hidden"
+          style={{ gridTemplateColumns: inspectorOpen ? 'minmax(0,1fr) 320px' : 'minmax(0,1fr)' }}
+        >
+          <div className="min-w-0">
+            {breadcrumbBar}
+            {resultsTable}
+          </div>
+          {inspectorOpen && inspectorPane}
+        </div>
       )}
 
       <ScanProgressPools progress={activeScan} />
@@ -452,6 +522,19 @@ export default function FileExplorer(props) {
       </section>
     </div>
   );
+}
+
+function InspectorField({ label, value }) {
+  return (
+    <div>
+      <dt className="text-text-tertiary">{label}</dt>
+      <dd className="mt-0.5 m-0 break-words text-muted-strong">{value || '—'}</dd>
+    </div>
+  );
+}
+
+function formatInspectorDate(value) {
+  return value ? new Date(value).toLocaleString() : '—';
 }
 
 function breadcrumbs(selectedPath) {
