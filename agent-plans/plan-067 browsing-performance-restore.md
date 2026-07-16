@@ -71,7 +71,7 @@ per dir, not a CTE" form the user recalled building.
 4. [x] `scan_tree_page` passes the scope's ready cache run id (from the `duplicate_cache` status it already computes).
 5. [x] Add `busy_timeout(30s)` to `Database::connect` (plan-038).
 6. [x] Regression test `scan_tree_duplicate_counts_come_from_cache_not_inline` (unknown=0 before cache; correct per-file and dir-rollup counts after `rebuild_duplicate_cache_for_current_scope`).
-7. [ ] Backfill inventory (see Unfinished Work) of everything else the recovery lost.
+7. [x] Backfill inventory (see Backfill Inventory table) of everything else the recovery lost.
 
 ## Learning Log
 
@@ -102,16 +102,32 @@ per dir, not a CTE" form the user recalled building.
 - [x] 2026-07-15 22:55 - Cross-checked against plan-032 (CTE removal) and plan-038 (busy_timeout); reconstructed the intended cache-JOIN design.
 - [x] 2026-07-15 23:20 - Implemented steps 1–5; backend compiles; 68 existing tests pass.
 - [x] 2026-07-15 23:33 - Added regression test (step 6); full backend suite 69 tests pass. Measured ≈6× warm browse speedup end-to-end on the copy DB.
-- [ ] 2026-07-15 23:40 - Build the recovery backfill inventory.
+- [x] 2026-07-15 23:45 - Built the code-verified recovery backfill inventory (10 items); confirmed the duplicate-cache worker has zero callers and delete-check lost its sargable path-range optimization.
+
+## Backfill Inventory (recovery losses, code-verified 2026-07-15)
+
+Severity: **P1** blocks a core workflow / silently wrong; **P2** meaningful
+feature or perf loss; **P3** cleanup.
+
+| # | Lost capability | Plan | Evidence in current code | Sev |
+|---|---|---|---|---|
+| 1 | **Duplicate cache never built** — `spawn_rebuild_duplicate_cache` (duplicate_cache.rs) has **zero callers**; nothing triggers a rebuild on scan finish, startup, or `dupes.list`. Post-perf-fix, browse duplicate/original/same-scan columns stay 0 (unknown) forever. | 039 | `grep spawn_rebuild_duplicate_cache` → def only, no caller | P1 |
+| 2 | **Scan pause/resume** — stubbed. No `scans.pause`/`scans.resume` RPC; CLI returns `unavailable_command`; UI shows "Pause and resume unavailable in this build." | 015 | cli.rs:867-868; web.rs dispatch lacks them; FileExplorer.jsx:310 | P2 |
+| 3 | **Scan repair** — stubbed. No repair RPC; `scans repair` → `unavailable_command`; UI "Repair unavailable." Interrupted scans can only be replaced by a new scan. | 015,028 | cli.rs:892; FileExplorer.jsx:303 | P2 |
+| 4 | **Delete-check SQL optimization lost** — `delete_check_for_selection` matches paths with non-sargable `substr(f.path,1,length(p.path))=prefix` instead of plan-036's indexable path-range predicates + `other_hashes` CTE (4.3s→0.05s, 34.3s→0.65s there). Likely slow on large scans. | 036 | db.rs:3628 delete_check_for_selection | P2 |
+| 5 | **Light-hash scan policy** — fully absent. No `blake3_light` column, no Full/Light `HashPolicy`, no `likely_safe`/covered-elsewhere taxonomy, no CAS metadata blob store. | 064 | files schema has no blake3_light; scanner.rs has no hash policy | P2 |
+| 6 | **EXIF / file-extra-info enrichment** — partial. `file_exif`/`file_extra_info_runs` tables exist and `run_file_extra_info` exists, but no `file_extra_info.*` RPC in web/app dispatch and CLI `file-extra-info exif` is stubbed; UI treats exif as `unavailable`. | 040 | cli.rs:1792; web.rs RPC list; AppModals.jsx:181 | P2 |
+| 7 | **Discovery benchmark harness** — `scanner::benchmark_discovery` gone; `scans benchmark-discovery` stubbed; `perf_gates.rs` (gated behind `perf-gates` feature) references unrecovered APIs. | 036,038,065 | scanner.rs (no fn); cli.rs:859 | P2 |
+| 8 | **UI recovery-horizon gap** — promoted production UI is pre-redesign June source; the July shadcn redesign survives only as excluded diff events. Being backfilled by re-porting the prototype screen-by-screen. | 065 | Tasks + Locations ported (commits 4066e66, c71ab0b) | P2 |
+| 9 | `scans nickname` — stubbed. | — | cli.rs:958 | P3 |
+| 10 | Redundant test-only `scan_tree` still computes duplicate counts inline (slow subqueries); only used by 2 tests. Remove or unify with `scan_tree_page`. | 032 | db.rs:1664 | P3 |
 
 ## Unfinished Work
 
-- [ ] **Backfill inventory** — audit recovered code vs plan claims and enumerate lost work. Known candidates to confirm/scope:
-  - [ ] Duplicate cache is never auto-rebuilt (no trigger on scan finish / location change), so browsing duplicate counters stay 0 until the Duplicates flow runs. Wire an auto/background rebuild (plan-039).
-  - [ ] Scan **pause/resume** unavailable in this build (UI shows "unavailable"; core lost) — plan-015.
-  - [ ] Scan **repair** unavailable (`scans repair` → `unavailable_command`; UI shows "Repair unavailable") — plan-015.
-  - [ ] Verify plan-036 delete-check SQL optimization (indexable path-range predicates + `other_hashes` CTE; 4.3s→0.05s) survived recovery in `delete_check_*`.
-  - [ ] `perf_gates.rs` is gated behind the `perf-gates` feature and targets some unrecovered APIs (plan-065) — reconcile.
-  - [ ] Remove the redundant test-only `scan_tree` (inline subqueries) or unify it with `scan_tree_page`.
-  - [ ] The UI recovery-horizon gap (pre-redesign June UI vs July redesign) — tracked in plan-065; Tasks + Locations already ported.
-- [ ] Commit the perf fix as a checkpoint.
+- [ ] Decide + wire a duplicate-cache rebuild trigger (#1) so browse duplicate columns populate. Options: on scan finish (debounced), on app/server startup, or lazily on first tree/duplicates read. Recommended: on scan finish + startup reconcile, reusing `spawn_rebuild_duplicate_cache`.
+- [ ] Restore delete-check path-range optimization (#4) — sargable predicates + `other_hashes` CTE; re-add its perf gate.
+- [ ] Scope pause/resume/repair restoration (#2,#3) — larger; needs scanner control-object work from plan-015.
+- [ ] Scope light-hash policy + EXIF RPC restoration (#5,#6) if still desired.
+- [ ] Recover `benchmark_discovery` + reconcile `perf_gates.rs` (#7).
+- [ ] Continue UI horizon port (#8): remaining Duplicates polish, sidebar/command-palette.
+- [ ] Remove redundant `scan_tree` (#10).
