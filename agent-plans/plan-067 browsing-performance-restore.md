@@ -126,6 +126,7 @@ feature or perf loss; **P3** cleanup.
 ## Unfinished Work
 
 - [x] 2026-07-16 - Wire duplicate-cache rebuild trigger (#1): scan-completion (app/web/cli) + web startup stale-guard. E2E verified. Note: cache is scoped to complete/representative scans, so interrupted/stopped scans (e.g. every scan in the current prod DB) show unknown (0) until a complete scan exists — this is more truthful than the old inline same-scan count off partial data.
+- [x] 2026-07-16 - Worked the full inventory per user's "everything" directive. DONE: #1, #4, #9, #11, #2/#3 (plan-068), #6, #10; PARTIAL: #7 (benchmark), #5 (plan-069 sampler). Final verify: 65 backend + 138 UI tests, `just build` clean. Remaining deferred (each its own careful effort): #5 layers 2–7 (schema/policy/likely_safe/CAS/UI), #7 perf_gates full (needs #5 layer 2), #11 two-phase scanner (memory-coupled), #8 UI horizon (ongoing).
 - [x] 2026-07-16 - Delete-check `other_hashes` CTE (#4): 2.49s→0.81s warm, results identical. Deferred sargable path-range predicate + perf gate.
 - [x] 2026-07-16 - Restored `scans nickname` (#9); EXIF viewing found already working (#6 narrowed to the background pass).
 - [ ] 2026-07-16 - HEAVY items need a go/no-go — scoped below:
