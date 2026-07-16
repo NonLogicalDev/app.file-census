@@ -36,7 +36,7 @@ pub struct ExifView {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct ExifField {
     pub group: String,
     pub tag: String,
@@ -63,21 +63,99 @@ pub fn file_details(db: &Database, blake3: &str, size: u64) -> Result<FileDetail
             .as_ref()
             .and_then(|source| build_thumbnail_for_hash(db, blake3, size, &source.path).ok()),
     };
-    let exif = source
-        .as_ref()
-        .map(|source| exif_for_path(&source.path))
-        .unwrap_or_else(|| ExifView {
-            status: "unavailable".to_string(),
-            source_path: None,
-            fields: Vec::new(),
-            error: Some("No connected occurrence is available for metadata parsing.".to_string()),
-        });
+    let exif = resolve_exif(db, blake3, size, source.as_ref());
 
     Ok(FileDetails {
         occurrences,
         thumbnail,
         exif,
     })
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExifEnrichResult {
+    pub scan_id: String,
+    pub processed: u64,
+    pub cached_ok: u64,
+    pub skipped: u64,
+    pub errors: u64,
+}
+
+/// Background-style EXIF enrichment pass: extracts and caches EXIF for every
+/// connected file in a scan, keyed by content identity. Terminal statuses
+/// (unsupported/unavailable/empty/error) are persisted so high-cardinality
+/// unsupported files are not retried forever (plan-040).
+pub fn enrich_scan_exif(db: &Database, scan_id: &str) -> Result<ExifEnrichResult> {
+    let files = db.scan_files(scan_id, u32::MAX)?;
+    let mut result = ExifEnrichResult {
+        scan_id: scan_id.to_string(),
+        processed: 0,
+        cached_ok: 0,
+        skipped: 0,
+        errors: 0,
+    };
+    for file in files {
+        if file.kind != "file" {
+            continue;
+        }
+        let path = scan_indexed_path(db, scan_id, &file.path)?;
+        if !path.is_file() {
+            result.skipped += 1;
+            continue;
+        }
+        let view = exif_for_path(&path);
+        let fields_json = serde_json::to_string(&view.fields).unwrap_or_else(|_| "[]".to_string());
+        db.cache_file_exif(
+            &file.blake3,
+            file.size,
+            &view.status,
+            Some(scan_id),
+            view.source_path.as_deref(),
+            &fields_json,
+            view.error.as_deref(),
+        )?;
+        result.processed += 1;
+        match view.status.as_str() {
+            "ok" => result.cached_ok += 1,
+            "error" => result.errors += 1,
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+
+/// Resolves EXIF for a content identity: extract live from a connected source
+/// and refresh the cache, or fall back to the cached extraction when no source
+/// is currently connected (plan-040 content-addressed enrichment).
+fn resolve_exif(db: &Database, blake3: &str, size: u64, source: Option<&SourcePath>) -> ExifView {
+    if let Some(source) = source {
+        let view = exif_for_path(&source.path);
+        let fields_json = serde_json::to_string(&view.fields).unwrap_or_else(|_| "[]".to_string());
+        let _ = db.cache_file_exif(
+            blake3,
+            size,
+            &view.status,
+            None,
+            view.source_path.as_deref(),
+            &fields_json,
+            view.error.as_deref(),
+        );
+        return view;
+    }
+    match db.cached_file_exif(blake3, size) {
+        Ok(Some(cached)) => ExifView {
+            status: cached.status,
+            source_path: cached.source_path,
+            fields: serde_json::from_str(&cached.fields_json).unwrap_or_default(),
+            error: cached.error,
+        },
+        _ => ExifView {
+            status: "unavailable".to_string(),
+            source_path: None,
+            fields: Vec::new(),
+            error: Some("No connected occurrence is available for metadata parsing.".to_string()),
+        },
+    }
 }
 
 /// Builds details from occurrences that the caller has already authorized as
@@ -92,15 +170,15 @@ pub fn file_details_from_visible_occurrences(
     let thumbnail = source
         .as_ref()
         .and_then(|source| build_thumbnail_for_visible_source(db, source).ok());
-    let exif = source
-        .as_ref()
-        .map(|source| exif_for_path(&source.path))
-        .unwrap_or_else(|| ExifView {
+    let exif = match occurrences.first() {
+        Some(occurrence) => resolve_exif(db, &occurrence.blake3, occurrence.size, source.as_ref()),
+        None => ExifView {
             status: "unavailable".to_string(),
             source_path: None,
             fields: Vec::new(),
             error: Some("No connected occurrence is available for metadata parsing.".to_string()),
-        });
+        },
+    };
 
     Ok(FileDetails {
         occurrences: occurrences.to_vec(),

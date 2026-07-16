@@ -528,7 +528,7 @@ pub struct FileExtraInfoCommand {
 
 #[derive(Subcommand)]
 enum FileExtraInfoSubcommand {
-    /// Unavailable: EXIF enrichment is not implemented in this build.
+    /// Runs the EXIF enrichment pass over a scan, caching results by content identity.
     Exif(BuildFileExtraInfoArgs),
 }
 
@@ -622,7 +622,7 @@ pub fn run_cli(cli: Cli, db_path: PathBuf) -> Result<RunOutcome> {
             Ok(RunOutcome::Done)
         }
         Command::FileExtraInfo(command) => {
-            run_file_extra_info(command)?;
+            run_file_extra_info(Database::open(&db_path)?, command, cli.json)?;
             Ok(RunOutcome::Done)
         }
     };
@@ -1856,9 +1856,22 @@ fn run_thumbnails(db: Database, command: ThumbnailsCommand, json: bool) -> Resul
     }
 }
 
-fn run_file_extra_info(command: FileExtraInfoCommand) -> Result<()> {
+fn run_file_extra_info(db: Database, command: FileExtraInfoCommand, json: bool) -> Result<()> {
     match command.command {
-        FileExtraInfoSubcommand::Exif(_) => unavailable_command("file-extra-info exif"),
+        FileExtraInfoSubcommand::Exif(args) => {
+            let result = media::enrich_scan_exif(&db, &args.scan_id)?;
+            emit(&result, json, |result| {
+                println!(
+                    "EXIF enrichment for {}: {} processed, {} ok, {} skipped, {} errors",
+                    result.scan_id,
+                    result.processed,
+                    result.cached_ok,
+                    result.skipped,
+                    result.errors
+                );
+                Ok(())
+            })
+        }
     }
 }
 

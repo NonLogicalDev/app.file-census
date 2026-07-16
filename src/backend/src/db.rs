@@ -309,6 +309,15 @@ pub struct ReusableFile {
     pub mode: Option<u32>,
 }
 
+/// A cached EXIF extraction row (keyed by blake3+size) as stored in `file_exif`.
+#[derive(Clone, Debug)]
+pub struct CachedExif {
+    pub status: String,
+    pub source_path: Option<String>,
+    pub fields_json: String,
+    pub error: Option<String>,
+}
+
 /// Read-only material collected before an update scan reserves its new scan
 /// record. Keeping this separate lets callers validate the source/root first,
 /// then perform the small create-and-copy-excludes transaction atomically.
@@ -465,6 +474,18 @@ impl Database {
                 PRIMARY KEY (blake3, size)
             );
 
+            CREATE TABLE IF NOT EXISTS file_exif (
+                blake3 TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('ok', 'empty', 'unsupported', 'unavailable', 'error')),
+                source_scan_id TEXT,
+                source_path TEXT,
+                fields_json TEXT NOT NULL DEFAULT '[]',
+                error TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (blake3, size)
+            );
+
             CREATE TABLE IF NOT EXISTS scan_excludes (
                 id INTEGER PRIMARY KEY,
                 scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
@@ -519,6 +540,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_duplicate_cache_runs_fingerprint_status ON duplicate_cache_runs(fingerprint, status);
             CREATE INDEX IF NOT EXISTS idx_duplicate_cache_run_scans_run ON duplicate_cache_run_scans(run_id);
             CREATE INDEX IF NOT EXISTS idx_duplicate_cache_path_counts_run_scan_path ON duplicate_cache_path_counts(run_id, scan_id, path);
+            CREATE INDEX IF NOT EXISTS idx_file_exif_status ON file_exif(status);
             "#,
         )?;
         if !column_exists(conn, "locations", "representative_scan_id")? {
@@ -716,6 +738,66 @@ impl Database {
         }
         self.scan_by_id(scan_id)?
             .with_context(|| format!("updated scan was not found: {scan_id}"))
+    }
+
+    /// Caches an EXIF extraction keyed by content identity (blake3, size), so a
+    /// single successful read serves the same content anywhere and survives a
+    /// source drive going offline (plan-040).
+    #[allow(clippy::too_many_arguments)]
+    pub fn cache_file_exif(
+        &self,
+        blake3: &str,
+        size: u64,
+        status: &str,
+        source_scan_id: Option<&str>,
+        source_path: Option<&str>,
+        fields_json: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO file_exif
+                (blake3, size, status, source_scan_id, source_path, fields_json, error, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(blake3, size) DO UPDATE SET
+                status = excluded.status,
+                source_scan_id = excluded.source_scan_id,
+                source_path = excluded.source_path,
+                fields_json = excluded.fields_json,
+                error = excluded.error,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                blake3,
+                size,
+                status,
+                source_scan_id,
+                source_path,
+                fields_json,
+                error,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn cached_file_exif(&self, blake3: &str, size: u64) -> Result<Option<CachedExif>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT status, source_path, fields_json, error FROM file_exif WHERE blake3 = ?1 AND size = ?2",
+            params![blake3, size],
+            |row| {
+                Ok(CachedExif {
+                    status: row.get(0)?,
+                    source_path: row.get(1)?,
+                    fields_json: row.get(2)?,
+                    error: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn scan_by_id(&self, scan_id: &str) -> Result<Option<Scan>> {
@@ -5035,6 +5117,38 @@ mod tests {
                 0,
             )
             .is_err());
+    }
+
+    #[test]
+    fn file_exif_cache_round_trips_by_content_identity() {
+        let root = test_root("file-exif-cache");
+        let db = Database::open(root.join("state.db")).unwrap();
+
+        db.cache_file_exif(
+            "hash-a",
+            100,
+            "ok",
+            Some("scan-1"),
+            Some("/x/a.jpg"),
+            "[{\"group\":\"EXIF\",\"tag\":\"Make\",\"value\":\"Canon\"}]",
+            None,
+        )
+        .unwrap();
+        let cached = db.cached_file_exif("hash-a", 100).unwrap().unwrap();
+        assert_eq!(cached.status, "ok");
+        assert_eq!(cached.source_path.as_deref(), Some("/x/a.jpg"));
+        assert!(cached.fields_json.contains("Canon"));
+
+        // Re-caching the same content identity updates in place.
+        db.cache_file_exif("hash-a", 100, "unsupported", None, None, "[]", None)
+            .unwrap();
+        assert_eq!(
+            db.cached_file_exif("hash-a", 100).unwrap().unwrap().status,
+            "unsupported"
+        );
+        assert!(db.cached_file_exif("missing", 1).unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
