@@ -1,85 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CommandPalette } from './command-palette/index.js';
 import { Icon } from './Icon.jsx';
-import ScanProgressPools from './ScanProgressPools.jsx';
 import {
   appMainClassName,
   appShellClassName,
   appSidebarClassName,
   Button,
-  cn,
-  connectionLedClassName,
-  eventStripClassName,
-  eventStripStatusClassName,
   headerActionsClassName,
   IconButton,
-  locationLedClassName,
-  metricItemClassName,
-  metricLabelClassName,
-  metricsClassName,
-  metricValueClassName,
-  navIconClassName,
-  navIconSvgClassName,
   Menu,
   MenuContent,
   MenuLabel,
   MenuTrigger,
-  optionsMenuClassName,
-  optionsPanelClassName,
-  optionsSectionClassName,
-  optionsSectionCodeClassName,
-  optionsSectionLabelClassName,
-  optionsSummaryClassName,
   pageActionsListClassName,
   pageActionsMenuClassName,
   pageActionsPanelClassName,
   pageActionsPanelTitleClassName,
   pageActionsTriggerClassName,
   shellMessageClassName,
-  sidebarActivityClassName,
-  sidebarBrandClassName,
-  sidebarBrandSubtitleClassName,
-  sidebarConnectionPillClassName,
-  sidebarDisclosureClassName,
-  sidebarEmptyClassName,
-  sidebarFooterClassName,
   sidebarHoverZoneClassName,
-  sidebarIconButtonClassName,
-  sidebarLocationBodyClassName,
-  sidebarLocationClassName,
-  sidebarLocationGroupClassName,
-  sidebarLocationListClassName,
-  sidebarLocationMetaClassName,
-  sidebarLocationRowClassName,
-  sidebarNavButtonClassName,
-  sidebarNavClassName,
   sidebarOverlayCloseClassName,
-  sidebarProgressClassName,
-  sidebarProgressPathClassName,
-  sidebarScanBodyClassName,
-  sidebarScanClassName,
-  sidebarScanListClassName,
-  sidebarScanStatusClassName,
   sidebarResizeHandleClassName,
-  sidebarSectionClassName,
-  sidebarSectionTitleClassName,
-  sidebarSpacerClassName,
-  sidebarWindowControlsClassName,
-  StatusPill,
   topbarDescriptionClassName,
   topbarSidebarToggleClassName,
   topbarTitleClassName,
   topbarTitleCopyClassName,
   topbarTitleHeadingClassName,
-  trafficDotClassName,
-  topProgressBandClassName,
-  topProgressCardClassName,
-  topProgressCardMainClassName,
-  topProgressLocationNameClassName,
-  topProgressMetaClassName,
-  topProgressPathClassName,
-  topProgressStatusClassName,
-  topProgressTitleClassName,
   Toolbar,
   workspaceHeaderClassName
 } from './ui/index.jsx';
@@ -88,7 +34,7 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH
 } from './ui/shellClasses.js';
-import { bytes, isActiveStatus, scanLabel, statusLabel, when } from '../utils/format.js';
+import { isActiveStatus, scanLabel, statusLabel, when } from '../utils/format.js';
 
 const tabs = [
   ['dashboard', 'Dashboard', 'Current database and activity'],
@@ -99,14 +45,6 @@ const tabs = [
   ['options', 'Options', 'Database and app settings']
 ];
 
-const tabIcons = {
-  dashboard: 'dashboard',
-  duplicates: 'duplicates',
-  locations: 'locations',
-  options: 'options',
-  search: 'searchFiles',
-  tasks: 'tasks'
-};
 
 const SIDEBAR_HIDDEN_STORAGE_KEY = 'file-census.sidebar.hidden';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'file-census.sidebar.width';
@@ -182,6 +120,15 @@ export default function Shell({
   const selectedLocation = locationList.find((location) => location.slug === selectedLocationSlug);
   const sidebarVisuallyOpen = compactSidebar ? sidebarPeeking : !sidebarHidden;
   const sidebarResizeDisabled = compactSidebar || sidebarHidden;
+  const runningScans = runningProgress.filter((progress) => isActiveStatus(progress.status));
+  const runningScan = runningScans[0] || null;
+  const navItems = [
+    { id: 'dashboard', label: 'Dashboard', detail: 'Overview and activity', icon: 'dashboard' },
+    { id: 'locations', label: 'Locations', detail: 'Browse scans and files', icon: 'locations' },
+    { id: 'duplicates', label: 'Duplicates', detail: 'Compare content identity', icon: 'duplicates', badge: overview?.duplicate_groups ? String(overview.duplicate_groups) : null },
+    { id: 'tasks', label: 'Tasks', detail: 'Background work', icon: 'tasks', badge: runningScans.length ? String(runningScans.length) : null },
+    { id: 'search', label: 'Search', detail: 'Find by path or name', icon: 'searchFiles' }
+  ];
 
   const finishSidebarResize = useCallback((event) => {
     const session = sidebarResizeSession.current;
@@ -353,11 +300,6 @@ export default function Shell({
           tabIndex={sidebarResizeDisabled ? -1 : 0}
           title="Resize sidebar"
         />
-        <div className={sidebarWindowControlsClassName({ compactSidebar })} aria-hidden="true">
-          <span className={trafficDotClassName('red')} />
-          <span className={trafficDotClassName('yellow')} />
-          <span className={trafficDotClassName('green')} />
-        </div>
         <IconButton
           onClick={() => setSidebarPeeking(false)}
           label="Close sidebar"
@@ -366,93 +308,122 @@ export default function Shell({
           className={sidebarOverlayCloseClassName({ visible: compactSidebar && sidebarPeeking })}
         />
 
-        <div className={sidebarBrandClassName}>
-          <strong>file-census</strong>
-          <span className={sidebarBrandSubtitleClassName}>Local file memory</span>
+        {/* Brand */}
+        <div className="flex h-12 flex-none items-center gap-2.5 border-b border-sidebar-border px-3">
+          <span className="grid h-[26px] w-[26px] flex-none place-items-center rounded-md border border-border bg-surface text-muted">
+            <Icon name="locations" className="h-3.5 w-3.5" />
+          </span>
+          <span className="flex min-w-0 flex-1 flex-col leading-[1.1]">
+            <strong className="truncate text-[12.5px] font-semibold text-text">file-census</strong>
+            <small className="mt-[3px] truncate text-[11px] text-text-tertiary">Inventory workspace</small>
+          </span>
+          <span
+            className={`h-1.5 w-1.5 flex-none rounded-full ${wsStatus === 'live' ? 'bg-success' : wsStatus === 'connecting' ? 'bg-warning' : 'bg-danger'}`}
+            title={connectionLabel(wsStatus, statusDetail)}
+          />
+          <IconButton
+            onClick={toggleSidebar}
+            label="Hide sidebar"
+            title="Hide sidebar"
+            variant="ghost"
+            className="!h-6 !w-6 !min-h-0 !p-0 !text-muted hover:!text-text"
+            icon={<Icon name="sidebarClose" className="h-3.5 w-3.5" />}
+          />
         </div>
 
-        <nav className={sidebarNavClassName} aria-label="Primary">
-          {tabs.map(([id, label, description]) => (
-            <button key={id} className={sidebarNavButtonClassName({ active: activeTab === id })} onClick={() => setTab(id)}>
-              <span className={navIconClassName}><Icon name={tabIcons[id]} className={navIconSvgClassName} /></span>
-              <span>
-                <strong>{label}</strong>
-                <small>{description}</small>
-              </span>
-            </button>
-          ))}
+        {/* Primary nav */}
+        <nav className="flex flex-none flex-col gap-0.5 p-2" aria-label="Primary">
+          {navItems.map((item) => {
+            const active = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setTab(item.id)}
+                aria-current={active ? 'page' : undefined}
+                className={`grid min-h-[44px] grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 rounded-md border px-[7px] py-[5px] text-left transition-colors ${
+                  active ? 'border-border bg-surface-muted text-text' : 'border-transparent text-muted hover:bg-surface hover:text-text'
+                }`}
+              >
+                <Icon name={item.icon} className="h-4 w-4" />
+                <span className="flex min-w-0 flex-col leading-[1.1]">
+                  <span className="truncate text-[12px] font-medium">{item.label}</span>
+                  <small className="mt-[3px] truncate text-[11px] font-normal text-text-tertiary">{item.detail}</small>
+                </span>
+                {item.badge ? (
+                  <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[5px] border border-border bg-surface-subtle px-[5px] text-[11px] font-[550] leading-4 text-text-tertiary">{item.badge}</span>
+                ) : null}
+              </button>
+            );
+          })}
         </nav>
 
-        <section className={sidebarSectionClassName}>
-          <div className={sidebarSectionTitleClassName}>
+        {/* Locations tree */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto border-t border-sidebar-border p-2" data-sidebar-location-list>
+          <div className="flex h-6 flex-none items-center justify-between px-[7px] text-[11px] font-semibold uppercase tracking-[0.06em] text-text-tertiary">
             <span>Locations</span>
-            <IconButton
-              className={sidebarIconButtonClassName}
-              onClick={onShowAddLocation}
-              title="Add location"
-              label="Add location"
-              disabled={busy}
-              icon={<Icon name="add" />}
+            <span className="flex items-center gap-1.5">
+              <span>{locationList.length}</span>
+              <button
+                type="button"
+                onClick={onShowAddLocation}
+                disabled={busy}
+                title="Add location"
+                aria-label="Add location"
+                className="grid h-5 w-5 place-items-center rounded text-text-tertiary transition-colors hover:bg-surface hover:text-text disabled:opacity-40"
+              >
+                <Icon name="add" className="h-3.5 w-3.5" />
+              </button>
+            </span>
+          </div>
+          {locationList.map((location) => (
+            <SidebarLocationNode
+              key={location.slug}
+              location={location}
+              expanded={Boolean(expandedLocations[location.slug])}
+              current={activeTab === 'locations' && selectedLocationSlug === location.slug && !selectedScanId}
+              selectedScanId={selectedScanId}
+              onToggle={() => setExpandedLocations((current) => ({ ...current, [location.slug]: !current[location.slug] }))}
+              onSelectLocation={() => onChooseLocation(location.slug)}
+              onSelectScan={(scanId) => onSelectScan(scanId, location.slug)}
             />
-          </div>
-          <div className={sidebarLocationListClassName} data-sidebar-location-list>
-            {locationList.map((location) => (
-              <SidebarLocationGroup
-                key={location.slug}
-                location={location}
-                expanded={Boolean(expandedLocations[location.slug])}
-                selectedLocation={activeTab === 'locations' && selectedLocationSlug === location.slug && !selectedScanId}
-                selectedScanId={selectedScanId}
-                onToggle={() => setExpandedLocations((current) => ({ ...current, [location.slug]: !current[location.slug] }))}
-                onSelectLocation={() => onChooseLocation(location.slug)}
-                onSelectScan={(scanId) => onSelectScan(scanId, location.slug)}
-              />
-            ))}
-            {!locationList.length && <p className={sidebarEmptyClassName}>No locations yet.</p>}
-          </div>
-        </section>
+          ))}
+          {!locationList.length && <p className="px-[7px] py-2 text-[11px] text-text-tertiary">No locations yet.</p>}
+        </div>
 
-        {runningProgress.length > 0 && (
-          <section className={cn(sidebarSectionClassName, sidebarActivityClassName)}>
-            <div className={sidebarSectionTitleClassName}>
-              <span>Activity</span>
-              <small>{runningProgress.length} running</small>
-            </div>
-            {runningProgress.slice(0, 3).map((progress) => (
-              <article className={sidebarProgressClassName} key={progress.scan_id}>
-                <strong>{progress.location_slug}</strong>
-                <span>{progress.file_count} files - {bytes(progress.total_bytes)}</span>
-                <ScanProgressPools progress={progress} compact />
-                {progress.current_path && <code className={sidebarProgressPathClassName} title={progress.current_path}>{progress.current_path}</code>}
-              </article>
-            ))}
-            {runningProgress.length > 3 && <p className={sidebarEmptyClassName}>+{runningProgress.length - 3} more scans</p>}
-          </section>
+        {/* Running task chip */}
+        {runningScan && (
+          <button
+            type="button"
+            onClick={() => setTab('tasks')}
+            className="relative mx-2 mb-2 grid min-h-[58px] flex-none grid-cols-[26px_minmax(0,1fr)] items-center gap-2 overflow-hidden rounded-md border border-border bg-surface p-2 text-left transition-colors hover:border-border-strong"
+          >
+            <span className="grid h-[26px] w-[26px] place-items-center rounded-[5px] bg-info-soft text-info"><Icon name="tasks" className="h-3.5 w-3.5" /></span>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate text-[11px] font-[550] text-text">{runningScan.location_name || runningScan.location_slug}</span>
+              <small className="mt-0.5 truncate text-[11px] text-text-tertiary">{Number(runningScan.file_count || 0).toLocaleString()} files · {statusLabel(runningScan.status)}</small>
+            </span>
+            <span className="absolute inset-x-0 bottom-0 h-0.5 bg-surface-muted"><span className="block h-full w-2/5 animate-pulse bg-info" /></span>
+          </button>
         )}
 
-        <div className={sidebarSpacerClassName} />
-
-        <section className={sidebarFooterClassName}>
-          <StatusPill
-            variant="ghost"
-            className={sidebarConnectionPillClassName}
-            icon={<span className={connectionLedClassName({ live: wsStatus === 'live' })} />}
+        {/* Footer */}
+        <div className="grid h-[38px] flex-none grid-cols-2 gap-0.5 border-t border-sidebar-border px-2 py-[5px]">
+          <button
+            type="button"
+            onClick={openCommandSearch}
+            className="flex items-center justify-center gap-1.5 rounded-[5px] text-[11px] text-text-tertiary transition-colors hover:bg-surface hover:text-muted"
           >
-            {connectionLabel(wsStatus, statusDetail)}
-          </StatusPill>
-          {canChooseDatabase && (
-            <details className={optionsMenuClassName}>
-              <summary className={optionsSummaryClassName}><Icon name="options" />Options</summary>
-              <div className={optionsPanelClassName}>
-                <section className={optionsSectionClassName}>
-                  <span className={optionsSectionLabelClassName}>Database</span>
-                  <code className={optionsSectionCodeClassName} title={databaseInfo?.path || 'Default database'}>{databaseInfo?.path || 'Default database'}</code>
-                  <Button variant="secondary" onClick={onChooseDatabase} disabled={busy} icon={<Icon name="chooseDatabase" />}>Choose database</Button>
-                </section>
-              </div>
-            </details>
-          )}
-        </section>
+            <Icon name="search" className="h-3.5 w-3.5" /> Help
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('options')}
+            className="flex items-center justify-center gap-1.5 rounded-[5px] text-[11px] text-text-tertiary transition-colors hover:bg-surface hover:text-muted"
+          >
+            <Icon name="options" className="h-3.5 w-3.5" /> Options
+          </button>
+        </div>
       </aside>
 
       <main className={appMainClassName}>
@@ -508,40 +479,9 @@ export default function Shell({
           </Toolbar>
         </header>
 
-        {overview && (
-          <section className={metricsClassName}>
-            <div className={metricItemClassName}><strong className={metricValueClassName}>{overview.location_count}</strong><span className={metricLabelClassName}>Locations</span></div>
-            <div className={metricItemClassName}><strong className={metricValueClassName}>{overview.scan_count}</strong><span className={metricLabelClassName}>Scans</span></div>
-            <div className={metricItemClassName}><strong className={metricValueClassName}>{overview.file_count}</strong><span className={metricLabelClassName}>Files</span></div>
-            <div className={metricItemClassName}><strong className={metricValueClassName}>{bytes(overview.total_bytes)}</strong><span className={metricLabelClassName}>Indexed</span></div>
-            <div className={metricItemClassName}><strong className={metricValueClassName}>{overview.duplicate_groups}</strong><span className={metricLabelClassName}>Dupe groups</span></div>
-          </section>
-        )}
-
+        {/* Database metrics live on the Dashboard, live scan progress on the
+            Tasks page and the sidebar chip; the workspace stays uncluttered. */}
         {message && <p className={shellMessageClassName}>{message}</p>}
-
-        <section className={eventStripClassName}>
-          <span className={eventStripStatusClassName({ live: wsStatus === 'live' })}>
-            {connectionStripLabel(wsStatus, statusDetail)}
-          </span>
-          {eventLog[0] && <code>{eventLog[0].kind}</code>}
-        </section>
-
-        {runningProgress.length > 0 && (
-          <section className={topProgressBandClassName}>
-            {runningProgress.map((progress) => (
-              <article className={topProgressCardClassName} key={progress.scan_id}>
-                <div className={topProgressCardMainClassName}>
-                  <strong className={topProgressTitleClassName}>{progress.location_slug} <span className={topProgressLocationNameClassName}>{progress.location_name}</span></strong>
-                  <span className={topProgressMetaClassName}>{progress.file_count} files - {bytes(progress.total_bytes)} - {progress.error_count} errors</span>
-                  {progress.current_path && <code className={topProgressPathClassName} title={progress.current_path}>{progress.current_path}</code>}
-                  <ScanProgressPools progress={progress} compact />
-                </div>
-                <span className={topProgressStatusClassName}>{statusLabel(progress.status)}</span>
-              </article>
-            ))}
-          </section>
-        )}
 
         {children}
       </main>
@@ -555,85 +495,76 @@ function connectionLabel(status, detail) {
   return `Reconnecting${detail ? `: ${detail}` : ''}`;
 }
 
-function connectionStripLabel(status, detail) {
-  if (status === 'live') return 'Live updates connected';
-  if (status === 'connecting') return 'Live updates connecting';
-  return `Live updates reconnecting${detail ? `: ${detail}` : ''}`;
+
+// Opens the top-bar command palette (search/run command) via its ⌘K shortcut.
+function openCommandSearch() {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, ctrlKey: true, bubbles: true }));
 }
 
-function SidebarLocationGroup({ location, expanded, selectedLocation, selectedScanId, onToggle, onSelectLocation, onSelectScan }) {
+function scanStateDot(status) {
+  if (status === 'running' || status === 'repairing') return 'bg-info';
+  if (status === 'complete' || status === 'completed') return 'bg-success';
+  if (status === 'failed') return 'bg-danger';
+  if (status === 'paused' || status === 'stopping') return 'bg-warning';
+  return 'bg-text-tertiary';
+}
+
+function SidebarLocationNode({ location, expanded, current, selectedScanId, onToggle, onSelectLocation, onSelectScan }) {
   const hasScans = location.scans.length > 0;
 
   return (
-    <div className={sidebarLocationGroupClassName({ disabled: location.disabled })}>
-      <div className={sidebarLocationRowClassName}>
-        <button
-          type="button"
-          className={sidebarDisclosureClassName}
-          onClick={onToggle}
-          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${location.slug}`}
-          aria-expanded={expanded}
-          disabled={!hasScans}
-          title={hasScans ? `${expanded ? 'Collapse' : 'Expand'} scans` : 'No scans'}
-        >
-          {hasScans && <Icon name={expanded ? 'chevronDown' : 'chevronRight'} />}
-        </button>
-        <SidebarLocationItem location={location} selected={selectedLocation} hasSelectedScan={location.scans.some((scan) => scan.id === selectedScanId)} onSelect={onSelectLocation} />
-      </div>
+    <div className="mt-px">
+      <button
+        type="button"
+        onClick={() => {
+          onSelectLocation();
+          onToggle();
+        }}
+        aria-expanded={expanded}
+        title={`${location.slug} — ${location.root_path}`}
+        className={`grid h-[30px] w-full grid-cols-[12px_14px_minmax(0,1fr)_8px] items-center gap-1.5 rounded-[5px] px-[7px] text-left transition-colors ${
+          current ? 'bg-surface text-text' : 'text-muted hover:bg-surface hover:text-text'
+        } ${location.disabled ? 'opacity-60' : ''}`}
+      >
+        {hasScans ? (
+          <Icon name={expanded ? 'chevronDown' : 'chevronRight'} className="h-[11px] w-[11px] text-text-tertiary" />
+        ) : (
+          <span />
+        )}
+        <Icon name="locations" className="h-[13px] w-[13px]" />
+        <span className="truncate text-[11.5px] font-medium">{location.name || location.slug}</span>
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${location.connected ? 'bg-success' : 'bg-border-strong'}`}
+          title={livenessTitle(location)}
+        />
+      </button>
       {expanded && hasScans && (
-        <div className={sidebarScanListClassName}>
-          {location.scans.map((scan) => (
-            <SidebarScanItem
-              key={scan.id}
-              scan={scan}
-              selected={scan.id === selectedScanId}
-              onSelect={() => onSelectScan(scan.id)}
-            />
-          ))}
+        <div className="mb-1 ml-[26px] mt-px border-l border-sidebar-border pl-[5px]">
+          {location.scans.map((scan) => {
+            const selected = scan.id === selectedScanId;
+            return (
+              <button
+                key={scan.id}
+                type="button"
+                onClick={() => onSelectScan(scan.id)}
+                aria-current={selected ? 'page' : undefined}
+                title={scan.id}
+                className={`grid h-[26px] w-full grid-cols-[7px_minmax(0,1fr)_auto] items-center gap-1.5 rounded-[5px] px-1.5 text-left text-[11px] transition-colors ${
+                  selected ? 'bg-surface-subtle text-text' : 'text-text-tertiary hover:bg-surface-subtle hover:text-muted'
+                }`}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${scanStateDot(scan.status)}`} />
+                <span className="truncate">{scanLabel(scan)}</span>
+                {scan.is_representative ? (
+                  <span className="inline-flex h-4 items-center rounded-[4px] border border-border bg-surface-subtle px-[5px] text-[10px] font-medium text-text-tertiary">rep</span>
+                ) : null}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
-  );
-}
-
-function SidebarLocationItem({ location, selected, hasSelectedScan, onSelect }) {
-  return (
-    <button
-      type="button"
-      className={sidebarLocationClassName({ selected, hasSelectedScan, disabled: location.disabled })}
-      onClick={onSelect}
-      title={`${location.slug} - ${location.root_path}`}
-      aria-label={`${location.name || location.slug}, ${location.root_path}`}
-    >
-      <span className={locationLedClassName({ connected: location.connected, compact: true })} title={livenessTitle(location)} />
-      <span className={sidebarLocationBodyClassName}>
-        <strong>{location.name || location.slug}</strong>
-        <small>{location.root_path}</small>
-      </span>
-      <span className={sidebarLocationMetaClassName}>
-        <strong>{location.scanCount}</strong>
-        <small>{location.scanCount === 1 ? 'scan' : 'scans'}</small>
-      </span>
-    </button>
-  );
-}
-
-function SidebarScanItem({ scan, selected, onSelect }) {
-  return (
-    <button
-      type="button"
-      className={sidebarScanClassName({ selected, active: isActiveStatus(scan.status) })}
-      onClick={onSelect}
-      title={scan.id}
-    >
-      <span className={sidebarScanStatusClassName({ selected, active: isActiveStatus(scan.status) })}>
-        {scan.is_representative ? 'Rep' : statusLabel(scan.status)}
-      </span>
-      <span className={sidebarScanBodyClassName}>
-        <strong>{scanLabel(scan)}</strong>
-        <small>{scan.id}</small>
-      </span>
-    </button>
   );
 }
 

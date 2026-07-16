@@ -24,9 +24,11 @@ test('shell keeps the route title stable while rendering compact active location
 });
 
 test('sidebar is an identity-and-selection tree rather than a duplicate scan inspector', () => {
+  // Location nodes select scans through the real callback and render scans as a
+  // compact identity tree (label + status dot), not duplicate-inspector detail.
   assert.match(shellSource, /onSelectScan\(scanId, location\.slug\)/);
-  assert.match(shellSource, /location\.scans\.map\(\(scan\) => \(/);
-  assert.match(shellSource, /<strong>\{scanLabel\(scan\)\}<\/strong>/);
-  assert.doesNotMatch(shellSource, /scanDetail\(scan\) - \{bytes\(scan\.total_bytes\)\}/);
-  assert.match(shellSource, /location\.scanCount === 1 \? 'scan' : 'scans'/);
+  assert.match(shellSource, /location\.scans\.map\(\(scan\) =>/);
+  assert.match(shellSource, /scanLabel\(scan\)/);
+  assert.match(shellSource, /SidebarLocationNode/);
+  assert.doesNotMatch(shellSource, /scanDetail\(scan\)/);
 });
