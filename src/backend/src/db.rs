@@ -341,8 +341,12 @@ struct ScanVisibility {
 #[derive(Clone, Debug)]
 struct TreeSourceRow {
     file: FileRow,
-    other_location_count: u64,
-    same_scan_count: u64,
+    // Per-file duplicate counters sourced from the precomputed
+    // `duplicate_cache_path_counts` table for the scope's ready cache run, not
+    // recomputed inline. They are 0 ("unknown") when no ready cache run exists.
+    duplicate_file_count: u64,
+    original_file_count: u64,
+    same_scan_duplicate_file_count: u64,
 }
 
 impl ScanVisibility {
@@ -394,6 +398,10 @@ impl Database {
             .with_context(|| format!("opening sqlite database {}", self.path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Wait up to 30s on a contended write instead of failing immediately with
+        // SQLITE_BUSY; concurrent scans/readers legitimately hold the write lock
+        // (plan-038).
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
         Ok(conn)
     }
 
@@ -1878,7 +1886,14 @@ impl Database {
         prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
 
         let normalized = normalize_tree_prefix(prefix);
-        let rows = scan_tree_source_rows(&tx, scan_id, &normalized)?;
+        // Tie the tree's duplicate counters to the same cache run this page
+        // reports as its status. Only a ready run has materialized path counts.
+        let ready_run_id = if duplicate_cache.status == "ready" {
+            duplicate_cache.run_id.as_deref()
+        } else {
+            None
+        };
+        let rows = scan_tree_source_rows(&tx, scan_id, &normalized, ready_run_id)?;
         let entries = build_tree_page_entries(rows, &normalized, depth, query.and_then(|q| q.filter.as_ref()))?;
         let total = entries.len() as u64;
         let limit = limit.unwrap_or(DEFAULT_TREE_PAGE_LIMIT).max(1);
@@ -2785,6 +2800,7 @@ fn scan_tree_source_rows(
     conn: &Connection,
     scan_id: &str,
     normalized_prefix: &str,
+    ready_run_id: Option<&str>,
 ) -> Result<Vec<TreeSourceRow>> {
     let like = if normalized_prefix.is_empty() {
         "%".to_string()
@@ -2794,57 +2810,27 @@ fn scan_tree_source_rows(
             normalized_prefix.replace('%', "\\%").replace('_', "\\_")
         )
     };
+    // Folder browsing is the hot path, so it must not recompute duplicate
+    // counters inline (correlated subqueries per descendant row are O(rows) and
+    // dominate wall time). Instead we read the per-scan-per-path counts that the
+    // background duplicate cache already materialized for the scope's ready run.
+    // When no ready run exists, `?3` is NULL, the LEFT JOIN misses, and the
+    // counters render as 0 ("unknown"). See plan-032/plan-039.
     let mut stmt = conn.prepare(
         r#"
-        WITH selected_scan AS (
-            SELECT location_id FROM scans WHERE id = ?1
-        ),
-        duplicate_scope AS (
-            SELECT COALESCE(
-                l.representative_scan_id,
-                (
-                    SELECT s2.id
-                    FROM scans s2
-                    WHERE s2.location_id = l.id AND s2.status = 'complete'
-                    ORDER BY s2.started_at DESC
-                    LIMIT 1
-                )
-            ) AS scan_id
-            FROM locations l
-            WHERE l.disabled = 0
-              AND l.id != (SELECT location_id FROM selected_scan)
-        )
         SELECT f.scan_id, l.slug, l.name, f.kind, f.path, f.name, f.size, f.blake3, f.sha256,
                f.ctime, f.mtime, f.mode, f.error,
-               (
-                   SELECT COUNT(DISTINCT s2.location_id)
-                   FROM files f2
-                   LEFT JOIN excluded_file_ids excluded_f2 ON excluded_f2.id = f2.id
-                   JOIN scans s2 ON s2.id = f2.scan_id
-                   WHERE excluded_f2.id IS NULL
-                     AND f.kind = 'file'
-                     AND f2.kind = 'file'
-                     AND f2.error IS NULL
-                     AND f2.blake3 = f.blake3
-                     AND f2.size = f.size
-                     AND f2.scan_id IN (SELECT scan_id FROM duplicate_scope WHERE scan_id IS NOT NULL)
-               ) AS other_location_count,
-               (
-                   SELECT COUNT(*)
-                   FROM files same_scan
-                   LEFT JOIN excluded_file_ids excluded_same_scan ON excluded_same_scan.id = same_scan.id
-                   WHERE excluded_same_scan.id IS NULL
-                     AND f.kind = 'file'
-                     AND same_scan.scan_id = f.scan_id
-                     AND same_scan.kind = 'file'
-                     AND same_scan.error IS NULL
-                     AND same_scan.blake3 = f.blake3
-                     AND same_scan.size = f.size
-               ) AS same_scan_count
+               COALESCE(dc.duplicate_file_count, 0),
+               COALESCE(dc.original_file_count, 0),
+               COALESCE(dc.same_scan_duplicate_file_count, 0)
         FROM files f
         LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
         JOIN scans s ON s.id = f.scan_id
         JOIN locations l ON l.id = s.location_id
+        LEFT JOIN duplicate_cache_path_counts dc
+               ON dc.run_id = ?3
+              AND dc.scan_id = f.scan_id
+              AND dc.path = f.path
         WHERE excluded_f.id IS NULL
           AND f.scan_id = ?1
           AND f.error IS NULL
@@ -2852,7 +2838,7 @@ fn scan_tree_source_rows(
         ORDER BY f.path
         "#,
     )?;
-    let rows = stmt.query_map(params![scan_id, like], |row| {
+    let rows = stmt.query_map(params![scan_id, like, ready_run_id], |row| {
         let name: String = row.get(5)?;
         Ok(TreeSourceRow {
             file: FileRow {
@@ -2871,8 +2857,9 @@ fn scan_tree_source_rows(
                 mode: row.get(11)?,
                 error: row.get(12)?,
             },
-            other_location_count: row.get(13)?,
-            same_scan_count: row.get(14)?,
+            duplicate_file_count: row.get(13)?,
+            original_file_count: row.get(14)?,
+            same_scan_duplicate_file_count: row.get(15)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -2916,9 +2903,15 @@ fn build_tree_page_entries(
         } else {
             parts.len()
         };
-        let duplicate_file_count = u64::from(is_file && row.other_location_count > 0);
-        let original_file_count = u64::from(is_file && row.other_location_count == 0);
-        let same_scan_duplicate_file_count = u64::from(is_file && row.same_scan_count > 1);
+        // Per-file counters already come from the duplicate cache (0 when no
+        // ready run). Directory rows roll them up via the fold below.
+        let duplicate_file_count = if is_file { row.duplicate_file_count } else { 0 };
+        let original_file_count = if is_file { row.original_file_count } else { 0 };
+        let same_scan_duplicate_file_count = if is_file {
+            row.same_scan_duplicate_file_count
+        } else {
+            0
+        };
 
         for index in 1..=directory_parts {
             if depth != 0 && index > depth as usize {
@@ -5022,6 +5015,73 @@ mod tests {
                 0,
             )
             .is_err());
+    }
+
+    #[test]
+    fn scan_tree_duplicate_counts_come_from_cache_not_inline() {
+        // Folder browsing must not recompute duplicate counters inline (the hot
+        // path); they come from the precomputed per-scan-per-path duplicate
+        // cache. Until a ready cache run exists they render as unknown (0).
+        let root = test_root("scan-tree-cache-counts");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Media".to_string(),
+                slug: "media".to_string(),
+                root_path: root.join("location"),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+        let dir_row = NewFile {
+            scan_id: scan_id.clone(),
+            kind: "dir".to_string(),
+            path: "folder".to_string(),
+            name: "folder".to_string(),
+            size: 0,
+            blake3: String::new(),
+            sha256: String::new(),
+            ctime: None,
+            mtime: None,
+            mode: None,
+            error: None,
+        };
+        // Two files in the same folder share content (same blake3+size) → they
+        // are same-scan duplicates of each other.
+        db.insert_file_batch(&[
+            dir_row,
+            test_file(&scan_id, "folder/a.txt", 10, "dup-hash"),
+            test_file(&scan_id, "folder/b.txt", 10, "dup-hash"),
+        ])
+        .unwrap();
+        db.finish_scan(&scan_id, 2, 1, 0, 20, "complete").unwrap();
+        db.set_representative_scan(&scan_id).unwrap();
+
+        // Before any cache run the tree reports duplicate counters as unknown.
+        let page = db.scan_tree_page(&scan_id, "folder", Some(20), 0, 1, None).unwrap();
+        let file_a = page.entries.iter().find(|e| e.path == "folder/a.txt").unwrap();
+        assert_eq!(file_a.same_scan_duplicate_file_count, 0);
+
+        // After the cache is ready the counters come from the cache, per path.
+        db.rebuild_duplicate_cache_for_current_scope()
+            .unwrap()
+            .expect("representative scan has a cache scope");
+        assert_eq!(db.current_duplicate_cache_status().unwrap().status, "ready");
+
+        let file_page = db.scan_tree_page(&scan_id, "folder", Some(20), 0, 1, None).unwrap();
+        for name in ["folder/a.txt", "folder/b.txt"] {
+            let entry = file_page.entries.iter().find(|e| e.path == name).unwrap();
+            assert_eq!(entry.same_scan_duplicate_file_count, 1, "{name}");
+        }
+
+        // The directory row rolls up both same-scan duplicate files.
+        let root_page = db.scan_tree_page(&scan_id, "", Some(20), 0, 1, None).unwrap();
+        let folder = root_page.entries.iter().find(|e| e.path == "folder").unwrap();
+        assert_eq!(folder.kind, "dir");
+        assert_eq!(folder.same_scan_duplicate_file_count, 2);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
