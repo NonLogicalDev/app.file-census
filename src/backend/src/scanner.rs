@@ -567,7 +567,10 @@ pub fn run_prepared_scan(
     prepared: PreparedScan,
     progress: Option<ScanProgressStore>,
 ) -> Result<ScanSummary> {
-    let flush_size = if progress.is_some() { 25 } else { 500 };
+    // Batch SQLite writes at 2,048 rows for both UI and CLI paths (plan-036).
+    // Progress counters update per result independently, so a larger write
+    // batch keeps scan throughput up without starving live progress.
+    let flush_size = 2048;
     let mut batch = Vec::with_capacity(flush_size);
     let mut file_count = 0;
     let mut dir_count = 0;
