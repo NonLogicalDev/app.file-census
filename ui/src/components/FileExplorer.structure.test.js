@@ -25,9 +25,11 @@ test('file explorer does not advertise unavailable EXIF enrichment controls', ()
 
 test('file explorer uses a separate directory-only tree beside the file workspace', () => {
   assert.match(fileExplorerSource, /aria-label="Scan views"/);
-  assert.match(fileExplorerSource, /Files\s*<\/SegmentedTab>/);
-  assert.match(fileExplorerSource, /File tree\s*<\/SegmentedTab>/);
-  assert.match(fileExplorerSource, /Delete Check\s*<\/SegmentedTab>/);
+  // Mode selector exposes the three scan views, each wired to onSetScanSubview.
+  assert.match(fileExplorerSource, /\['files', 'Files'/);
+  assert.match(fileExplorerSource, /\['tree', 'File tree'/);
+  assert.match(fileExplorerSource, /\['delete-check', 'Delete Check'/);
+  assert.match(fileExplorerSource, /onClick=\{\(\) => onSetScanSubview\(value\)\}/);
   assert.match(fileExplorerSource, /const showingFileTree = scanSubview === 'tree'/);
   assert.match(fileExplorerSource, /<DirectoryTree/);
   assert.match(fileExplorerSource, /onToggle=\{onToggleDirectoryTree\}/);

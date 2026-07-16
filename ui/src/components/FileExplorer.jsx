@@ -4,27 +4,26 @@ import { Icon } from './Icon.jsx';
 import SearchFilterControls from './search/SearchFilterControls.jsx';
 import ScanProgressPools from './ScanProgressPools.jsx';
 import {
-  actionToolbarClassName,
   Button,
-  breadcrumbsClassName,
-  columnPickerClassName,
   deleteCheckCalloutClassName,
   deleteCheckEmptyClassName,
   emptyTextClassName,
-  explorerClassName,
-  explorerHeaderClassName,
-  finderToolbarClassName,
   logLineClassName,
   logPanelClassName,
   notesPanelBodyClassName,
-  scanNotesPanelClassName,
-  SegmentedTab,
-  SegmentedTabs,
-  treeClassName,
-  treeEmptyClassName,
-  Toolbar
+  scanNotesPanelClassName
 } from './ui/index.jsx';
 import { bytes, isActiveStatus, statusLabel } from '../utils/format.js';
+
+// Prototype (location.css) chrome, translated to the shared token palette.
+const modePill = (active) =>
+  `inline-flex h-6 items-center gap-1.5 rounded px-2 text-[11px] transition-colors ${
+    active ? 'bg-surface-muted text-text' : 'text-muted hover:text-text'
+  }`;
+const ctrlBtn =
+  'inline-flex h-[30px] items-center gap-1.5 rounded-md border border-border bg-surface-subtle px-2.5 text-[11px] text-muted transition-colors hover:bg-surface hover:text-text disabled:cursor-default disabled:opacity-40 disabled:hover:bg-surface-subtle disabled:hover:text-muted';
+const navBtn =
+  'grid h-[26px] w-[26px] place-items-center rounded text-muted transition-colors hover:text-text disabled:text-border-strong disabled:hover:text-border-strong';
 
 export default function FileExplorer(props) {
   const {
@@ -94,19 +93,56 @@ export default function FileExplorer(props) {
   const selectedCount = selectedGridEntries.length;
   const canBuildThumbnails = Boolean(location?.connected && activeScan);
   const canStopScan = typeof onStopScan === 'function';
+  const activeScanStatus = isActiveStatus(activeScan.status);
   const hasUnavailableScanControlStatus = activeScan.status === 'paused' || activeScan.status === 'repairing';
+  const scanRole = activeScan.is_representative
+    ? 'Representative scan'
+    : activeScanStatus
+      ? 'Live scan'
+      : 'Historical scan';
+
+  const modes = [
+    ['files', 'Files', 'browseFiles'],
+    ['tree', 'File tree', 'folder'],
+    ['delete-check', 'Delete Check', 'deleteCheck']
+  ];
+
   const breadcrumbBar = (
-    <div className={breadcrumbsClassName}>
+    <nav className="flex min-h-8 items-center gap-1 overflow-x-auto border-y border-sidebar-border bg-sidebar-bg px-2" aria-label="Current path">
+      <button type="button" className={navBtn} onClick={onGoBack} disabled={pathHistoryIndex <= 0} aria-label="Back">
+        <Icon name="back" className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        className={navBtn}
+        onClick={onGoForward}
+        disabled={pathHistoryIndex >= pathHistory.length - 1}
+        aria-label="Forward"
+      >
+        <Icon name="forward" className="h-3.5 w-3.5" />
+      </button>
+      <button type="button" className={navBtn} onClick={onGoParent} disabled={!selectedPath} aria-label="Parent">
+        <Icon name="parent" className="h-3.5 w-3.5" />
+      </button>
+      <span className="mx-2 h-4 w-px flex-none bg-border" aria-hidden="true" />
       {breadcrumbs(selectedPath).map((crumb, index) => (
-        <span className="inline-flex items-center gap-1.5" key={crumb.path}>
-          {index > 0 && <span className="select-none text-muted" aria-hidden="true">-</span>}
-          <button type="button" onClick={() => onLoadTree(crumb.path)}>{crumb.label}</button>
+        <span className="inline-flex flex-none items-center" key={crumb.path}>
+          {index > 0 && <Icon name="chevronRight" className="mx-0.5 h-3 w-3 text-border-strong" />}
+          <button
+            type="button"
+            className="max-w-[240px] truncate px-1 text-[11px] text-muted transition-colors last:text-text hover:text-text"
+            onClick={() => onLoadTree(crumb.path)}
+          >
+            {crumb.label}
+          </button>
         </span>
       ))}
-    </div>
+      <span className="ml-auto flex-none pl-3 text-[10px] tabular-nums text-text-tertiary">{visibleGridRows.length} items</span>
+    </nav>
   );
+
   const resultsTable = (
-    <div className={treeClassName}>
+    <div className="relative block min-h-[420px] overflow-auto border border-sidebar-border bg-bg">
       <FileGrid
         rows={visibleGridRows}
         visibleColumns={gridVisibleColumns}
@@ -123,12 +159,12 @@ export default function FileExplorer(props) {
         onDelete={showingDeleteCheck ? null : onRequestDeletePath}
       />
       {!visibleGridRows.length && (
-        <p className={treeEmptyClassName}>
+        <p className="pointer-events-none absolute inset-x-0 top-[52px] z-[1] p-[18px] text-center text-[11px] text-muted">
           {filesLoading
             ? 'Loading files…'
             : showingDeleteCheck
               ? (deleteCheck ? 'No missing files.' : 'No Delete Check rows yet.')
-              : isActiveStatus(activeScan.status)
+              : activeScanStatus
                 ? 'Waiting for the first flushed files...'
                 : 'No files discovered at this path yet.'}
         </p>
@@ -137,87 +173,128 @@ export default function FileExplorer(props) {
   );
 
   return (
-    <div className={explorerClassName}>
-      <SegmentedTabs className="mb-3" role="tablist" aria-label="Scan views">
-        <SegmentedTab
-          type="button"
-          role="tab"
-          aria-selected={scanSubview === 'files'}
-          active={scanSubview === 'files'}
-          onClick={() => onSetScanSubview('files')}
-        >
-          Files
-        </SegmentedTab>
-        <SegmentedTab
-          type="button"
-          role="tab"
-          aria-selected={showingFileTree}
-          active={showingFileTree}
-          onClick={() => onSetScanSubview('tree')}
-        >
-          File tree
-        </SegmentedTab>
-        <SegmentedTab
-          type="button"
-          role="tab"
-          aria-selected={scanSubview === 'delete-check'}
-          active={scanSubview === 'delete-check'}
-          onClick={() => onSetScanSubview('delete-check')}
-        >
-          Delete Check
-        </SegmentedTab>
-      </SegmentedTabs>
-
-      <div className={explorerHeaderClassName}>
-        <div>
-          <h3>Files</h3>
-          <span>{statusLabel(activeScan.status)} - {activeScan.file_count} indexed files - {bytes(activeScan.total_bytes)}</span>
+    <div className="min-w-0 text-[13px]">
+      {/* Route bar */}
+      <header className="flex items-center justify-between gap-3 border-b border-sidebar-border px-1 pb-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <Icon name="locations" className="h-[15px] w-[15px] flex-none text-muted" />
+          <strong className="truncate text-[13px] font-semibold text-text">{scanRole}</strong>
+          <span
+            className={`flex-none rounded-full border px-[7px] text-[10px] leading-[18px] ${
+              activeScanStatus ? 'border-success/20 bg-success-soft text-success' : 'border-border bg-surface-subtle text-muted'
+            }`}
+          >
+            {statusLabel(activeScan.status)}
+          </span>
         </div>
-        {showScanActions && (
-          <Toolbar className={actionToolbarClassName}>
-            {isActiveStatus(activeScan.status) && canStopScan && activeScan.status !== 'stopping' && (
-              <Button variant="warning" onClick={() => onStopScan(activeScan.id)} disabled={busy} icon={<Icon name="stop" />}>
-                Stop
-              </Button>
-            )}
-            {!isActiveStatus(activeScan.status) && (
-              <Button variant="secondary" onClick={() => onUpdateScan(activeScan.id)} disabled={busy} icon={<Icon name="update" />}>
-                Update scan
-              </Button>
-            )}
-            {activeScan.is_representative ? (
-              <Button
-                variant="warning"
-                onClick={() => onClearRepresentative(activeScan.id)}
+        <div className="flex flex-none items-center gap-3 whitespace-nowrap text-[11px] text-text-tertiary max-[1040px]:hidden">
+          <span>{Number(activeScan.file_count || 0).toLocaleString()} files</span>
+          <span className="h-3.5 w-px bg-border" aria-hidden="true" />
+          <span>{bytes(activeScan.total_bytes)}</span>
+        </div>
+      </header>
+
+      {/* Workspace row: mode selector + view/command actions */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-sidebar-border py-2">
+        <div className="inline-flex h-[30px] flex-none items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5" role="tablist" aria-label="Scan views">
+          {modes.map(([value, label, icon]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={scanSubview === value}
+              className={modePill(scanSubview === value)}
+              onClick={() => onSetScanSubview(value)}
+            >
+              {value === 'delete-check' && <Icon name={icon} className="h-3 w-3" />}
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          {showingDeleteCheck ? (
+            <>
+              <button type="button" className={ctrlBtn} onClick={() => onRunDeleteCheck(activeScan.id, [])} disabled={busy}>
+                <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Check current folder
+              </button>
+              {deleteCheck && (
+                <button type="button" className={ctrlBtn} onClick={onCloseDeleteCheck} disabled={busy}>
+                  <Icon name="close" className="h-3.5 w-3.5" /> Clear result
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className={ctrlBtn}
+                onClick={() => onRunDeleteCheck(activeScan.id, selectedGridEntries)}
                 disabled={busy}
-                icon={<Icon name="representative" />}
               >
-                Clear representative
-              </Button>
-            ) : (
-              <Button
-                variant="secondary"
-                onClick={() => onSetRepresentative(activeScan.id)}
-                disabled={busy}
-                icon={<Icon name="representative" />}
+                <Icon name="deleteCheck" className="h-3.5 w-3.5" />
+                {selectedCount ? `Delete check (${selectedCount})` : 'Delete check'}
+              </button>
+              <button
+                type="button"
+                className={ctrlBtn}
+                onClick={() => onBrowseCurrentFolder(location)}
+                disabled={busy || !location.connected}
               >
-                Use for duplicates
-              </Button>
-            )}
-            <Button variant="secondary" onClick={() => onOpenScanNotes(activeScan)} disabled={busy} icon={<Icon name="edit" />}>
-              {activeScan.notes ? 'Edit notes' : 'Add notes'}
-            </Button>
-            <Button variant="secondary" onClick={() => onOpenScanExcludes(activeScan)} disabled={busy} icon={<Icon name="exclude" />}>
-              Excludes
-            </Button>
-            {!isActiveStatus(activeScan.status) && (
-              <Button variant="danger" onClick={() => onRequestDeleteScan(activeScan.id)} disabled={busy} icon={<Icon name="delete" />}>
-                Delete scan
-              </Button>
-            )}
-          </Toolbar>
-        )}
+                <Icon name="folder" className="h-3.5 w-3.5" /> Browse Folder
+              </button>
+              <button
+                type="button"
+                className={ctrlBtn}
+                onClick={() => onRequestBuildThumbnails(showingDeleteCheck ? [] : selectedGridEntries)}
+                disabled={busy || !canBuildThumbnails}
+                title={location.connected ? 'Build thumbnails for the current folder or selected rows' : 'Connect this location to build thumbnails'}
+              >
+                <Icon name="thumbnails" className="h-3.5 w-3.5" />
+                {selectedCount ? `Build Thumbnails (${selectedCount})` : 'Build Thumbnails'}
+              </button>
+            </>
+          )}
+          <button type="button" className={`${ctrlBtn} ${showColumns ? 'bg-surface text-text' : ''}`} onClick={onToggleColumns} aria-expanded={showColumns}>
+            <Icon name="columns" className="h-3.5 w-3.5" /> Columns
+          </button>
+        </div>
       </div>
+
+      {showScanActions && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-sidebar-border py-2">
+          {activeScanStatus && canStopScan && activeScan.status !== 'stopping' && (
+            <Button variant="warning" size="sm" onClick={() => onStopScan(activeScan.id)} disabled={busy} icon={<Icon name="stop" />}>
+              Stop
+            </Button>
+          )}
+          {!activeScanStatus && (
+            <Button variant="secondary" size="sm" onClick={() => onUpdateScan(activeScan.id)} disabled={busy} icon={<Icon name="update" />}>
+              Update scan
+            </Button>
+          )}
+          {activeScan.is_representative ? (
+            <Button variant="warning" size="sm" onClick={() => onClearRepresentative(activeScan.id)} disabled={busy} icon={<Icon name="representative" />}>
+              Clear representative
+            </Button>
+          ) : (
+            <Button variant="secondary" size="sm" onClick={() => onSetRepresentative(activeScan.id)} disabled={busy} icon={<Icon name="representative" />}>
+              Use for duplicates
+            </Button>
+          )}
+          <Button variant="secondary" size="sm" onClick={() => onOpenScanNotes(activeScan)} disabled={busy} icon={<Icon name="edit" />}>
+            {activeScan.notes ? 'Edit notes' : 'Add notes'}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => onOpenScanExcludes(activeScan)} disabled={busy} icon={<Icon name="exclude" />}>
+            Excludes
+          </Button>
+          {!activeScanStatus && (
+            <Button variant="danger" size="sm" onClick={() => onRequestDeleteScan(activeScan.id)} disabled={busy} icon={<Icon name="delete" />}>
+              Delete scan
+            </Button>
+          )}
+        </div>
+      )}
 
       {activeScan.status === 'interrupted' && (
         <div className="my-2.5 flex flex-wrap items-center justify-between gap-3 rounded-panel border border-warning bg-warning-soft px-3 py-2.5 text-warning">
@@ -246,82 +323,26 @@ export default function FileExplorer(props) {
         </section>
       )}
 
-      <SearchFilterControls
-        query={query}
-        setQuery={setQuery}
-        filters={searchFilters}
-        locations={locations}
-        busy={busy}
-        placeholder="Search this scan folder"
-        submitLabel="Filter"
-        helperText="Filters the current folder view and follows the route."
-        onSubmit={onCommitSearch}
-        onAddFilter={onAddSearchFilter}
-        onRemoveFilter={onRemoveSearchFilter}
-        onGroupFilters={onGroupSearchFilters}
-        onReplaceFilterState={onReplaceSearchFilterState}
-      />
-
-      <Toolbar className={finderToolbarClassName}>
-        {showingDeleteCheck ? (
-          <>
-            <Button variant="secondary" onClick={() => onSetScanSubview('files')} icon={<Icon name="browseFiles" />}>
-              Files
-            </Button>
-            <Button variant="warning" onClick={() => onRunDeleteCheck(activeScan.id, [])} disabled={busy} icon={<Icon name="deleteCheck" />}>
-              Check current folder
-            </Button>
-            {deleteCheck && (
-              <Button variant="secondary" onClick={onCloseDeleteCheck} disabled={busy} icon={<Icon name="close" />}>
-                Clear result
-              </Button>
-            )}
-          </>
-        ) : (
-          <>
-            <Button variant="secondary" onClick={onGoBack} disabled={pathHistoryIndex <= 0} icon={<Icon name="back" />}>
-              Back
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={onGoForward}
-              disabled={pathHistoryIndex >= pathHistory.length - 1}
-              trailingIcon={<Icon name="forward" className="-ml-[0.12rem] inline-block h-[1em] w-[1em] shrink-0 text-[0.95em] leading-none stroke-current" />}
-            >
-              Forward
-            </Button>
-            <Button variant="secondary" onClick={onGoParent} disabled={!selectedPath} icon={<Icon name="parent" />}>
-              Parent
-            </Button>
-            <Button variant="warning" onClick={() => onRunDeleteCheck(activeScan.id, selectedGridEntries)} disabled={busy} icon={<Icon name="deleteCheck" />}>
-              {selectedCount ? `Delete check (${selectedCount})` : 'Delete check'}
-            </Button>
-          </>
-        )}
-        <Button
-          variant="secondary"
-          onClick={() => onBrowseCurrentFolder(location)}
-          disabled={busy || !location.connected}
-          icon={<Icon name="folder" />}
-        >
-          Browse Folder
-        </Button>
-        <Button
-          variant="secondary"
-          onClick={() => onRequestBuildThumbnails(showingDeleteCheck ? [] : selectedGridEntries)}
-          disabled={busy || !canBuildThumbnails}
-          icon={<Icon name="thumbnails" />}
-          title={location.connected ? 'Build thumbnails for the current folder or selected rows' : 'Connect this location to build thumbnails'}
-        >
-          {selectedCount && !showingDeleteCheck ? `Build Thumbnails (${selectedCount})` : 'Build Thumbnails'}
-        </Button>
-        <Button variant="secondary" onClick={onToggleColumns} icon={<Icon name="columns" />}>
-          Columns
-        </Button>
-      </Toolbar>
+      <div className="py-2">
+        <SearchFilterControls
+          query={query}
+          setQuery={setQuery}
+          filters={searchFilters}
+          locations={locations}
+          busy={busy}
+          placeholder="Search this scan folder"
+          submitLabel="Filter"
+          helperText="Filters the current folder view and follows the route."
+          onSubmit={onCommitSearch}
+          onAddFilter={onAddSearchFilter}
+          onRemoveFilter={onRemoveSearchFilter}
+          onGroupFilters={onGroupSearchFilters}
+          onReplaceFilterState={onReplaceSearchFilterState}
+        />
+      </div>
 
       {!showingDeleteCheck && selectedCount > 0 && (
-        <div className="mb-2 flex min-h-9 items-center justify-between gap-3 rounded-ui border border-accent/25 bg-accent-soft px-3 py-1.5 text-sm text-accent">
+        <div className="mb-2 flex min-h-9 items-center justify-between gap-3 border-y border-sidebar-border bg-surface-subtle px-3 py-1.5 text-[11px] text-muted-strong">
           <span className="font-semibold">{selectedCount} selected</span>
           <Button variant="ghost" size="sm" onClick={onClearGridSelection} disabled={busy} icon={<Icon name="close" />}>
             Clear selection
@@ -330,10 +351,10 @@ export default function FileExplorer(props) {
       )}
 
       {showColumns && (
-        <div className={columnPickerClassName}>
+        <div className="mb-2.5 mt-1 flex flex-wrap gap-x-4 gap-y-2 border border-sidebar-border bg-sidebar-bg p-3 text-[11px]">
           {fileColumns.map(([column, label]) => (
-            <label key={column}>
-              <input type="checkbox" checked={visibleColumns.includes(column)} disabled={column === 'name'} onChange={() => onToggleColumn(column)} /> {label}
+            <label key={column} className="flex items-center gap-1.5 text-muted">
+              <input type="checkbox" className="h-3.5 w-3.5" checked={visibleColumns.includes(column)} disabled={column === 'name'} onChange={() => onToggleColumn(column)} /> {label}
             </label>
           ))}
         </div>
@@ -367,17 +388,22 @@ export default function FileExplorer(props) {
           {resultsTable}
         </>
       ) : showingFileTree ? (
-        <div className="grid min-h-[620px] overflow-hidden rounded-panel border border-border bg-surface md:grid-cols-[minmax(190px,240px)_minmax(0,1fr)]">
-          <DirectoryTree
-            nodes={directoryTreeNodes}
-            expandedPaths={directoryTreeExpandedPaths}
-            loadingPaths={directoryTreeLoadingPaths}
-            selectedPath={selectedPath}
-            onToggle={onToggleDirectoryTree}
-            onSelect={onLoadTree}
-            onLoadMore={onLoadMoreDirectoryTree}
-          />
-          <section className="min-w-0 bg-bg p-[5px]">
+        <div className="mt-2 grid min-h-[620px] overflow-hidden border border-sidebar-border bg-bg md:grid-cols-[minmax(190px,248px)_minmax(0,1fr)]">
+          <div className="flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
+            <div className="flex flex-none items-center justify-between border-b border-sidebar-border px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
+              <span>Folders</span>
+            </div>
+            <DirectoryTree
+              nodes={directoryTreeNodes}
+              expandedPaths={directoryTreeExpandedPaths}
+              loadingPaths={directoryTreeLoadingPaths}
+              selectedPath={selectedPath}
+              onToggle={onToggleDirectoryTree}
+              onSelect={onLoadTree}
+              onLoadMore={onLoadMoreDirectoryTree}
+            />
+          </div>
+          <section className="flex min-w-0 flex-col">
             {breadcrumbBar}
             {resultsTable}
           </section>
