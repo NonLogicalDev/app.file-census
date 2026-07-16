@@ -49,6 +49,9 @@ export default function SearchFilterControls({
   onReplaceFilterState
 }) {
   const [clipboardStatus, setClipboardStatus] = useState('');
+  // Advanced filters stay collapsed for query-only use and auto-expand when the
+  // route already carries structured filters (plan-027 progressive disclosure).
+  const [advancedOpen, setAdvancedOpen] = useState(filters.length > 0);
   const [builder, setBuilder] = useState(null);
   const [draftTerm, setDraftTerm] = useState('extension');
   const [draftOperator, setDraftOperator] = useState(defaultOperatorForSearchTerm('extension'));
@@ -203,11 +206,24 @@ export default function SearchFilterControls({
 
   return (
     <section className="grid gap-2.5">
-      <form className="grid grid-cols-[minmax(0,1fr)_auto] gap-2.5 max-[960px]:grid-cols-1" onSubmit={submitSearch}>
-        <input className={fieldClassName()} value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder={placeholder} />
-        <Button type="submit" disabled={busy} icon={<Icon name="search" />}>{submitLabel}</Button>
-      </form>
+      <div className="flex flex-wrap items-center gap-2.5">
+        <form className="flex min-w-0 flex-1 items-center gap-2.5" onSubmit={submitSearch}>
+          <input className={`${fieldClassName()} min-w-0 flex-1`} value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder={placeholder} />
+          <Button type="submit" disabled={busy} icon={<Icon name="search" />}>{submitLabel}</Button>
+        </form>
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => setAdvancedOpen((open) => !open)}
+          aria-expanded={advancedOpen}
+          icon={<Icon name="options" />}
+          trailingIcon={<Icon name={advancedOpen ? 'chevronDown' : 'chevronRight'} />}
+        >
+          Advanced filters{rootFilters.length ? ` (${rootFilters.length})` : ''}
+        </Button>
+      </div>
 
+      {advancedOpen && (
       <section className="grid gap-2 rounded-panel border border-border bg-surface p-2.5 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2">
           <div className="min-w-0">
@@ -324,6 +340,7 @@ export default function SearchFilterControls({
           </form>
         )}
       </section>
+      )}
     </section>
   );
 }

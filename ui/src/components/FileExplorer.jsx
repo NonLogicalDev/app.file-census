@@ -114,7 +114,7 @@ export default function FileExplorer(props) {
   ];
 
   const breadcrumbBar = (
-    <nav className="flex min-h-8 items-center gap-1 overflow-x-auto border-y border-sidebar-border bg-sidebar-bg px-2" aria-label="Current path">
+    <nav className="flex min-h-8 flex-none items-center gap-1 overflow-x-auto border-b border-sidebar-border bg-sidebar-bg px-2" aria-label="Current path">
       <button type="button" className={navBtn} onClick={onGoBack} disabled={pathHistoryIndex <= 0} aria-label="Back">
         <Icon name="back" className="h-3.5 w-3.5" />
       </button>
@@ -148,7 +148,7 @@ export default function FileExplorer(props) {
   );
 
   const resultsTable = (
-    <div className="relative block min-h-[420px] overflow-auto border border-sidebar-border bg-bg">
+    <div className="relative block min-h-[420px] flex-1 overflow-auto bg-bg">
       <FileGrid
         rows={visibleGridRows}
         visibleColumns={gridVisibleColumns}
@@ -181,7 +181,7 @@ export default function FileExplorer(props) {
   );
 
   const inspectorPane = (
-    <aside className="flex min-h-0 min-w-0 flex-col border border-sidebar-border bg-sidebar-bg" aria-label="File inspector">
+    <aside className="flex min-h-0 min-w-0 flex-col border-l border-sidebar-border bg-sidebar-bg" aria-label="File inspector">
       <div className="flex h-8 flex-none items-center justify-between border-b border-sidebar-border px-3 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
         <span>Inspector</span>
         <button
@@ -473,43 +473,31 @@ export default function FileExplorer(props) {
               </Button>
             </section>
           )}
-          {resultsTable}
+          <div className="border border-sidebar-border bg-bg">{resultsTable}</div>
         </>
-      ) : showingFileTree ? (
-        <div
-          className="mt-2 grid min-h-[620px] overflow-hidden border border-sidebar-border bg-bg"
-          style={{ gridTemplateColumns: inspectorOpen ? 'minmax(190px,240px) minmax(0,1fr) 320px' : 'minmax(190px,240px) minmax(0,1fr)' }}
-        >
-          <div className="flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
-            <div className="flex flex-none items-center justify-between border-b border-sidebar-border px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
-              <span>Folders</span>
-            </div>
-            <DirectoryTree
-              nodes={directoryTreeNodes}
-              expandedPaths={directoryTreeExpandedPaths}
-              loadingPaths={directoryTreeLoadingPaths}
-              selectedPath={selectedPath}
-              onToggle={onToggleDirectoryTree}
-              onSelect={onLoadTree}
-              onLoadMore={onLoadMoreDirectoryTree}
-            />
-          </div>
-          <section className="flex min-w-0 flex-col border-r border-sidebar-border">
-            {breadcrumbBar}
-            {resultsTable}
-          </section>
-          {inspectorOpen && inspectorPane}
-        </div>
       ) : (
-        <div
-          className="mt-2 grid overflow-hidden"
-          style={{ gridTemplateColumns: inspectorOpen ? 'minmax(0,1fr) 320px' : 'minmax(0,1fr)' }}
-        >
-          <div className="min-w-0">
-            {breadcrumbBar}
-            {resultsTable}
+        <div className="mt-2 flex min-h-[620px] flex-col overflow-hidden border border-sidebar-border bg-bg">
+          {breadcrumbBar}
+          <div
+            className="grid min-h-0 flex-1"
+            style={{ gridTemplateColumns: inspectorOpen ? 'minmax(190px,248px) minmax(0,1fr) 320px' : 'minmax(190px,248px) minmax(0,1fr)' }}
+          >
+            <div className="flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
+              <DirectoryTree
+                nodes={directoryTreeNodes}
+                expandedPaths={directoryTreeExpandedPaths}
+                loadingPaths={directoryTreeLoadingPaths}
+                selectedPath={selectedPath}
+                onToggle={onToggleDirectoryTree}
+                onSelect={onLoadTree}
+                onLoadMore={onLoadMoreDirectoryTree}
+              />
+            </div>
+            <section className="flex min-w-0 flex-col">
+              {resultsTable}
+            </section>
+            {inspectorOpen && inspectorPane}
           </div>
-          {inspectorOpen && inspectorPane}
         </div>
       )}
 
