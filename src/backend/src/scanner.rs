@@ -1840,6 +1840,110 @@ fn ensure_same_unix_file_identity(
     Ok(())
 }
 
+// --- blake3_light: compile-time-configured uniform-sample fingerprint (plan-064) ---
+// `blake3_light` is a heuristic fingerprint for cheaply inventorying slow disks.
+// It is NOT an exact-content identity: `blake3` stays the exact hash, and light
+// hashes must never silently feed exact duplicate detection or the exact
+// delete-check `safe`.
+
+const fn parse_env_usize(value: Option<&str>, default: usize) -> usize {
+    match value {
+        Some(text) => {
+            let bytes = text.as_bytes();
+            if bytes.is_empty() {
+                return default;
+            }
+            let mut index = 0;
+            let mut acc = 0usize;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                if byte < b'0' || byte > b'9' {
+                    return default;
+                }
+                acc = acc * 10 + (byte - b'0') as usize;
+                index += 1;
+            }
+            acc
+        }
+        None => default,
+    }
+}
+
+const LIGHT_HASH_SLICE_COUNT: usize = {
+    let configured = parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_SLICE_COUNT"), 3);
+    if configured < 2 {
+        2
+    } else {
+        configured
+    }
+};
+const LIGHT_HASH_SLICE_WIDTH: usize = {
+    let configured = parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_SLICE_WIDTH"), 5 * 1024 * 1024);
+    if configured == 0 {
+        1
+    } else {
+        configured
+    }
+};
+const LIGHT_HASH_TERMINAL_SLICE_WIDTH: usize = {
+    let configured =
+        parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_TERMINAL_SLICE_WIDTH"), 5 * 1024 * 1024);
+    if configured == 0 {
+        1
+    } else {
+        configured
+    }
+};
+
+/// Byte ranges `blake3_light` samples for a file of `size` bytes. Small files
+/// (≤ `2*terminal + (count-2)*slice`) return a single whole-file range so the
+/// light hash can equal the full BLAKE3. Larger files return `slice_count`
+/// ranges: first and last anchored at start/end with terminal width, interior
+/// ranges of slice width with evenly-spaced start offsets.
+fn light_hash_slice_plan(size: u64) -> Vec<(u64, u64)> {
+    let count = LIGHT_HASH_SLICE_COUNT;
+    let slice_width = LIGHT_HASH_SLICE_WIDTH as u64;
+    let terminal_width = LIGHT_HASH_TERMINAL_SLICE_WIDTH as u64;
+    let whole_threshold = 2 * terminal_width + (count as u64 - 2) * slice_width;
+    if size <= whole_threshold {
+        return vec![(0, size)];
+    }
+
+    let mut plan = Vec::with_capacity(count);
+    let denom = (count - 1) as f64;
+    for index in 0..count {
+        let width = if index == 0 || index == count - 1 {
+            terminal_width
+        } else {
+            slice_width
+        };
+        let max_offset = size.saturating_sub(width);
+        let fraction = index as f64 / denom;
+        let offset = (fraction * max_offset as f64).round() as u64;
+        let offset = offset.min(max_offset);
+        let len = width.min(size - offset);
+        plan.push((offset, len));
+    }
+    plan
+}
+
+/// Computes `blake3_light` over an in-memory buffer (used for tests and small
+/// inputs). Hashes the sampled ranges in order.
+// Wired into the scanner hash pipeline in plan-069 step 2; until then only the
+// primitive + tests exist.
+#[allow(dead_code)]
+fn blake3_light_of_bytes(bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for (offset, len) in light_hash_slice_plan(bytes.len() as u64) {
+        let start = offset as usize;
+        let end = start.saturating_add(len as usize).min(bytes.len());
+        if start < end {
+            hasher.update(&bytes[start..end]);
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 fn hash_open_file(file: File, metadata: HashedFileMetadata) -> Result<HashedFile> {
     let mut reader = BufReader::new(file);
     let mut blake3_hasher = blake3::Hasher::new();
@@ -1939,6 +2043,58 @@ mod tests {
         control.request_stop();
         handle.join().unwrap();
         assert!(control.is_stopped());
+    }
+
+    #[test]
+    fn blake3_light_small_file_equals_full_hash() {
+        // Files at/below the whole-file threshold hash their entire contents, so
+        // the light fingerprint equals the full BLAKE3 (plan-064).
+        let data = b"the quick brown fox jumps over the lazy dog";
+        assert_eq!(
+            blake3_light_of_bytes(data),
+            blake3::hash(data).to_hex().to_string()
+        );
+    }
+
+    #[test]
+    fn blake3_light_plan_samples_terminals_and_interior() {
+        let terminal = LIGHT_HASH_TERMINAL_SLICE_WIDTH as u64;
+        let slice = LIGHT_HASH_SLICE_WIDTH as u64;
+        let size = 2 * terminal + (LIGHT_HASH_SLICE_COUNT as u64 - 2) * slice + terminal;
+        let plan = light_hash_slice_plan(size);
+
+        assert_eq!(plan.len(), LIGHT_HASH_SLICE_COUNT);
+        assert_eq!(plan[0], (0, terminal), "first slice anchored at start");
+        let (last_off, last_len) = *plan.last().unwrap();
+        assert_eq!(last_len, terminal);
+        assert_eq!(last_off + last_len, size, "last slice anchored at end");
+        for window in plan.windows(2) {
+            assert!(window[1].0 > window[0].0, "slice offsets strictly increase");
+        }
+    }
+
+    #[test]
+    fn blake3_light_ignores_unsampled_bytes_but_reflects_sampled_ones() {
+        let size = (2 * LIGHT_HASH_TERMINAL_SLICE_WIDTH + LIGHT_HASH_SLICE_WIDTH + 4096) as usize;
+        let mut buffer = vec![7u8; size];
+        let plan = light_hash_slice_plan(size as u64);
+        let covered = |index: usize| {
+            plan.iter()
+                .any(|&(offset, len)| index as u64 >= offset && (index as u64) < offset + len)
+        };
+        let base = blake3_light_of_bytes(&buffer);
+
+        if let Some(gap) = (0..size).find(|&index| !covered(index)) {
+            buffer[gap] ^= 0xFF;
+            assert_eq!(
+                blake3_light_of_bytes(&buffer),
+                base,
+                "an unsampled byte must not change the light hash"
+            );
+            buffer[gap] ^= 0xFF;
+        }
+        buffer[0] ^= 0xFF; // first terminal slice is always sampled
+        assert_ne!(blake3_light_of_bytes(&buffer), base);
     }
 
     #[test]
