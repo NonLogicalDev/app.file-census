@@ -124,6 +124,7 @@ The original visual reference image and prototype commit are missing. Build real
 
 # Work Log
 
+- [x] 2026-07-16 03:20 - UI horizon port: rebuilt the Shell **sidebar** to the integrated redesign (brand tile + connection dot, flat nav links with badges, folder-icon Locations tree with status dots + rep-badged scan children, running-task chip, Help/Options footer) against the recovered `file-census-file-inspector-inline-1440x900` ground truth; decluttered the main workspace (removed the global metrics band/event-strip/top-progress cards — metrics live on Dashboard, live progress on Tasks + the sidebar chip); removed ~55 dead imports/helpers. Added the **inline file inspector** pane to the location browser (single-click a row → name/kind/path/size/modified/scan; 3-pane folders│files│inspector; toggle in the toolbar). Commits `0a6875b`, `edd20c3`. 138 UI tests pass. Earlier this session: Tasks console + Location file-explorer chrome (`4066e66`, `c71ab0b`).
 - [x] 2026-07-14 22:45 - Initialized a new `redesign/shadcn-dark-shell` repository after confirming no checkout or recoverable Git object database remained.
 - [x] 2026-07-14 22:45 - Recreated the durable goal, plan, agent instructions, and coordinator-owned workqueue with all implementation/acceptance claims reset.
 - [x] 2026-07-14 22:55 - Confirmed that the surviving session logs contain structured, byte-complete historical additions and contextual patches; started a bounded deterministic recovery pass before implementing replacements.
