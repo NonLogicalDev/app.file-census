@@ -116,16 +116,23 @@ feature or perf loss; **P3** cleanup.
 | 3 | **Scan repair** — stubbed. No repair RPC; `scans repair` → `unavailable_command`; UI "Repair unavailable." Interrupted scans can only be replaced by a new scan. | 015,028 | cli.rs:892; FileExplorer.jsx:303 | P2 |
 | 4 | ✅ DONE (CTE part) — **Delete-check optimization**. Replaced the correlated per-file `NOT EXISTS(files other …)` with a materialized `other_hashes` CTE (plan-036). Measured 2.49s→0.81s warm (~3×), identical results, on 16,349 files vs a 23,822-file other location. Deferred: sargable path-range predicate (the substr path scan is O(scan) not quadratic; risky upper-bound on arbitrary path bytes). | 036 | db.rs:3628 | P2 |
 | 5 | **Light-hash scan policy** — fully absent. No `blake3_light` column, no Full/Light `HashPolicy`, no `likely_safe`/covered-elsewhere taxonomy, no CAS metadata blob store. | 064 | files schema has no blake3_light; scanner.rs has no hash policy | P2 |
-| 6 | **EXIF / file-extra-info enrichment** — partial. `file_exif`/`file_extra_info_runs` tables exist and `run_file_extra_info` exists, but no `file_extra_info.*` RPC in web/app dispatch and CLI `file-extra-info exif` is stubbed; UI treats exif as `unavailable`. | 040 | cli.rs:1792; web.rs RPC list; AppModals.jsx:181 | P2 |
+| 6 | **EXIF enrichment** — partial. On-demand EXIF *viewing* already works (`media.rs::exif_for_path`, read live on file inspect). Missing: the plan-040 background enrichment PASS (bulk `file-extra-info exif` — CLI stubbed, no `file_extra_info.*` RPC, no `ExtraInfoProcessor`) and the `file_exif` cache population. Lower urgency since viewing works. | 040 | media.rs:292; cli.rs:1794 | P2 |
 | 7 | **Discovery benchmark harness** — `scanner::benchmark_discovery` gone; `scans benchmark-discovery` stubbed; `perf_gates.rs` (gated behind `perf-gates` feature) references unrecovered APIs. | 036,038,065 | scanner.rs (no fn); cli.rs:859 | P2 |
 | 8 | **UI recovery-horizon gap** — promoted production UI is pre-redesign June source; the July shadcn redesign survives only as excluded diff events. Being backfilled by re-porting the prototype screen-by-screen. | 065 | Tasks + Locations ported (commits 4066e66, c71ab0b) | P2 |
-| 9 | `scans nickname` — stubbed. | — | cli.rs:958 | P3 |
+| 9 | ✅ DONE — `scans nickname`. Added `Database::update_scan_nickname` (the `nickname` column already existed) and wired the CLI; empty string clears. Verified end-to-end. | — | cli.rs:958 | P3 |
 | 10 | Redundant test-only `scan_tree` still computes duplicate counts inline (slow subqueries); only used by 2 tests. Remove or unify with `scan_tree_page`. | 032 | db.rs:1664 | P3 |
 
 ## Unfinished Work
 
 - [x] 2026-07-16 - Wire duplicate-cache rebuild trigger (#1): scan-completion (app/web/cli) + web startup stale-guard. E2E verified. Note: cache is scoped to complete/representative scans, so interrupted/stopped scans (e.g. every scan in the current prod DB) show unknown (0) until a complete scan exists — this is more truthful than the old inline same-scan count off partial data.
 - [x] 2026-07-16 - Delete-check `other_hashes` CTE (#4): 2.49s→0.81s warm, results identical. Deferred sargable path-range predicate + perf gate.
+- [x] 2026-07-16 - Restored `scans nickname` (#9); EXIF viewing found already working (#6 narrowed to the background pass).
+- [ ] 2026-07-16 - HEAVY items need a go/no-go — scoped below:
+  - **#2/#3 pause/resume/repair (plan-015)**: infrastructure fully gone (scanner has only `cancel`/stop; no pause/wake Condvar, no `prepare_repair_scan`, no paused/repairing transitions). Large: per-scan control objects + cooperative pause checks in discovery/metadata/hashing hot loops + repair-seed query + RPC/CLI/UI. Risk: touches the scan hot path. ~own plan.
+  - **#5 light-hash policy (plan-064)**: largest, and was `in-progress` (never finished) even pre-deletion. New schema column + sampled hash + Full/Light policy + `likely_safe` taxonomy + CAS store. Recommend: skip unless explicitly wanted.
+  - **#6 EXIF background pass (plan-040)**: medium; viewing already works. Needs `ExtraInfoProcessor` + background task + RPC.
+  - **#7 benchmark_discovery + perf_gates (plan-036/038)**: medium; non-user-facing harness. Useful to guard the perf work.
+  - **#10 remove redundant `scan_tree`**: P3 cleanup; 2 tests depend on it (inline dup counts) so needs test rework.
 - [ ] Scope pause/resume/repair restoration (#2,#3) — larger; needs scanner control-object work from plan-015.
 - [ ] Scope light-hash policy + EXIF RPC restoration (#5,#6) if still desired.
 - [ ] Recover `benchmark_discovery` + reconcile `perf_gates.rs` (#7).

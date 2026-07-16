@@ -955,7 +955,19 @@ fn run_scans(
                 Ok(())
             })
         }
-        ScanSubcommand::Nickname(_) => unavailable_command("scans nickname"),
+        ScanSubcommand::Nickname(args) => {
+            let db = Database::open(db_path)?;
+            let nickname = if args.nickname.trim().is_empty() {
+                None
+            } else {
+                Some(args.nickname)
+            };
+            let scan = db.update_scan_nickname(&args.scan_id, nickname)?;
+            emit(&scan, json, |scan| {
+                println!("updated nickname for {}", scan.id);
+                Ok(())
+            })
+        }
         ScanSubcommand::Excludes(args) => run_scan_excludes(Database::open(db_path)?, args, json),
         ScanSubcommand::Delete(args) => {
             let db = Database::open(db_path)?;

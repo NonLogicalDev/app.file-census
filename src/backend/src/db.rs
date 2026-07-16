@@ -705,6 +705,19 @@ impl Database {
             .with_context(|| format!("updated scan was not found: {scan_id}"))
     }
 
+    pub fn update_scan_nickname(&self, scan_id: &str, nickname: Option<String>) -> Result<Scan> {
+        let conn = self.connect()?;
+        let updated = conn.execute(
+            "UPDATE scans SET nickname = ?1 WHERE id = ?2",
+            params![nickname, scan_id],
+        )?;
+        if updated == 0 {
+            anyhow::bail!("scan not found: {scan_id}");
+        }
+        self.scan_by_id(scan_id)?
+            .with_context(|| format!("updated scan was not found: {scan_id}"))
+    }
+
     pub fn scan_by_id(&self, scan_id: &str) -> Result<Option<Scan>> {
         let conn = self.connect()?;
         conn.query_row(
