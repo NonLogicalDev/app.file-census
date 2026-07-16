@@ -50,6 +50,11 @@ pub async fn serve_listener(db_path: PathBuf, listener: tokio::net::TcpListener)
         events,
     };
 
+    // Build the browse duplicate-count cache on boot if a prior scope change or
+    // deletion recovery left it stale/missing, so folder browsing shows real
+    // duplicate counters without waiting for the next scan to finish.
+    crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
+
     let app = Router::new()
         .route("/api/events", get(events_ws))
         .route("/api/overview", get(overview))
@@ -833,11 +838,15 @@ async fn start_scan_job(
 
     let db = (*state.db).clone();
     let progress = state.progress.clone();
+    let events = state.events.clone();
     let scan_id_for_task = scan_id.clone();
     tokio::task::spawn_blocking(move || {
         match scanner::run_prepared_scan(&db, prepared, Some(progress.clone())) {
             Ok(summary) if summary.status == "stopped" => progress.stopped(&summary.scan_id),
-            Ok(summary) => progress.finish(&summary),
+            Ok(summary) => {
+                progress.finish(&summary);
+                crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &events);
+            }
             Err(error) => progress.fail(&scan_id_for_task, error.to_string()),
         }
     });
@@ -865,11 +874,15 @@ async fn start_update_scan_job(
 
     let db = (*state.db).clone();
     let progress = state.progress.clone();
+    let events = state.events.clone();
     let scan_id_for_task = scan_id.clone();
     tokio::task::spawn_blocking(move || {
         match scanner::run_prepared_scan(&db, prepared, Some(progress.clone())) {
             Ok(summary) if summary.status == "stopped" => progress.stopped(&summary.scan_id),
-            Ok(summary) => progress.finish(&summary),
+            Ok(summary) => {
+                progress.finish(&summary);
+                crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &events);
+            }
             Err(error) => progress.fail(&scan_id_for_task, error.to_string()),
         }
     });

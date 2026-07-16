@@ -337,11 +337,17 @@ impl AppCore {
 
         let db = (*self.db).clone();
         let progress = self.progress.clone();
+        let events = self.events.clone();
         let scan_id_for_task = scan_id.clone();
         tokio::task::spawn_blocking(move || {
             match scanner::run_prepared_scan(&db, prepared, Some(progress.clone())) {
                 Ok(summary) if summary.status == "stopped" => progress.stopped(&summary.scan_id),
-                Ok(summary) => progress.finish(&summary),
+                Ok(summary) => {
+                    progress.finish(&summary);
+                    // A completed scan changes the representative scope, so the
+                    // browse duplicate counters must be recomputed once.
+                    crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &events);
+                }
                 Err(error) => progress.fail(&scan_id_for_task, error.to_string()),
             }
         });

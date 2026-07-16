@@ -1027,6 +1027,9 @@ fn run_prepared_scan_cli(
 ) -> Result<()> {
     if json {
         let summary = scanner::run_prepared_scan(db, prepared, None)?;
+        if summary.status != "stopped" {
+            file_census_backend::duplicate_cache::run_rebuild_duplicate_cache(db, &EventHub::default());
+        }
         println!("{}", serde_json::to_string_pretty(&scan_summary_json(&summary))?);
         return Ok(());
     }
@@ -1073,6 +1076,7 @@ fn run_prepared_scan_cli(
         progress.stopped(&summary.scan_id);
     } else {
         progress.finish(&summary);
+        file_census_backend::duplicate_cache::run_rebuild_duplicate_cache(db, &EventHub::default());
     }
     drain_scan_cli_events(&mut rx, &mut printer);
     printer.finish();

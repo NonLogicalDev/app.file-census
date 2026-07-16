@@ -111,7 +111,7 @@ feature or perf loss; **P3** cleanup.
 
 | # | Lost capability | Plan | Evidence in current code | Sev |
 |---|---|---|---|---|
-| 1 | **Duplicate cache never built** — `spawn_rebuild_duplicate_cache` (duplicate_cache.rs) has **zero callers**; nothing triggers a rebuild on scan finish, startup, or `dupes.list`. Post-perf-fix, browse duplicate/original/same-scan columns stay 0 (unknown) forever. | 039 | `grep spawn_rebuild_duplicate_cache` → def only, no caller | P1 |
+| 1 | ✅ DONE — **Duplicate cache never built**. Wired `run_rebuild_duplicate_cache` (new sync core) on scan completion in all surfaces (app.rs/web.rs async, cli.rs foreground) + `spawn_rebuild_if_stale` at web startup. E2E verified: CLI scan → cache ready → tree browse reads per-scan-per-dir counts. | 039 | was: def only, no caller | P1 |
 | 2 | **Scan pause/resume** — stubbed. No `scans.pause`/`scans.resume` RPC; CLI returns `unavailable_command`; UI shows "Pause and resume unavailable in this build." | 015 | cli.rs:867-868; web.rs dispatch lacks them; FileExplorer.jsx:310 | P2 |
 | 3 | **Scan repair** — stubbed. No repair RPC; `scans repair` → `unavailable_command`; UI "Repair unavailable." Interrupted scans can only be replaced by a new scan. | 015,028 | cli.rs:892; FileExplorer.jsx:303 | P2 |
 | 4 | **Delete-check SQL optimization lost** — `delete_check_for_selection` matches paths with non-sargable `substr(f.path,1,length(p.path))=prefix` instead of plan-036's indexable path-range predicates + `other_hashes` CTE (4.3s→0.05s, 34.3s→0.65s there). Likely slow on large scans. | 036 | db.rs:3628 delete_check_for_selection | P2 |
@@ -124,7 +124,7 @@ feature or perf loss; **P3** cleanup.
 
 ## Unfinished Work
 
-- [ ] Decide + wire a duplicate-cache rebuild trigger (#1) so browse duplicate columns populate. Options: on scan finish (debounced), on app/server startup, or lazily on first tree/duplicates read. Recommended: on scan finish + startup reconcile, reusing `spawn_rebuild_duplicate_cache`.
+- [x] 2026-07-16 - Wire duplicate-cache rebuild trigger (#1): scan-completion (app/web/cli) + web startup stale-guard. E2E verified. Note: cache is scoped to complete/representative scans, so interrupted/stopped scans (e.g. every scan in the current prod DB) show unknown (0) until a complete scan exists — this is more truthful than the old inline same-scan count off partial data.
 - [ ] Restore delete-check path-range optimization (#4) — sargable predicates + `other_hashes` CTE; re-add its perf gate.
 - [ ] Scope pause/resume/repair restoration (#2,#3) — larger; needs scanner control-object work from plan-015.
 - [ ] Scope light-hash policy + EXIF RPC restoration (#5,#6) if still desired.

@@ -5064,9 +5064,8 @@ mod tests {
         assert_eq!(file_a.same_scan_duplicate_file_count, 0);
 
         // After the cache is ready the counters come from the cache, per path.
-        db.rebuild_duplicate_cache_for_current_scope()
-            .unwrap()
-            .expect("representative scan has a cache scope");
+        // Exercise the real trigger core used by scan-completion/startup hooks.
+        crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &crate::events::EventHub::default());
         assert_eq!(db.current_duplicate_cache_status().unwrap().status, "ready");
 
         let file_page = db.scan_tree_page(&scan_id, "folder", Some(20), 0, 1, None).unwrap();
