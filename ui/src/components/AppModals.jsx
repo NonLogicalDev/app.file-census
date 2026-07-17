@@ -77,6 +77,47 @@ export default function AppModals(props) {
           </ModalSurface>
         </Modal>
       )}
+      {props.scanStartForm && (
+        <Modal>
+          <ModalSurface as="form" className={formStackClassName} onSubmit={(event) => { event.preventDefault(); props.onConfirmScanStart(); }}>
+            <h2>Start scan</h2>
+            <label className={fieldLabelClassName}>Subfolder to scan
+              <input
+                className="h-9 rounded-ui border border-border bg-surface px-3 text-sm text-text outline-none focus:border-border-strong"
+                value={props.scanStartForm.offset}
+                onChange={(event) => props.setScanStartForm({ ...props.scanStartForm, offset: event.currentTarget.value })}
+                placeholder="/"
+              />
+            </label>
+            <ModalHelp>Scans the whole location by default. Enter a subfolder (relative to the location root) to scan only part of it.</ModalHelp>
+            <fieldset className="grid gap-2 rounded-ui border border-border bg-surface p-3">
+              <legend className="px-1 text-xs font-semibold uppercase tracking-[0.06em] text-muted">Hash work</legend>
+              {[
+                ['full', 'Full', 'Exact BLAKE3 + SHA-256, plus the light fingerprint. Required for exact duplicate detection and Delete Check.'],
+                ['light', 'Light', 'Sampled fingerprint only — fast on slow or power-limited disks. Inventory-only: light scans are excluded from exact duplicate detection and Delete Check safety.']
+              ].map(([value, label, detail]) => (
+                <label key={value} className={`flex cursor-pointer items-start gap-2.5 rounded-ui border p-2.5 text-sm ${props.scanStartForm.hash_policy === value ? 'border-border-strong bg-surface-muted' : 'border-border'}`}>
+                  <input
+                    type="radio"
+                    name="scan-hash-policy"
+                    className="mt-0.5"
+                    checked={props.scanStartForm.hash_policy === value}
+                    onChange={() => props.setScanStartForm({ ...props.scanStartForm, hash_policy: value })}
+                  />
+                  <span className="min-w-0">
+                    <strong className="block text-text">{label}</strong>
+                    <span className="text-xs text-muted">{detail}</span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+            <Toolbar className={actionToolbarClassName}>
+              <Button type="submit" disabled={props.busy} icon={<Icon name="scan" />}>Start scan</Button>
+              <Button type="button" variant="secondary" onClick={() => props.setScanStartForm(null)} icon={<Icon name="back" />}>Cancel</Button>
+            </Toolbar>
+          </ModalSurface>
+        </Modal>
+      )}
       {props.confirmDeleteScanId && (
         <ConfirmModal
           title="Delete scan"

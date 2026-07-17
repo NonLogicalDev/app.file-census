@@ -104,6 +104,7 @@ export default function App() {
   const [scanExcludesForm, setScanExcludesForm] = useState({ scan_id: '', patterns: '' });
   const [deleteCheckPath, setDeleteCheckPath] = useState('');
   const [deleteCheckStaged, setDeleteCheckStaged] = useState([]);
+  const [scanStartForm, setScanStartForm] = useState(null);
   const [buildThumbnailRequest, setBuildThumbnailRequest] = useState(null);
   const [fileInfo, setFileInfo] = useState(null);
   const [desktopRuntime] = useState(() => isTauriRuntime());
@@ -1171,11 +1172,23 @@ export default function App() {
     }
   }
 
-  async function startScan(slug) {
+  function openScanStart(slug) {
+    setScanStartForm({ slug, offset: '/', hash_policy: 'full' });
+  }
+
+  function confirmScanStart() {
+    const form = scanStartForm;
+    if (!form) return;
+    setScanStartForm(null);
+    void startScan(form.slug, { offset: (form.offset || '/').trim() || '/', hash_policy: form.hash_policy || 'full' });
+  }
+
+  async function startScan(slug, options = {}) {
     setBusy(true);
     try {
       setDeleteCheck(null);
-      const result = await rpc('scans.start', { slug, offset: '/' });
+      const offset = options.offset || '/';
+      const result = await rpc('scans.start', { slug, offset, hash_policy: options.hash_policy || 'full' });
       const location = locationBySlug(slug);
       setActiveTab('locations');
       setSelectedLocationSlug(slug);
@@ -1989,7 +2002,7 @@ export default function App() {
     onOpenEditLocation: openEditLocation,
     onSetLocationDisabled: setLocationDisabled,
     onRequestDeleteLocation: requestDeleteLocation,
-    onStartScan: startScan,
+    onStartScan: openScanStart,
     onSelectScan: selectScan,
     onStopScan: stopScan,
     onPauseScan: pauseScan,
@@ -2245,7 +2258,7 @@ export default function App() {
         keywords: 'scan start index files',
         iconName: 'scan',
         disabled: busy,
-        onSelect: () => void startScan(selectedLocationView.slug)
+        onSelect: () => openScanStart(selectedLocationView.slug)
       });
     }
     if (selectedLocationView.connected) {
@@ -2376,7 +2389,7 @@ export default function App() {
             {!selectedLocationView.activeScan && (
               <Button variant="danger" onClick={() => requestDeleteLocation(selectedLocationView.slug)} disabled={busy} icon={<Icon name="delete" />}>Delete location</Button>
             )}
-            <Button onClick={() => startScan(selectedLocationView.slug)} disabled={busy} icon={<Icon name="scan" />}>Scan now</Button>
+            <Button onClick={() => openScanStart(selectedLocationView.slug)} disabled={busy} icon={<Icon name="scan" />}>Scan now</Button>
           </>
         )
         : <Button onClick={() => setShowAddLocation(true)} disabled={busy} icon={<Icon name="add" />}>Add location</Button>
@@ -2508,6 +2521,9 @@ export default function App() {
         setScanNotesForm={setScanNotesForm}
         scanExcludesForm={scanExcludesForm}
         setScanExcludesForm={setScanExcludesForm}
+        scanStartForm={scanStartForm}
+        setScanStartForm={setScanStartForm}
+        onConfirmScanStart={confirmScanStart}
         fileInfo={fileInfo}
         buildThumbnailRequest={buildThumbnailRequest}
         busy={busy}
