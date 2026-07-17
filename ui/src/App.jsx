@@ -103,6 +103,7 @@ export default function App() {
   const [scanNotesForm, setScanNotesForm] = useState({ scan_id: '', notes: '' });
   const [scanExcludesForm, setScanExcludesForm] = useState({ scan_id: '', patterns: '' });
   const [deleteCheckPath, setDeleteCheckPath] = useState('');
+  const [deleteCheckStaged, setDeleteCheckStaged] = useState([]);
   const [buildThumbnailRequest, setBuildThumbnailRequest] = useState(null);
   const [fileInfo, setFileInfo] = useState(null);
   const [desktopRuntime] = useState(() => isTauriRuntime());
@@ -1452,6 +1453,36 @@ export default function App() {
     }
   }
 
+  function stageForDeleteCheck(entries = selectedGridEntries) {
+    const items = (entries || []).filter((entry) => entry?.path && entry.kind !== 'parent');
+    if (!items.length) {
+      setMessage('Select files or folders to add to Delete Check.');
+      return;
+    }
+    setDeleteCheckStaged((current) => {
+      const seen = new Set(current.map((item) => item.path));
+      const added = items
+        .filter((item) => !seen.has(item.path))
+        .map((item) => ({ path: item.path, kind: item.kind, name: item.name }));
+      if (added.length) setMessage(`Added ${added.length} ${added.length === 1 ? 'item' : 'items'} to Delete Check.`);
+      return added.length ? [...current, ...added] : current;
+    });
+    setSelectedGridPaths([]);
+  }
+
+  function removeFromDeleteCheckStage(path) {
+    setDeleteCheckStaged((current) => current.filter((item) => item.path !== path));
+  }
+
+  function clearDeleteCheckStage() {
+    setDeleteCheckStaged([]);
+  }
+
+  function runStagedDeleteCheck(scanId) {
+    if (!deleteCheckStaged.length) return;
+    void runDeleteCheck(scanId, deleteCheckStaged);
+  }
+
   async function runDeleteCheck(scanId, entries = selectedGridEntries) {
     setBusy(true);
     try {
@@ -1968,6 +1999,11 @@ export default function App() {
     onSetRepresentative: setRepresentativeScan,
     onClearRepresentative: clearRepresentativeScan,
     onRunDeleteCheck: runDeleteCheck,
+    deleteCheckStaged,
+    onStageDeleteCheck: stageForDeleteCheck,
+    onRemoveDeleteCheckStage: removeFromDeleteCheckStage,
+    onClearDeleteCheckStage: clearDeleteCheckStage,
+    onRunStagedDeleteCheck: runStagedDeleteCheck,
     onOpenScanExcludes: openScanExcludes,
     onOpenScanNotes: openScanNotes,
     onRequestDeleteScan: requestDeleteScan,

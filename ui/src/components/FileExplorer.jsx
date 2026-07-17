@@ -58,6 +58,11 @@ export default function FileExplorer(props) {
     onSetRepresentative,
     onClearRepresentative,
     onRunDeleteCheck,
+    deleteCheckStaged = [],
+    onStageDeleteCheck,
+    onRemoveDeleteCheckStage,
+    onClearDeleteCheckStage,
+    onRunStagedDeleteCheck,
     onOpenScanExcludes,
     onOpenScanNotes,
     onRequestDeleteScan,
@@ -289,6 +294,18 @@ export default function FileExplorer(props) {
                 <Icon name="deleteCheck" className="h-3.5 w-3.5" />
                 {selectedCount ? `Delete check (${selectedCount})` : 'Delete check'}
               </button>
+              {typeof onStageDeleteCheck === 'function' && (
+                <button
+                  type="button"
+                  className={ctrlBtn}
+                  onClick={() => onStageDeleteCheck(selectedGridEntries)}
+                  disabled={busy || !selectedCount}
+                  title="Add the selected files and folders to the Delete Check list"
+                >
+                  <Icon name="add" className="h-3.5 w-3.5" />
+                  Add to Delete Check{deleteCheckStaged.length ? ` (${deleteCheckStaged.length})` : ''}
+                </button>
+              )}
               <button
                 type="button"
                 className={ctrlBtn}
@@ -450,6 +467,44 @@ export default function FileExplorer(props) {
 
       {showingDeleteCheck ? (
         <>
+          {deleteCheckStaged.length > 0 && (
+            <section className="mb-2.5 mt-2 overflow-hidden border border-sidebar-border bg-sidebar-bg">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sidebar-border px-3 py-2">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted">
+                  Delete Check list · {deleteCheckStaged.length}
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    className={`${ctrlBtn} border-warning/40 text-warning`}
+                    onClick={() => onRunStagedDeleteCheck?.(activeScan.id)}
+                    disabled={busy}
+                  >
+                    <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Run Delete Check ({deleteCheckStaged.length})
+                  </button>
+                  <button type="button" className={ctrlBtn} onClick={onClearDeleteCheckStage} disabled={busy}>
+                    <Icon name="close" className="h-3.5 w-3.5" /> Clear list
+                  </button>
+                </div>
+              </div>
+              <ul className="max-h-40 divide-y divide-surface overflow-auto">
+                {deleteCheckStaged.map((item) => (
+                  <li key={item.path} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
+                    <Icon name={item.kind === 'dir' ? 'folder' : 'file'} className="h-3.5 w-3.5 flex-none text-text-tertiary" />
+                    <span className="min-w-0 flex-1 truncate text-muted-strong" title={item.path}>{item.path}</span>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveDeleteCheckStage?.(item.path)}
+                      className="grid h-5 w-5 flex-none place-items-center rounded text-text-tertiary hover:text-text"
+                      aria-label={`Remove ${item.name} from Delete Check list`}
+                    >
+                      <Icon name="close" className="h-3 w-3" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {deleteCheck ? (
             <section className={deleteCheckCalloutClassName({ safe: deleteCheck.safe })}>
               <div>
