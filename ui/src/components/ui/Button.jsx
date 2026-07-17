@@ -10,8 +10,10 @@ export const buttonBaseClasses = [
 
 export const buttonVariantClasses = {
   primary: [
-    'border-accent bg-accent text-white shadow-sm',
-    'hover:!border-accent-hover hover:!bg-accent-hover hover:!text-white'
+    // The accent is a light color on this dark theme, so the primary button
+    // uses dark text on the light fill (matches the redesign).
+    'border-accent bg-accent text-bg shadow-sm',
+    'hover:!border-accent-hover hover:!bg-accent-hover hover:!text-bg'
   ],
   secondary: [
     'border-border bg-surface text-muted-strong',
