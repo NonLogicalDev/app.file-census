@@ -4937,6 +4937,57 @@ mod tests {
     }
 
     #[test]
+    fn scan_excludes_are_a_filter_and_never_delete_physical_files() {
+        let root = test_root("excludes-non-destructive");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Media".to_string(),
+                slug: "media".to_string(),
+                root_path: root.join("location"),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+        db.insert_file_batch(&[
+            test_file(&scan_id, "keep.txt", 10, "hash-keep"),
+            test_file(&scan_id, "logs/app.tmp", 20, "hash-a"),
+            test_file(&scan_id, "logs/debug.tmp", 30, "hash-b"),
+        ])
+        .unwrap();
+        db.finish_scan(&scan_id, 3, 0, 0, 60, "complete").unwrap();
+
+        let physical_count = |db: &Database| -> u64 {
+            db.connect()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM files WHERE scan_id = ?1",
+                    [&scan_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(physical_count(&db), 3);
+
+        // A pattern that matches files must never delete physical rows — excludes
+        // are a scan-scoped visibility filter only.
+        db.set_scan_excludes(&scan_id, vec!["*.tmp".to_string(), "logs/".to_string()])
+            .unwrap();
+        assert_eq!(physical_count(&db), 3, "set_scan_excludes must not delete files");
+
+        // Appending an exact-path exclude likewise never deletes.
+        db.append_exact_scan_exclude(&scan_id, "keep.txt", "file").unwrap();
+        assert_eq!(
+            physical_count(&db),
+            3,
+            "append_exact_scan_exclude must not delete files"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn file_exif_cache_round_trips_by_content_identity() {
         let root = test_root("file-exif-cache");
         let db = Database::open(root.join("state.db")).unwrap();
