@@ -190,6 +190,67 @@ function baseColumns(options) {
   } = options;
   const columns = [];
 
+  // Row actions sit at the far left, before the select checkbox.
+  if (onDelete || onBuildThumbnails || onExclude) {
+    columns.push({
+      id: 'actions',
+      header: '',
+      size: 44,
+      minSize: 44,
+      maxSize: 54,
+      enableSorting: false,
+      enableResizing: false,
+      meta: {
+        ...centeredControlColumnMeta,
+        className: fileGridActionsClassName
+      },
+      cell: ({ row }) => {
+        if (!row.original || row.original.kind === 'parent') return '';
+        return (
+          <Menu className={fileGridRowActionMenuClassName} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+            <MenuTrigger
+              aria-label={`Actions for ${row.original.name}`}
+              title="Row actions"
+              variant="ghost"
+              size="sm"
+              className={fileGridRowActionTriggerClassName}
+              icon={<Icon name="rowActions" />}
+            />
+            <MenuContent align="start" className={fileGridRowActionPanelClassName}>
+              {onBuildThumbnails && (
+                <MenuItem
+                  disabled={!canBuildThumbnails}
+                  icon={<Icon name="thumbnails" />}
+                  onClick={() => onBuildThumbnails(row.original)}
+                >
+                  Build thumbnails
+                </MenuItem>
+              )}
+              {onExclude && (
+                <MenuItem
+                  variant="warning"
+                  icon={<Icon name="exclude" />}
+                  onClick={() => onExclude(row.original)}
+                >
+                  Exclude from scan
+                </MenuItem>
+              )}
+              {onDelete && (
+                <MenuItem
+                  variant="danger"
+                  icon={<Icon name="delete" />}
+                  onClick={() => onDelete(row.original)}
+                >
+                  Remove from scan
+                </MenuItem>
+              )}
+            </MenuContent>
+          </Menu>
+        );
+      }
+    });
+  }
+
   if (selectable) {
     columns.push({
       id: 'select',
@@ -282,65 +343,6 @@ function baseColumns(options) {
     { accessorKey: 'path', header: 'Path', size: 340, minSize: 180 }
   );
 
-  if (onDelete || onBuildThumbnails || onExclude) {
-    columns.push({
-      id: 'actions',
-      header: '',
-      size: 44,
-      minSize: 44,
-      maxSize: 54,
-      enableSorting: false,
-      enableResizing: false,
-      meta: {
-        ...centeredControlColumnMeta,
-        className: fileGridActionsClassName
-      },
-      cell: ({ row }) => {
-        if (!row.original || row.original.kind === 'parent') return '';
-        return (
-          <Menu className={fileGridRowActionMenuClassName} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
-            <MenuTrigger
-              aria-label={`Actions for ${row.original.name}`}
-              title="Row actions"
-              variant="ghost"
-              size="sm"
-              className={fileGridRowActionTriggerClassName}
-              icon={<Icon name="rowActions" />}
-            />
-            <MenuContent align="end" className={fileGridRowActionPanelClassName}>
-              {onBuildThumbnails && (
-                <MenuItem
-                  disabled={!canBuildThumbnails}
-                  icon={<Icon name="thumbnails" />}
-                  onClick={() => onBuildThumbnails(row.original)}
-                >
-                  Build thumbnails
-                </MenuItem>
-              )}
-              {onDelete && (
-                <MenuItem
-                  variant="danger"
-                  icon={<Icon name="delete" />}
-                  onClick={() => onDelete(row.original)}
-                >
-                  Remove from scan
-                </MenuItem>
-              )}
-              {onExclude && (
-                <MenuItem
-                  variant="warning"
-                  icon={<Icon name="exclude" />}
-                  onClick={() => onExclude(row.original)}
-                >
-                  Exclude from scan
-                </MenuItem>
-              )}
-            </MenuContent>
-          </Menu>
-        );
-      }
-    });
-  }
   return columns;
 }
 

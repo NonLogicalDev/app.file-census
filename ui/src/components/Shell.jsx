@@ -17,7 +17,6 @@ import {
   pageActionsPanelClassName,
   pageActionsPanelTitleClassName,
   pageActionsTriggerClassName,
-  shellMessageClassName,
   sidebarHoverZoneClassName,
   sidebarOverlayCloseClassName,
   sidebarResizeHandleClassName,
@@ -114,6 +113,8 @@ export default function Shell({
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [pageActionsOpen, setPageActionsOpen] = useState(false);
   const [expandedLocations, setExpandedLocations] = useState({});
+  const [toasts, setToasts] = useState([]);
+  const toastSeq = useRef(0);
   const sidebarRef = useRef(null);
   const sidebarResizeSession = useRef(null);
   const activeTabMeta = tabs.find(([id]) => id === activeTab) || tabs[0];
@@ -174,6 +175,22 @@ export default function Shell({
     if (!selectedLocationSlug) return;
     setExpandedLocations((current) => current[selectedLocationSlug] ? current : { ...current, [selectedLocationSlug]: true });
   }, [selectedLocationSlug]);
+
+  // Surface status/error messages as short-lived stacked toasts instead of
+  // shifting the page layout. Each toast auto-dismisses after a few seconds.
+  useEffect(() => {
+    if (!message) return undefined;
+    const id = (toastSeq.current += 1);
+    setToasts((current) => [...current, { id, text: message }]);
+    const timer = setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 5200);
+    return () => clearTimeout(timer);
+  }, [message]);
+
+  const dismissToast = useCallback((id) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
 
   useEffect(() => {
     setExpandedLocations((current) => {
@@ -481,10 +498,26 @@ export default function Shell({
 
         {/* Database metrics live on the Dashboard, live scan progress on the
             Tasks page and the sidebar chip; the workspace stays uncluttered. */}
-        {message && <p className={shellMessageClassName}>{message}</p>}
-
         {children}
       </main>
+
+      {/* Short-lived status toasts (no layout shift). */}
+      {toasts.length > 0 && (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-[min(360px,calc(100vw-32px))] flex-col gap-2" role="status" aria-live="polite">
+          {toasts.map((toast) => (
+            <button
+              key={toast.id}
+              type="button"
+              onClick={() => dismissToast(toast.id)}
+              className="pointer-events-auto flex items-start gap-2 rounded-ui border border-border bg-surface px-3.5 py-2.5 text-left text-[12px] leading-relaxed text-text shadow-lg transition hover:border-border-strong"
+              title="Dismiss"
+            >
+              <Icon name="tasks" className="mt-0.5 h-3.5 w-3.5 flex-none text-muted" />
+              <span className="min-w-0 flex-1 break-words">{toast.text}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

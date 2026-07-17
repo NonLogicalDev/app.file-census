@@ -32,7 +32,7 @@ test('file grid keeps normal scan actions out of the explicit Delete Check workf
   assert.match(fileGridSource, /Build thumbnails/);
   assert.match(fileGridSource, /Remove from scan/);
   assert.match(fileGridSource, /Exclude from scan/);
-  assert.match(fileGridSource, /<MenuContent align="end"/);
+  assert.match(fileGridSource, /<MenuContent align="start"/);
   assert.doesNotMatch(fileGridSource, /Include in Delete Check|Exclude from Delete Check|deleteCheckPathStateByPath/);
   assert.match(fileExplorerSource, /onBuildThumbnails=\{showingDeleteCheck \? null : onRequestBuildThumbnailsForEntry\}/);
   assert.match(fileExplorerSource, /onExclude=\{showingDeleteCheck \? null : onRequestExcludePath\}/);
