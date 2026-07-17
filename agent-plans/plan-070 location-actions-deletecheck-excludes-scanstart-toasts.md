@@ -30,11 +30,11 @@ Five location/scan UX fixes requested against the integrated redesign:
 
 ## Implementation Steps
 
-1. [ ] FileGrid: move `actions` column before `select`.
-2. [ ] Toasts: toast host + auto-dismiss, remove the in-layout message paragraph.
-3. [ ] Excludes: guard test (non-destructive) + confirm UI separation.
-4. [ ] Delete Check: staged list + bulk "Add to Delete Check" button.
-5. [ ] Scan-start modal: offset + Full/Light hash policy (needs plan-069 layer 2–3 backend).
+1. [x] FileGrid: `actions` column moved before `select` (menu opens align=start). Commit `631c5b6`.
+2. [x] Toasts: Shell toast host, auto-dismiss ~5s, click-to-dismiss; removed the in-layout message. Commit `631c5b6`.
+3. [x] Excludes: guard test proving set/append excludes never delete files; UI keeps Exclude (filter) vs Remove from scan (destructive) distinct. Commit `130ed88`.
+4. [x] Delete Check: staged list + "Add to Delete Check (N)" bulk button + Run/Clear. Commit `ab8678d`.
+5. [x] Scan-start modal: offset + Full/Light hash policy. Backend plan-069 layer 2–3 (blake3_light column/NewFile + HashPolicy + scanner + scans.hash_policy + light-scan dedup exclusion + restored missing scans.nickname column). Commits `acee3a3` (backend), `3b62534` (modal).
 
 ## Learning Log
 
@@ -46,4 +46,5 @@ Five location/scan UX fixes requested against the integrated redesign:
 
 ## Unfinished Work
 
-- [ ] Steps 1–5.
+- [x] Steps 1–5 complete and verified (66→67 backend tests, 138 UI tests, build clean).
+- [ ] Follow-ups (optional): CLI `scans start --hash-policy` flag; light-hash `likely_safe`/"Likely covered elsewhere" delete-check signal (plan-069 layer 5); expose `blake3_light` as a grid column.
