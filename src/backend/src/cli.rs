@@ -2282,6 +2282,7 @@ mod tests {
             size: 0,
             blake3: String::new(),
             sha256: String::new(),
+            blake3_light: String::new(),
             ctime: None,
             mtime: None,
             mode: None,

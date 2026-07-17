@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{File, Metadata};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -484,6 +484,8 @@ pub struct PreparedScan {
     /// file_count/total_bytes include the seeded files it skipped. 0 otherwise.
     seeded_file_count: u64,
     seeded_total_bytes: u64,
+    /// Hash work this scan performs (Full or Light).
+    pub hash_policy: HashPolicy,
 }
 
 #[derive(Clone, Copy)]
@@ -578,7 +580,16 @@ pub fn scan_location(db: &Database, slug: &str, offset_path: &Path) -> Result<Sc
 }
 
 pub fn prepare_scan(db: &Database, slug: &str, offset_path: &Path) -> Result<PreparedScan> {
-    prepare_scan_with_start(db, slug, offset_path, |location| {
+    prepare_scan_with_policy(db, slug, offset_path, HashPolicy::Full)
+}
+
+pub fn prepare_scan_with_policy(
+    db: &Database,
+    slug: &str,
+    offset_path: &Path,
+    policy: HashPolicy,
+) -> Result<PreparedScan> {
+    prepare_scan_with_start(db, slug, offset_path, policy, |location| {
         db.start_scan(location, offset_path)
     })
 }
@@ -591,7 +602,7 @@ pub fn prepare_scan_with_started_at(
     offset_path: &Path,
     started_at: DateTime<Utc>,
 ) -> Result<PreparedScan> {
-    prepare_scan_with_start(db, slug, offset_path, |location| {
+    prepare_scan_with_start(db, slug, offset_path, HashPolicy::Full, |location| {
         db.start_scan_with_started_at(location, offset_path, started_at)
     })
 }
@@ -632,6 +643,7 @@ pub fn prepare_bootstrap_scan_with_started_at(
         seeded_paths: std::collections::HashSet::new(),
         seeded_file_count: 0,
         seeded_total_bytes: 0,
+        hash_policy: HashPolicy::Full,
     })
 }
 
@@ -639,6 +651,7 @@ fn prepare_scan_with_start(
     db: &Database,
     slug: &str,
     offset_path: &Path,
+    policy: HashPolicy,
     start_scan: impl FnOnce(&Location) -> Result<String>,
 ) -> Result<PreparedScan> {
     let location = db
@@ -647,6 +660,7 @@ fn prepare_scan_with_start(
 
     let scan_root = resolve_contained_scan_root(&location.root_path, offset_path)?;
     let scan_id = start_scan(&location)?;
+    db.set_scan_hash_policy(&scan_id, policy.as_str())?;
     Ok(PreparedScan {
         scan_id,
         location,
@@ -656,6 +670,7 @@ fn prepare_scan_with_start(
         seeded_paths: std::collections::HashSet::new(),
         seeded_file_count: 0,
         seeded_total_bytes: 0,
+        hash_policy: policy,
     })
 }
 
@@ -672,6 +687,7 @@ pub fn prepare_update_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         seeded_paths: std::collections::HashSet::new(),
         seeded_file_count: 0,
         seeded_total_bytes: 0,
+        hash_policy: HashPolicy::Full,
     })
 }
 
@@ -695,6 +711,7 @@ pub fn prepare_repair_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
             size: reusable.size,
             blake3: reusable.blake3.clone(),
             sha256: reusable.sha256.clone(),
+            blake3_light: String::new(),
             ctime: reusable.ctime.clone(),
             mtime: reusable.mtime.clone(),
             mode: reusable.mode,
@@ -717,6 +734,7 @@ pub fn prepare_repair_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         seeded_paths,
         seeded_file_count,
         seeded_total_bytes,
+        hash_policy: HashPolicy::Full,
     })
 }
 
@@ -849,6 +867,7 @@ pub fn run_prepared_scan(
     let hash_rx = Arc::new(Mutex::new(hash_rx));
 
     thread::scope(|scope| {
+        let hash_policy = prepared.hash_policy;
         for _ in 0..hash_workers {
             let hash_rx = Arc::clone(&hash_rx);
             let result_tx = result_tx.clone();
@@ -856,7 +875,7 @@ pub fn run_prepared_scan(
             let scan_id = prepared.scan_id.clone();
             let scan_root = &canonical_scan_root;
             scope.spawn(move || {
-                hash_worker(hash_rx, result_tx, progress, scan_id, scan_root);
+                hash_worker(hash_rx, result_tx, progress, scan_id, scan_root, hash_policy);
             });
         }
 
@@ -1141,6 +1160,7 @@ fn metadata_worker(
                                 size: 0,
                                 blake3: String::new(),
                                 sha256: String::new(),
+                                blake3_light: String::new(),
                                 ctime: metadata.ctime,
                                 mtime: metadata.mtime,
                                 mode: metadata.mode,
@@ -1306,6 +1326,7 @@ fn hash_worker(
     progress: Option<ScanProgressStore>,
     scan_id: String,
     canonical_scan_root: &Path,
+    hash_policy: HashPolicy,
 ) {
     loop {
         let job = {
@@ -1330,7 +1351,7 @@ fn hash_worker(
             if let Some(hashed) = reusable_hashed_file(job.reusable.as_ref(), &metadata) {
                 return Ok(hashed);
             }
-            hash_open_file(file, metadata)
+            hash_open_file(file, metadata, hash_policy)
         })();
 
         match hashed {
@@ -1438,6 +1459,7 @@ fn reusable_hashed_file(
         size: metadata.size,
         blake3: reusable.blake3.clone(),
         sha256: reusable.sha256.clone(),
+        blake3_light: String::new(),
         ctime: metadata.ctime.clone(),
         mtime: metadata.mtime.clone(),
         mode: metadata.mode,
@@ -1461,6 +1483,7 @@ fn file_row(scan_id: &str, path: &str, name: &str, hashed: HashedFile) -> NewFil
         size: hashed.size,
         blake3: hashed.blake3,
         sha256: hashed.sha256,
+        blake3_light: hashed.blake3_light,
         ctime: hashed.ctime,
         mtime: hashed.mtime,
         mode: hashed.mode,
@@ -1491,6 +1514,7 @@ fn error_path_row(
         size: 0,
         blake3: String::new(),
         sha256: String::new(),
+        blake3_light: String::new(),
         ctime: None,
         mtime: None,
         mode: None,
@@ -1727,10 +1751,38 @@ struct HashedFile {
     size: u64,
     blake3: String,
     sha256: String,
+    blake3_light: String,
     ctime: Option<String>,
     mtime: Option<String>,
     mode: Option<u32>,
     reused: bool,
+}
+
+/// Hash work a scan performs. `Full` computes exact blake3/sha256 plus the light
+/// fingerprint; `Light` computes only the sampled fingerprint (cheap on slow
+/// disks) and is excluded from exact duplicate detection / delete-check.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HashPolicy {
+    #[default]
+    Full,
+    Light,
+}
+
+impl HashPolicy {
+    pub fn from_label(label: Option<&str>) -> Self {
+        match label {
+            Some(value) if value.eq_ignore_ascii_case("light") => HashPolicy::Light,
+            _ => HashPolicy::Full,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HashPolicy::Full => "full",
+            HashPolicy::Light => "light",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1944,8 +1996,30 @@ fn blake3_light_of_bytes(bytes: &[u8]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn hash_open_file(file: File, metadata: HashedFileMetadata) -> Result<HashedFile> {
+fn hash_open_file(
+    file: File,
+    metadata: HashedFileMetadata,
+    policy: HashPolicy,
+) -> Result<HashedFile> {
     let mut reader = BufReader::new(file);
+
+    if matches!(policy, HashPolicy::Light) {
+        // Sampled-only: read just the light-hash slices, never the whole file.
+        // `blake3`/`sha256` carry the light value so rows are valid, but the
+        // scan is flagged `light` and excluded from exact duplicate detection.
+        let blake3_light = blake3_light_from_reader(&mut reader, metadata.size)?;
+        return Ok(HashedFile {
+            size: metadata.size,
+            blake3: blake3_light.clone(),
+            sha256: blake3_light.clone(),
+            blake3_light,
+            ctime: metadata.ctime,
+            mtime: metadata.mtime,
+            mode: metadata.mode,
+            reused: false,
+        });
+    }
+
     let mut blake3_hasher = blake3::Hasher::new();
     let mut sha256_hasher = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
@@ -1959,15 +2033,40 @@ fn hash_open_file(file: File, metadata: HashedFileMetadata) -> Result<HashedFile
         sha256_hasher.update(&buffer[..bytes]);
     }
 
+    // A full scan also records the light fingerprint (a cheap second pass over
+    // the sampled ranges of the already-open file).
+    let blake3_light = blake3_light_from_reader(&mut reader, metadata.size)?;
+
     Ok(HashedFile {
         size: metadata.size,
         blake3: blake3_hasher.finalize().to_hex().to_string(),
         sha256: hex::encode(sha256_hasher.finalize()),
+        blake3_light,
         ctime: metadata.ctime,
         mtime: metadata.mtime,
         mode: metadata.mode,
         reused: false,
     })
+}
+
+/// Reads only the `blake3_light` sampled ranges from a seekable reader.
+fn blake3_light_from_reader<R: Read + Seek>(reader: &mut R, size: u64) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    for (offset, len) in light_hash_slice_plan(size) {
+        reader.seek(SeekFrom::Start(offset))?;
+        let mut remaining = len as usize;
+        while remaining > 0 {
+            let want = remaining.min(buffer.len());
+            let read = reader.read(&mut buffer[..want])?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            remaining -= read;
+        }
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 struct HashedFileMetadata {
@@ -2497,6 +2596,47 @@ mod tests {
     }
 
     #[test]
+    fn light_scan_records_only_the_sampled_fingerprint_and_flags_the_scan() {
+        let root = test_root("light-scan");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(&location_root).unwrap();
+        std::fs::write(location_root.join("a.txt"), b"content for light hashing").unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+
+        let prepared =
+            prepare_scan_with_policy(&db, "test", Path::new("/"), HashPolicy::Light).unwrap();
+        let scan_id = prepared.scan_id.clone();
+        let summary = run_prepared_scan(&db, prepared, None).unwrap();
+        assert_eq!(summary.file_count, 1);
+
+        let conn = db.connect().unwrap();
+        let (blake3, blake3_light): (String, String) = conn
+            .query_row(
+                "SELECT blake3, blake3_light FROM files WHERE scan_id = ?1 AND kind = 'file'",
+                [&scan_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(!blake3_light.is_empty());
+        // Light scans carry the sampled fingerprint in both columns and are
+        // flagged so exact duplicate detection excludes them.
+        assert_eq!(blake3, blake3_light);
+        let policy: String = conn
+            .query_row("SELECT hash_policy FROM scans WHERE id = ?1", [&scan_id], |row| row.get(0))
+            .unwrap();
+        assert_eq!(policy, "light");
+    }
+
+    #[test]
     fn scan_indexes_files_matching_excludes() {
         let root = test_root("scan-excludes");
         let location_root = root.join("location");
@@ -2606,6 +2746,7 @@ mod tests {
             seeded_paths: std::collections::HashSet::new(),
             seeded_file_count: 0,
             seeded_total_bytes: 0,
+            hash_policy: HashPolicy::Full,
         };
         progress.start(&prepared);
         progress.finish(&ScanSummary {
@@ -2944,6 +3085,7 @@ mod tests {
             seeded_paths: std::collections::HashSet::new(),
             seeded_file_count: 0,
             seeded_total_bytes: 0,
+            hash_policy: HashPolicy::Full,
         });
         (progress, scan_id)
     }

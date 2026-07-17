@@ -231,6 +231,7 @@ async fn handle_rpc_result(
                     state,
                     params.slug,
                     params.offset.unwrap_or_else(|| PathBuf::from("/")),
+                    params.hash_policy,
                 )
                 .await?,
             )?)
@@ -775,12 +776,16 @@ async fn add_location(
 #[derive(Deserialize)]
 struct ScanRequest {
     offset: Option<PathBuf>,
+    #[serde(default)]
+    hash_policy: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct StartScanParams {
     slug: String,
     offset: Option<PathBuf>,
+    #[serde(default)]
+    hash_policy: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -840,6 +845,7 @@ async fn scan_location(
             state,
             slug,
             input.offset.unwrap_or_else(|| PathBuf::from("/")),
+            input.hash_policy,
         )
         .await?,
     ))
@@ -849,8 +855,10 @@ async fn start_scan_job(
     state: AppState,
     slug: String,
     offset: PathBuf,
+    hash_policy: Option<String>,
 ) -> anyhow::Result<ScanStartedResponse<'static>> {
-    let prepared = scanner::prepare_scan(&state.db, &slug, &offset)?;
+    let policy = scanner::HashPolicy::from_label(hash_policy.as_deref());
+    let prepared = scanner::prepare_scan_with_policy(&state.db, &slug, &offset, policy)?;
     let scan_id = prepared.scan_id.clone();
     state.progress.start(&prepared);
 
@@ -1245,6 +1253,7 @@ mod tests {
             size: 0,
             blake3: String::new(),
             sha256: String::new(),
+            blake3_light: String::new(),
             ctime: None,
             mtime: None,
             mode: None,
@@ -1309,6 +1318,7 @@ mod tests {
             size: 0,
             blake3: String::new(),
             sha256: String::new(),
+            blake3_light: String::new(),
             ctime: None,
             mtime: None,
             mode: None,

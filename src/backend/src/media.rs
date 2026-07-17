@@ -600,6 +600,7 @@ mod tests {
             size: 3,
             blake3: "later-hash".to_string(),
             sha256: "later-hash".to_string(),
+            blake3_light: String::new(),
             ctime: None,
             mtime: None,
             mode: None,

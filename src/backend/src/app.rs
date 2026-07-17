@@ -117,6 +117,7 @@ impl AppCore {
                     self.start_scan_job(
                         params.slug,
                         params.offset.unwrap_or_else(|| PathBuf::from("/")),
+                        params.hash_policy,
                     )
                     .await?,
                 )?)
@@ -323,8 +324,10 @@ impl AppCore {
         &self,
         slug: String,
         offset: PathBuf,
+        hash_policy: Option<String>,
     ) -> Result<ScanStartedResponse<'static>> {
-        let prepared = scanner::prepare_scan(&self.db, &slug, &offset)?;
+        let policy = scanner::HashPolicy::from_label(hash_policy.as_deref());
+        let prepared = scanner::prepare_scan_with_policy(&self.db, &slug, &offset, policy)?;
         self.run_prepared_scan(prepared, None).await
     }
 
@@ -677,6 +680,8 @@ struct SetLocationDisabledParams {
 struct StartScanParams {
     slug: String,
     offset: Option<PathBuf>,
+    #[serde(default)]
+    hash_policy: Option<String>,
 }
 #[derive(Deserialize)]
 struct ScanIdParams {
@@ -801,6 +806,7 @@ mod tests {
             size: 0,
             blake3: String::new(),
             sha256: String::new(),
+            blake3_light: String::new(),
             ctime: None,
             mtime: None,
             mode: None,
@@ -865,6 +871,7 @@ mod tests {
             size: 0,
             blake3: String::new(),
             sha256: String::new(),
+            blake3_light: String::new(),
             ctime: None,
             mtime: None,
             mode: None,

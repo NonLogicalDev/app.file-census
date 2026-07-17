@@ -291,6 +291,10 @@ pub struct NewFile {
     pub size: u64,
     pub blake3: String,
     pub sha256: String,
+    // Heuristic sampled fingerprint (plan-064). Empty when not computed (dirs,
+    // errors, or a full scan that predates light hashing). Never an exact
+    // identity — exact dedup/delete-check stay on `blake3`.
+    pub blake3_light: String,
     pub ctime: Option<String>,
     pub mtime: Option<String>,
     pub mode: Option<u32>,
@@ -444,7 +448,9 @@ impl Database {
                 error_count INTEGER NOT NULL DEFAULT 0,
                 total_bytes INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'running',
-                notes TEXT
+                notes TEXT,
+                nickname TEXT,
+                hash_policy TEXT NOT NULL DEFAULT 'full'
             );
 
             CREATE TABLE IF NOT EXISTS files (
@@ -455,6 +461,7 @@ impl Database {
                 size INTEGER NOT NULL,
                 blake3 TEXT NOT NULL,
                 sha256 TEXT NOT NULL,
+                blake3_light TEXT NOT NULL DEFAULT '',
                 kind TEXT NOT NULL DEFAULT 'file' CHECK (kind IN ('file', 'dir')),
                 ctime TEXT,
                 mtime TEXT,
@@ -738,6 +745,15 @@ impl Database {
         }
         self.scan_by_id(scan_id)?
             .with_context(|| format!("updated scan was not found: {scan_id}"))
+    }
+
+    pub fn set_scan_hash_policy(&self, scan_id: &str, policy: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE scans SET hash_policy = ?1 WHERE id = ?2",
+            params![policy, scan_id],
+        )?;
+        Ok(())
     }
 
     /// Caches an EXIF extraction keyed by content identity (blake3, size), so a
@@ -1085,7 +1101,7 @@ impl Database {
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO files (scan_id, kind, path, name, size, blake3, sha256, ctime, mtime, mode, error) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT OR REPLACE INTO files (scan_id, kind, path, name, size, blake3, sha256, blake3_light, ctime, mtime, mode, error) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
             for file in files {
                 stmt.execute(params![
@@ -1096,6 +1112,7 @@ impl Database {
                     file.size,
                     file.blake3,
                     file.sha256,
+                    file.blake3_light,
                     file.ctime,
                     file.mtime,
                     file.mode,
@@ -2331,7 +2348,7 @@ impl Database {
                            (
                                SELECT s2.id
                                FROM scans s2
-                               WHERE s2.location_id = l.id AND s2.status = 'complete'
+                               WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
                                ORDER BY s2.started_at DESC
                                LIMIT 1
                            )
@@ -3004,7 +3021,7 @@ fn prepare_duplicate_group_scope(
                        (
                            SELECT s2.id
                            FROM scans s2
-                           WHERE s2.location_id = l.id AND s2.status = 'complete'
+                           WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
                            ORDER BY s2.started_at DESC
                            LIMIT 1
                        )
@@ -3052,11 +3069,14 @@ fn duplicate_scope_scan_ids(
     let mut stmt = conn.prepare(
         r#"
         SELECT COALESCE(
-            l.representative_scan_id,
+            (
+                SELECT rep.id FROM scans rep
+                WHERE rep.id = l.representative_scan_id AND rep.hash_policy != 'light'
+            ),
             (
                 SELECT s2.id
                 FROM scans s2
-                WHERE s2.location_id = l.id AND s2.status = 'complete'
+                WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
                 ORDER BY s2.started_at DESC
                 LIMIT 1
             )
@@ -3170,7 +3190,7 @@ fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> 
                        (
                            SELECT s2.id
                            FROM scans s2
-                           WHERE s2.location_id = l.id AND s2.status = 'complete'
+                           WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
                            ORDER BY s2.started_at DESC
                            LIMIT 1
                        )
@@ -3619,7 +3639,7 @@ fn delete_check_for_selection(
                        (
                            SELECT s2.id
                            FROM scans s2
-                           WHERE s2.location_id = l.id AND s2.status = 'complete'
+                           WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
                            ORDER BY s2.started_at DESC
                            LIMIT 1
                        )
@@ -4708,6 +4728,7 @@ mod tests {
                 size: 0,
                 blake3: String::new(),
                 sha256: String::new(),
+                blake3_light: String::new(),
                 ctime: None,
                 mtime: None,
                 mode: None,
@@ -4870,6 +4891,7 @@ mod tests {
                 size: 0,
                 blake3: String::new(),
                 sha256: String::new(),
+                blake3_light: String::new(),
                 ctime: None,
                 mtime: None,
                 mode: None,
@@ -5044,6 +5066,7 @@ mod tests {
             size: 0,
             blake3: String::new(),
             sha256: String::new(),
+            blake3_light: String::new(),
             ctime: None,
             mtime: None,
             mode: None,
@@ -5112,6 +5135,7 @@ mod tests {
                 size: 0,
                 blake3: String::new(),
                 sha256: String::new(),
+                blake3_light: String::new(),
                 ctime: None,
                 mtime: None,
                 mode: None,
@@ -5183,6 +5207,7 @@ mod tests {
                 size: 0,
                 blake3: String::new(),
                 sha256: String::new(),
+                blake3_light: String::new(),
                 ctime: None,
                 mtime: None,
                 mode: None,
@@ -5321,6 +5346,7 @@ mod tests {
             size,
             blake3: hash.to_string(),
             sha256: hash.to_string(),
+            blake3_light: String::new(),
             ctime: None,
             mtime: None,
             mode: None,
