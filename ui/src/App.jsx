@@ -1173,6 +1173,11 @@ export default function App() {
   }
 
   function openScanStart(slug) {
+    const location = latest.current.locations?.find?.((item) => item.slug === slug);
+    if (location && location.connected === false) {
+      setMessage(`Cannot scan ${location.name || slug}: its path is disconnected or missing. Reconnect the drive or edit the location.`);
+      return;
+    }
     setScanStartForm({ slug, offset: '/', hash_policy: 'full' });
   }
 
@@ -2389,7 +2394,12 @@ export default function App() {
             {!selectedLocationView.activeScan && (
               <Button variant="danger" onClick={() => requestDeleteLocation(selectedLocationView.slug)} disabled={busy} icon={<Icon name="delete" />}>Delete location</Button>
             )}
-            <Button onClick={() => openScanStart(selectedLocationView.slug)} disabled={busy} icon={<Icon name="scan" />}>Scan now</Button>
+            <Button
+              onClick={() => openScanStart(selectedLocationView.slug)}
+              disabled={busy || !selectedLocationView.connected}
+              title={selectedLocationView.connected ? undefined : 'This location is disconnected — reconnect the drive or edit the location to scan.'}
+              icon={<Icon name="scan" />}
+            >Scan now</Button>
           </>
         )
         : <Button onClick={() => setShowAddLocation(true)} disabled={busy} icon={<Icon name="add" />}>Add location</Button>

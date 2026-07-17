@@ -658,6 +658,15 @@ fn prepare_scan_with_start(
         .location_by_slug(slug)?
         .with_context(|| format!("unknown location slug: {slug}"))?;
 
+    // Refuse to start a scan on a location whose path is missing or unreachable
+    // (e.g. a disconnected drive), before any scan record is created.
+    if !location.root_path.is_dir() {
+        anyhow::bail!(
+            "cannot scan '{slug}': its path {} does not exist or is not a reachable directory. Reconnect the drive or edit the location.",
+            location.root_path.display()
+        );
+    }
+
     let scan_root = resolve_contained_scan_root(&location.root_path, offset_path)?;
     let scan_id = start_scan(&location)?;
     db.set_scan_hash_policy(&scan_id, policy.as_str())?;
@@ -2593,6 +2602,31 @@ mod tests {
         let remaining = db.scan_files(&scan.scan_id, 10).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].path, "two.txt");
+    }
+
+    #[test]
+    fn scanning_a_missing_location_path_is_rejected_before_creating_a_scan() {
+        let root = test_root("missing-location-path");
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Gone".to_string(),
+            slug: "gone".to_string(),
+            root_path: root.join("does-not-exist"),
+            notes: None,
+        })
+        .unwrap();
+
+        let error = prepare_scan(&db, "gone", Path::new("/"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not exist"), "unexpected error: {error}");
+        assert!(
+            db.scans().unwrap().is_empty(),
+            "a rejected scan must not create a scan record"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
