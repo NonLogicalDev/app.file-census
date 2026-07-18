@@ -1930,25 +1930,37 @@ const fn parse_env_usize(value: Option<&str>, default: usize) -> usize {
     }
 }
 
+// At least 5 slices by default; the head and tail slices are configured
+// independently and default larger than the interior slices, so file headers,
+// container footers, and evenly-spaced interior samples all carry weight.
 const LIGHT_HASH_SLICE_COUNT: usize = {
-    let configured = parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_SLICE_COUNT"), 3);
-    if configured < 2 {
-        2
+    let configured = parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_SLICE_COUNT"), 5);
+    if configured < 5 {
+        5
     } else {
         configured
     }
 };
 const LIGHT_HASH_SLICE_WIDTH: usize = {
-    let configured = parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_SLICE_WIDTH"), 5 * 1024 * 1024);
+    let configured = parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_SLICE_WIDTH"), 4 * 1024 * 1024);
     if configured == 0 {
         1
     } else {
         configured
     }
 };
-const LIGHT_HASH_TERMINAL_SLICE_WIDTH: usize = {
+const LIGHT_HASH_HEAD_SLICE_WIDTH: usize = {
     let configured =
-        parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_TERMINAL_SLICE_WIDTH"), 5 * 1024 * 1024);
+        parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_HEAD_SLICE_WIDTH"), 8 * 1024 * 1024);
+    if configured == 0 {
+        1
+    } else {
+        configured
+    }
+};
+const LIGHT_HASH_TAIL_SLICE_WIDTH: usize = {
+    let configured =
+        parse_env_usize(option_env!("FILE_CENSUS_LIGHT_HASH_TAIL_SLICE_WIDTH"), 8 * 1024 * 1024);
     if configured == 0 {
         1
     } else {
@@ -1956,16 +1968,27 @@ const LIGHT_HASH_TERMINAL_SLICE_WIDTH: usize = {
     }
 };
 
+fn light_hash_slice_width(index: usize, count: usize) -> u64 {
+    if index == 0 {
+        LIGHT_HASH_HEAD_SLICE_WIDTH as u64
+    } else if index == count - 1 {
+        LIGHT_HASH_TAIL_SLICE_WIDTH as u64
+    } else {
+        LIGHT_HASH_SLICE_WIDTH as u64
+    }
+}
+
 /// Byte ranges `blake3_light` samples for a file of `size` bytes. Small files
-/// (≤ `2*terminal + (count-2)*slice`) return a single whole-file range so the
+/// (≤ `head + tail + (count-2)*slice`) return a single whole-file range so the
 /// light hash can equal the full BLAKE3. Larger files return `slice_count`
-/// ranges: first and last anchored at start/end with terminal width, interior
-/// ranges of slice width with evenly-spaced start offsets.
+/// ranges: the first anchored at the start with head width, the last anchored at
+/// the end with tail width, and interior ranges of slice width with evenly-spaced
+/// start offsets.
 fn light_hash_slice_plan(size: u64) -> Vec<(u64, u64)> {
     let count = LIGHT_HASH_SLICE_COUNT;
-    let slice_width = LIGHT_HASH_SLICE_WIDTH as u64;
-    let terminal_width = LIGHT_HASH_TERMINAL_SLICE_WIDTH as u64;
-    let whole_threshold = 2 * terminal_width + (count as u64 - 2) * slice_width;
+    let whole_threshold = LIGHT_HASH_HEAD_SLICE_WIDTH as u64
+        + LIGHT_HASH_TAIL_SLICE_WIDTH as u64
+        + (count as u64 - 2) * LIGHT_HASH_SLICE_WIDTH as u64;
     if size <= whole_threshold {
         return vec![(0, size)];
     }
@@ -1973,11 +1996,7 @@ fn light_hash_slice_plan(size: u64) -> Vec<(u64, u64)> {
     let mut plan = Vec::with_capacity(count);
     let denom = (count - 1) as f64;
     for index in 0..count {
-        let width = if index == 0 || index == count - 1 {
-            terminal_width
-        } else {
-            slice_width
-        };
+        let width = light_hash_slice_width(index, count);
         let max_offset = size.saturating_sub(width);
         let fraction = index as f64 / denom;
         let offset = (fraction * max_offset as f64).round() as u64;
@@ -1987,6 +2006,10 @@ fn light_hash_slice_plan(size: u64) -> Vec<(u64, u64)> {
     }
     plan
 }
+
+// Compile-time guard: the default configuration honors the "at least 5 slices"
+// requirement regardless of the env knobs.
+const _: () = assert!(LIGHT_HASH_SLICE_COUNT >= 5);
 
 /// Computes `blake3_light` over an in-memory buffer (used for tests and small
 /// inputs). Hashes the sampled ranges in order.
@@ -2165,16 +2188,22 @@ mod tests {
     }
 
     #[test]
-    fn blake3_light_plan_samples_terminals_and_interior() {
-        let terminal = LIGHT_HASH_TERMINAL_SLICE_WIDTH as u64;
+    fn blake3_light_plan_samples_head_tail_and_interior() {
+        assert!(
+            LIGHT_HASH_SLICE_COUNT >= 5,
+            "default light hash uses at least 5 slices"
+        );
+        let head = LIGHT_HASH_HEAD_SLICE_WIDTH as u64;
+        let tail = LIGHT_HASH_TAIL_SLICE_WIDTH as u64;
         let slice = LIGHT_HASH_SLICE_WIDTH as u64;
-        let size = 2 * terminal + (LIGHT_HASH_SLICE_COUNT as u64 - 2) * slice + terminal;
+        // Comfortably past the whole-file threshold so every slice is distinct.
+        let size = head + tail + (LIGHT_HASH_SLICE_COUNT as u64 - 2) * slice + head + tail;
         let plan = light_hash_slice_plan(size);
 
         assert_eq!(plan.len(), LIGHT_HASH_SLICE_COUNT);
-        assert_eq!(plan[0], (0, terminal), "first slice anchored at start");
+        assert_eq!(plan[0], (0, head), "first slice anchored at start with head width");
         let (last_off, last_len) = *plan.last().unwrap();
-        assert_eq!(last_len, terminal);
+        assert_eq!(last_len, tail, "last slice uses tail width");
         assert_eq!(last_off + last_len, size, "last slice anchored at end");
         for window in plan.windows(2) {
             assert!(window[1].0 > window[0].0, "slice offsets strictly increase");
@@ -2183,7 +2212,11 @@ mod tests {
 
     #[test]
     fn blake3_light_ignores_unsampled_bytes_but_reflects_sampled_ones() {
-        let size = (2 * LIGHT_HASH_TERMINAL_SLICE_WIDTH + LIGHT_HASH_SLICE_WIDTH + 4096) as usize;
+        // Twice the summed slice widths guarantees uncovered gaps between slices.
+        let widths_sum = LIGHT_HASH_HEAD_SLICE_WIDTH
+            + LIGHT_HASH_TAIL_SLICE_WIDTH
+            + (LIGHT_HASH_SLICE_COUNT - 2) * LIGHT_HASH_SLICE_WIDTH;
+        let size = 2 * widths_sum + 4096;
         let mut buffer = vec![7u8; size];
         let plan = light_hash_slice_plan(size as u64);
         let covered = |index: usize| {
