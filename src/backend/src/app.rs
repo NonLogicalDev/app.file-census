@@ -25,8 +25,27 @@ pub struct AppCore {
 impl AppCore {
     pub fn open(db_path: PathBuf) -> Result<Self> {
         let events = EventHub::default();
+        let db = Database::open(db_path)?;
+        // A fresh process owns no in-flight scans, so any scan still marked
+        // running/paused/stopping was interrupted by an abrupt termination.
+        // Finalize those as `interrupted` before serving requests.
+        match db.reconcile_interrupted_scans() {
+            Ok(interrupted) if !interrupted.is_empty() => {
+                eprintln!(
+                    "recovered {} interrupted scan(s) left running after an abrupt shutdown",
+                    interrupted.len()
+                );
+                for scan_id in interrupted {
+                    events.emit("scan_interrupted", serde_json::json!({ "scan_id": scan_id }));
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("failed to reconcile interrupted scans on startup: {error:#}");
+            }
+        }
         Ok(Self {
-            db: Arc::new(Database::open(db_path)?),
+            db: Arc::new(db),
             progress: ScanProgressStore::with_events(events.clone()),
             events,
         })

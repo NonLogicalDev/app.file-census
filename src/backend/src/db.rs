@@ -1238,6 +1238,46 @@ impl Database {
         Ok(())
     }
 
+    /// Marks scans left in a non-terminal state (running/paused/stopping/…) as
+    /// `interrupted`. A freshly opened process owns no in-flight scans, so any
+    /// such row is the residue of an abrupt termination (crash, kill, power
+    /// loss) — the worker threads that would have finalized it are gone. Returns
+    /// the affected scan ids. `interrupted` is terminal-but-not-`complete`, so
+    /// these scans stay out of the duplicate / delete-check scope automatically.
+    ///
+    /// Intended to run once at startup (see `App::open`), before any in-process
+    /// scan begins.
+    pub fn reconcile_interrupted_scans(&self) -> Result<Vec<String>> {
+        let conn = self.connect()?;
+        let ids: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM scans WHERE status NOT IN ('complete', 'failed', 'stopped', 'interrupted')",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        let now = Utc::now().to_rfc3339();
+        // Clear any lingering pause/stop control flag too, but only if the
+        // column exists (older databases may predate the control_state ALTER).
+        if column_exists(&conn, "scans", "control_state")? {
+            conn.execute(
+                "UPDATE scans SET status = 'interrupted', finished_at = COALESCE(finished_at, ?1), control_state = NULL \
+                 WHERE status NOT IN ('complete', 'failed', 'stopped', 'interrupted')",
+                params![now],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE scans SET status = 'interrupted', finished_at = COALESCE(finished_at, ?1) \
+                 WHERE status NOT IN ('complete', 'failed', 'stopped', 'interrupted')",
+                params![now],
+            )?;
+        }
+        Ok(ids)
+    }
+
     pub fn update_scan_counts(
         &self,
         scan_id: &str,
@@ -4145,6 +4185,51 @@ mod tests {
             assert_eq!(scan.started_at, started_at.to_rfc3339());
             assert_eq!(scan.status, "running");
         }
+    }
+
+    #[test]
+    fn reconcile_interrupted_scans_finalizes_only_non_terminal_scans() {
+        let root = test_root("reconcile-interrupted-scans");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Archive".to_string(),
+                slug: "archive".to_string(),
+                root_path: root.join("archive"),
+                notes: None,
+            })
+            .unwrap();
+
+        let running = db.start_scan(&location, Path::new("/")).unwrap();
+        let paused = db.start_scan(&location, Path::new("/")).unwrap();
+        let stopping = db.start_scan(&location, Path::new("/")).unwrap();
+        let complete = db.start_scan(&location, Path::new("/")).unwrap();
+        let failed = db.start_scan(&location, Path::new("/")).unwrap();
+        db.finish_scan(&complete, 5, 1, 0, 100, "complete").unwrap();
+        db.finish_scan(&failed, 0, 0, 3, 0, "failed").unwrap();
+        {
+            let conn = db.connect().unwrap();
+            conn.execute("UPDATE scans SET status = 'paused' WHERE id = ?1", params![paused])
+                .unwrap();
+            conn.execute("UPDATE scans SET status = 'stopping' WHERE id = ?1", params![stopping])
+                .unwrap();
+        }
+
+        let recovered = db.reconcile_interrupted_scans().unwrap();
+        assert_eq!(recovered.len(), 3, "running/paused/stopping are all orphaned");
+        for id in [&running, &paused, &stopping] {
+            assert!(recovered.contains(id));
+            let scan = db.scan_by_id(id).unwrap().unwrap();
+            assert_eq!(scan.status, "interrupted");
+            assert!(scan.finished_at.is_some(), "interrupted scans get a finished_at");
+        }
+        // Terminal scans are left untouched.
+        assert_eq!(db.scan_by_id(&complete).unwrap().unwrap().status, "complete");
+        assert_eq!(db.scan_by_id(&failed).unwrap().unwrap().status, "failed");
+
+        // Idempotent: a second pass finds nothing to recover.
+        assert!(db.reconcile_interrupted_scans().unwrap().is_empty());
     }
 
     #[test]

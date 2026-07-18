@@ -6,7 +6,7 @@ import { formatUserEvent } from '../utils/events.js';
 import { bytes, statusLabel } from '../utils/format.js';
 
 const ACTIVE_STATES = ['running', 'paused', 'stopping', 'repairing', 'queued'];
-const FINISHED_STATES = ['complete', 'completed', 'failed', 'stopped'];
+const FINISHED_STATES = ['complete', 'completed', 'failed', 'stopped', 'interrupted'];
 
 function normalizedStatus(status) {
   const value = String(status || 'running').toLowerCase();
@@ -20,6 +20,7 @@ function statusTextClass(status) {
       return 'text-muted';
     case 'failed':
       return 'text-danger';
+    case 'interrupted':
     case 'paused':
     case 'stopping':
       return 'text-warning';
@@ -34,6 +35,7 @@ function statusDotClass(status) {
   switch (normalizedStatus(status)) {
     case 'failed':
       return 'bg-danger';
+    case 'interrupted':
     case 'paused':
     case 'stopping':
       return 'bg-warning';
@@ -50,6 +52,8 @@ function statusIcon(status) {
     case 'complete':
       return 'check';
     case 'failed':
+      return 'warning';
+    case 'interrupted':
       return 'warning';
     case 'paused':
       return 'pause';
