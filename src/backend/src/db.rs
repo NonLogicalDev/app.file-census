@@ -212,6 +212,19 @@ pub struct TreeEntry {
     pub duplicate_file_count: u64,
     pub original_file_count: u64,
     pub same_scan_duplicate_file_count: u64,
+    /// Backup safety for a file: "safe" (exact copy elsewhere), "warn" (light
+    /// copy only), "unsafe" (no copy), or "" when the duplicate cache has no
+    /// ready run. On directory rows this is "" and the rollup counts apply.
+    #[serde(default)]
+    pub backup_status: String,
+    #[serde(default)]
+    pub unsafe_count: u64,
+    #[serde(default)]
+    pub warn_count: u64,
+    #[serde(default)]
+    pub copies_here: u64,
+    #[serde(default)]
+    pub copies_away: u64,
 }
 
 /// A persisted-cache lifecycle record for the effective duplicate comparison
@@ -535,6 +548,11 @@ impl Database {
                 duplicate_file_count INTEGER NOT NULL DEFAULT 0,
                 original_file_count INTEGER NOT NULL DEFAULT 0,
                 same_scan_duplicate_file_count INTEGER NOT NULL DEFAULT 0,
+                safe_file_count INTEGER NOT NULL DEFAULT 0,
+                warn_file_count INTEGER NOT NULL DEFAULT 0,
+                unsafe_file_count INTEGER NOT NULL DEFAULT 0,
+                copies_here INTEGER NOT NULL DEFAULT 0,
+                copies_away INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (run_id, scan_id, path)
             );
 
@@ -610,6 +628,25 @@ impl Database {
                 "ALTER TABLE files ADD COLUMN blake3_light TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
+        }
+        // Backup-classification columns on the duplicate path-count cache
+        // (safe/warn/unsafe rollups + copy counts). Older cache rows are simply
+        // stale until the next rebuild, so a default of 0 is safe.
+        for column in [
+            "safe_file_count",
+            "warn_file_count",
+            "unsafe_file_count",
+            "copies_here",
+            "copies_away",
+        ] {
+            if !column_exists(conn, "duplicate_cache_path_counts", column)? {
+                conn.execute(
+                    &format!(
+                        "ALTER TABLE duplicate_cache_path_counts ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                    ),
+                    [],
+                )?;
+            }
         }
         migrate_locations_type_check(conn)?;
         Ok(())
@@ -1762,14 +1799,20 @@ impl Database {
             let mut stmt = tx.prepare(
                 r#"
                 INSERT INTO duplicate_cache_path_counts
-                    (run_id, scan_id, path, kind, duplicate_file_count, original_file_count, same_scan_duplicate_file_count)
+                    (run_id, scan_id, path, kind, duplicate_file_count, original_file_count, same_scan_duplicate_file_count,
+                     safe_file_count, warn_file_count, unsafe_file_count, copies_here, copies_away)
                 VALUES
-                    (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 ON CONFLICT(run_id, scan_id, path) DO UPDATE SET
                     kind = excluded.kind,
                     duplicate_file_count = excluded.duplicate_file_count,
                     original_file_count = excluded.original_file_count,
-                    same_scan_duplicate_file_count = excluded.same_scan_duplicate_file_count
+                    same_scan_duplicate_file_count = excluded.same_scan_duplicate_file_count,
+                    safe_file_count = excluded.safe_file_count,
+                    warn_file_count = excluded.warn_file_count,
+                    unsafe_file_count = excluded.unsafe_file_count,
+                    copies_here = excluded.copies_here,
+                    copies_away = excluded.copies_away
                 "#,
             )?;
             for ((scan_id, path), counts) in &path_counts {
@@ -1781,6 +1824,11 @@ impl Database {
                     counts.duplicate_file_count,
                     counts.original_file_count,
                     counts.same_scan_duplicate_file_count,
+                    counts.safe_file_count,
+                    counts.warn_file_count,
+                    counts.unsafe_file_count,
+                    counts.copies_here,
+                    counts.copies_away,
                 ])?;
             }
         }
@@ -2893,7 +2941,12 @@ fn scan_tree_immediate_children(
                 f.ctime AS ctime, f.mtime AS mtime, f.mode AS mode,
                 COALESCE(dc.duplicate_file_count, 0) AS dfc,
                 COALESCE(dc.original_file_count, 0) AS ofc,
-                COALESCE(dc.same_scan_duplicate_file_count, 0) AS sdfc
+                COALESCE(dc.same_scan_duplicate_file_count, 0) AS sdfc,
+                COALESCE(dc.safe_file_count, 0) AS sfc,
+                COALESCE(dc.warn_file_count, 0) AS wfc,
+                COALESCE(dc.unsafe_file_count, 0) AS ufc,
+                COALESCE(dc.copies_here, 0) AS ch,
+                COALESCE(dc.copies_away, 0) AS ca
             FROM files f
             LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
             LEFT JOIN duplicate_cache_path_counts dc
@@ -2908,8 +2961,8 @@ fn scan_tree_immediate_children(
             MAX(CASE WHEN instr(rest, '/') > 0 OR kind = 'dir' THEN 1 ELSE 0 END) AS is_dir,
             SUM(CASE WHEN kind = 'file' THEN 1 ELSE 0 END) AS file_count,
             SUM(CASE WHEN kind = 'file' THEN size ELSE 0 END) AS total_size,
-            -- Duplicate counters roll up from FILE rows only; the cache also
-            -- stores rolled-up rows on directory paths, which must not be summed.
+            -- Duplicate/backup counters roll up from FILE rows only; the cache
+            -- also stores rolled-up rows on directory paths, which must not be summed.
             SUM(CASE WHEN kind = 'file' THEN dfc ELSE 0 END) AS dup,
             SUM(CASE WHEN kind = 'file' THEN ofc ELSE 0 END) AS orig,
             SUM(CASE WHEN kind = 'file' THEN sdfc ELSE 0 END) AS same_dup,
@@ -2922,7 +2975,14 @@ fn scan_tree_immediate_children(
             MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN sha256 END) AS file_sha256,
             MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ctime END) AS file_ctime,
             MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN mtime END) AS file_mtime,
-            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN mode END) AS file_mode
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN mode END) AS file_mode,
+            SUM(CASE WHEN kind = 'file' THEN wfc ELSE 0 END) AS warn_sum,
+            SUM(CASE WHEN kind = 'file' THEN ufc ELSE 0 END) AS unsafe_sum,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN sfc END) AS file_safe,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN wfc END) AS file_warn,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ufc END) AS file_unsafe,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ch END) AS file_here,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ca END) AS file_away
         FROM src
         WHERE rest <> ''
         GROUP BY child
@@ -2937,6 +2997,8 @@ fn scan_tree_immediate_children(
         let dup = row.get::<_, i64>(4)?.max(0) as u64;
         let orig = row.get::<_, i64>(5)?.max(0) as u64;
         let same_dup = row.get::<_, i64>(6)?.max(0) as u64;
+        let warn_sum = row.get::<_, i64>(17)?.max(0) as u64;
+        let unsafe_sum = row.get::<_, i64>(18)?.max(0) as u64;
         if is_dir == 1 {
             Ok(TreeEntry {
                 path: format!("{normalized_prefix}{child}"),
@@ -2952,9 +3014,26 @@ fn scan_tree_immediate_children(
                 duplicate_file_count: dup,
                 original_file_count: orig,
                 same_scan_duplicate_file_count: same_dup,
+                backup_status: String::new(),
+                unsafe_count: unsafe_sum,
+                warn_count: warn_sum,
+                copies_here: 0,
+                copies_away: 0,
             })
         } else {
             let file_path: Option<String> = row.get(10)?;
+            let file_safe = row.get::<_, Option<i64>>(19)?.unwrap_or(0);
+            let file_warn = row.get::<_, Option<i64>>(20)?.unwrap_or(0);
+            let file_unsafe = row.get::<_, Option<i64>>(21)?.unwrap_or(0);
+            let backup_status = if file_unsafe > 0 {
+                "unsafe"
+            } else if file_warn > 0 {
+                "warn"
+            } else if file_safe > 0 {
+                "safe"
+            } else {
+                ""
+            };
             Ok(TreeEntry {
                 path: file_path.unwrap_or_else(|| format!("{normalized_prefix}{child}")),
                 name: child,
@@ -2969,6 +3048,11 @@ fn scan_tree_immediate_children(
                 duplicate_file_count: dup,
                 original_file_count: orig,
                 same_scan_duplicate_file_count: same_dup,
+                backup_status: backup_status.to_string(),
+                unsafe_count: 0,
+                warn_count: 0,
+                copies_here: row.get::<_, Option<i64>>(22)?.unwrap_or(0).max(0) as u64,
+                copies_away: row.get::<_, Option<i64>>(23)?.unwrap_or(0).max(0) as u64,
             })
         }
     })?;
@@ -3112,6 +3196,13 @@ fn build_tree_page_entries(
                 duplicate_file_count: 0,
                 original_file_count: 0,
                 same_scan_duplicate_file_count: 0,
+                // Backup rollups are populated by the depth-1 fast path used for
+                // browsing; the general fold path (filters/depth>1) leaves them 0.
+                backup_status: String::new(),
+                unsafe_count: 0,
+                warn_count: 0,
+                copies_here: 0,
+                copies_away: 0,
             });
             if !is_file && index == directory_parts {
                 entry.ctime = row.file.ctime.clone();
@@ -3155,6 +3246,11 @@ fn build_tree_page_entries(
                     duplicate_file_count,
                     original_file_count,
                     same_scan_duplicate_file_count,
+                    backup_status: String::new(),
+                    unsafe_count: 0,
+                    warn_count: 0,
+                    copies_here: 0,
+                    copies_away: 0,
                 },
             );
         }
@@ -3422,6 +3518,7 @@ struct DuplicateCacheFile {
     location_id: String,
     path: String,
     blake3: String,
+    blake3_light: String,
     size: u64,
 }
 
@@ -3431,6 +3528,14 @@ struct DuplicatePathCounts {
     duplicate_file_count: u64,
     original_file_count: u64,
     same_scan_duplicate_file_count: u64,
+    // Backup classification (refcount model): a file is `safe` if an exact
+    // full-hash copy exists elsewhere in scope, `warn` if only a light-hash copy
+    // does, `unsafe` otherwise. Folders roll up their descendant file counts.
+    safe_file_count: u64,
+    warn_file_count: u64,
+    unsafe_file_count: u64,
+    copies_here: u64,
+    copies_away: u64,
 }
 
 fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> {
@@ -3593,7 +3698,7 @@ fn duplicate_cache_scope_files(
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT f.scan_id, s.location_id, f.path, f.blake3, f.size
+        SELECT f.scan_id, s.location_id, f.path, f.blake3, f.blake3_light, f.size
         FROM files f
         JOIN duplicate_cache_file_scope scope ON scope.scan_id = f.scan_id
         LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
@@ -3610,7 +3715,8 @@ fn duplicate_cache_scope_files(
             location_id: row.get(1)?,
             path: row.get(2)?,
             blake3: row.get(3)?,
-            size: row.get(4)?,
+            blake3_light: row.get(4)?,
+            size: row.get(5)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -3622,6 +3728,13 @@ fn duplicate_cache_path_counts(
 ) -> BTreeMap<(String, String), DuplicatePathCounts> {
     let mut locations_by_hash = HashMap::<(String, u64), HashSet<String>>::new();
     let mut same_scan_counts = HashMap::<(String, String, u64), u64>::new();
+    // Per exact (blake3,size): how many copies live in each location. Lets us
+    // report ⌂ same-location and ↗ other-location copy counts, and classify the
+    // backup status via the refcount model.
+    let mut exact_counts_by_location = HashMap::<(String, u64), HashMap<String, u64>>::new();
+    // Per light (blake3_light,size): total copies (non-empty light only). A
+    // light-only survivor is the "warn" tier.
+    let mut light_totals = HashMap::<(String, u64), u64>::new();
     for file in files {
         locations_by_hash
             .entry((file.blake3.clone(), file.size))
@@ -3630,6 +3743,16 @@ fn duplicate_cache_path_counts(
         *same_scan_counts
             .entry((file.scan_id.clone(), file.blake3.clone(), file.size))
             .or_default() += 1;
+        *exact_counts_by_location
+            .entry((file.blake3.clone(), file.size))
+            .or_default()
+            .entry(file.location_id.clone())
+            .or_default() += 1;
+        if !file.blake3_light.is_empty() {
+            *light_totals
+                .entry((file.blake3_light.clone(), file.size))
+                .or_default() += 1;
+        }
     }
 
     let mut path_counts = BTreeMap::<(String, String), DuplicatePathCounts>::new();
@@ -3648,6 +3771,51 @@ fn duplicate_cache_path_counts(
                 .unwrap_or(0)
                 > 1,
         );
+
+        // Backup classification (refcount model). Copies of this exact content:
+        let per_location = exact_counts_by_location.get(&hash_key);
+        let here = per_location
+            .and_then(|counts| counts.get(&file.location_id))
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(1); // other exact copies in the same location
+        let away: u64 = per_location
+            .map(|counts| {
+                counts
+                    .iter()
+                    .filter(|(location_id, _)| *location_id != &file.location_id)
+                    .map(|(_, count)| *count)
+                    .sum()
+            })
+            .unwrap_or(0);
+        let has_exact_elsewhere = here > 0 || away > 0;
+        let has_light_elsewhere = !file.blake3_light.is_empty()
+            && light_totals
+                .get(&(file.blake3_light.clone(), file.size))
+                .copied()
+                .unwrap_or(0)
+                > 1;
+        let (safe, warn, unsafe_) = if has_exact_elsewhere {
+            (1, 0, 0)
+        } else if has_light_elsewhere {
+            (0, 1, 0)
+        } else {
+            (0, 0, 1)
+        };
+
+        let file_backup = DuplicateBackupCounts {
+            safe_file_count: safe,
+            warn_file_count: warn,
+            unsafe_file_count: unsafe_,
+            copies_here: here,
+            copies_away: away,
+        };
+        let ancestor_backup = DuplicateBackupCounts {
+            copies_here: 0,
+            copies_away: 0,
+            ..file_backup
+        };
+
         increment_duplicate_path_counts(
             &mut path_counts,
             &file.scan_id,
@@ -3656,6 +3824,7 @@ fn duplicate_cache_path_counts(
             duplicate_file_count,
             original_file_count,
             same_scan_duplicate_file_count,
+            &file_backup,
         );
         for ancestor in duplicate_cache_ancestor_paths(&file.path) {
             increment_duplicate_path_counts(
@@ -3666,12 +3835,25 @@ fn duplicate_cache_path_counts(
                 duplicate_file_count,
                 original_file_count,
                 same_scan_duplicate_file_count,
+                &ancestor_backup,
             );
         }
     }
     path_counts
 }
 
+/// Backup-status contribution for one file (or the rolled-up sum for a folder).
+#[derive(Clone, Copy, Default)]
+struct DuplicateBackupCounts {
+    safe_file_count: u64,
+    warn_file_count: u64,
+    unsafe_file_count: u64,
+    // Only meaningful for a single file row (0 on rolled-up folder rows).
+    copies_here: u64,
+    copies_away: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn increment_duplicate_path_counts(
     path_counts: &mut BTreeMap<(String, String), DuplicatePathCounts>,
     scan_id: &str,
@@ -3680,6 +3862,7 @@ fn increment_duplicate_path_counts(
     duplicate_file_count: u64,
     original_file_count: u64,
     same_scan_duplicate_file_count: u64,
+    backup: &DuplicateBackupCounts,
 ) {
     let counts = path_counts
         .entry((scan_id.to_string(), path.to_string()))
@@ -3688,6 +3871,11 @@ fn increment_duplicate_path_counts(
             duplicate_file_count: 0,
             original_file_count: 0,
             same_scan_duplicate_file_count: 0,
+            safe_file_count: 0,
+            warn_file_count: 0,
+            unsafe_file_count: 0,
+            copies_here: 0,
+            copies_away: 0,
         });
     if counts.kind != "file" {
         counts.kind = kind.to_string();
@@ -3701,6 +3889,13 @@ fn increment_duplicate_path_counts(
     counts.same_scan_duplicate_file_count = counts
         .same_scan_duplicate_file_count
         .saturating_add(same_scan_duplicate_file_count);
+    counts.safe_file_count = counts.safe_file_count.saturating_add(backup.safe_file_count);
+    counts.warn_file_count = counts.warn_file_count.saturating_add(backup.warn_file_count);
+    counts.unsafe_file_count = counts
+        .unsafe_file_count
+        .saturating_add(backup.unsafe_file_count);
+    counts.copies_here = counts.copies_here.saturating_add(backup.copies_here);
+    counts.copies_away = counts.copies_away.saturating_add(backup.copies_away);
 }
 
 fn duplicate_cache_ancestor_paths(path: &str) -> Vec<String> {
@@ -4267,6 +4462,11 @@ fn tree_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeEntry> {
         duplicate_file_count: 0,
         original_file_count: 0,
         same_scan_duplicate_file_count: 0,
+        backup_status: String::new(),
+        unsafe_count: 0,
+        warn_count: 0,
+        copies_here: 0,
+        copies_away: 0,
     })
 }
 
@@ -4380,6 +4580,52 @@ mod tests {
             assert_eq!(scan.started_at, started_at.to_rfc3339());
             assert_eq!(scan.status, "running");
         }
+    }
+
+    #[test]
+    fn duplicate_cache_path_counts_classifies_backup_safety() {
+        let f = |scan: &str, loc: &str, path: &str, blake3: &str, light: &str, size: u64| DuplicateCacheFile {
+            scan_id: scan.to_string(),
+            location_id: loc.to_string(),
+            path: path.to_string(),
+            blake3: blake3.to_string(),
+            blake3_light: light.to_string(),
+            size,
+        };
+        let files = vec![
+            // safe: exact copy in another location
+            f("s1", "locA", "dir/exact.jpg", "HASH_EXACT", "LIGHT_EXACT", 100),
+            f("s2", "locB", "backup/exact.jpg", "HASH_EXACT", "LIGHT_EXACT", 100),
+            // warn: no exact elsewhere, but a light-hash match in another location
+            f("s1", "locA", "dir/similar.jpg", "HASH_SIM_A", "LIGHT_SIM", 200),
+            f("s2", "locB", "backup/similar.jpg", "HASH_SIM_B", "LIGHT_SIM", 200),
+            // unsafe: only copy anywhere
+            f("s1", "locA", "dir/only.raw", "HASH_ONLY", "LIGHT_ONLY", 300),
+            // same-location duplicate: exact copy in the SAME location (⌂ here)
+            f("s1", "locA", "dir/dup1.png", "HASH_DUP", "LIGHT_DUP", 400),
+            f("s1", "locA", "dir/dup2.png", "HASH_DUP", "LIGHT_DUP", 400),
+        ];
+        let counts = duplicate_cache_path_counts(&files);
+
+        let get = |path: &str| counts.get(&("s1".to_string(), path.to_string())).unwrap();
+        let exact = get("dir/exact.jpg");
+        assert_eq!((exact.safe_file_count, exact.warn_file_count, exact.unsafe_file_count), (1, 0, 0));
+        assert_eq!((exact.copies_here, exact.copies_away), (0, 1));
+
+        let similar = get("dir/similar.jpg");
+        assert_eq!((similar.safe_file_count, similar.warn_file_count, similar.unsafe_file_count), (0, 1, 0));
+
+        let only = get("dir/only.raw");
+        assert_eq!((only.safe_file_count, only.warn_file_count, only.unsafe_file_count), (0, 0, 1));
+
+        let dup1 = get("dir/dup1.png");
+        assert_eq!((dup1.safe_file_count, dup1.warn_file_count, dup1.unsafe_file_count), (1, 0, 0));
+        assert_eq!((dup1.copies_here, dup1.copies_away), (1, 0), "same-location duplicate counts as ⌂ here");
+
+        // The `dir` folder rolls up its descendants: 3 safe (exact + dup1 + dup2), 1 warn, 1 unsafe.
+        let dir = get("dir");
+        assert_eq!(dir.kind, "dir");
+        assert_eq!((dir.safe_file_count, dir.warn_file_count, dir.unsafe_file_count), (3, 1, 1));
     }
 
     #[test]
