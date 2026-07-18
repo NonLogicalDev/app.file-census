@@ -62,7 +62,43 @@ function statusIcon(status) {
   }
 }
 
+function poolCounts(pool = {}) {
+  const processed = Math.max(0, Number(pool.completed || 0)) + Math.max(0, Number(pool.failed || 0));
+  const observed = processed + Math.max(0, Number(pool.queued || 0)) + Math.max(0, Number(pool.active || 0));
+  return { processed, observed };
+}
+
+// Truthful overall scan progress. Hashing is the long pole and every discovered
+// file becomes a hash job, so once hashing has work the bar tracks hashed/total.
+// Before that (the discovery/metadata phase) the bar reflects that phase but
+// stays in its lower half, so a scan with 250k files still queued never reads
+// as "done". Never returns 100% while the scan is still running.
+function scanProgressView(progress) {
+  const pools = progress?.pools;
+  if (!pools) return { percent: null, hashed: null, totalFiles: null, phase: 'unknown' };
+  const running = ['running', 'repairing', 'paused', 'stopping'].includes(normalizedStatus(progress.status));
+  const hashing = poolCounts(pools.hashing);
+  if (hashing.observed > 0) {
+    const raw = Math.round((hashing.processed / hashing.observed) * 100);
+    return {
+      percent: running ? Math.min(raw, 99) : raw,
+      hashed: hashing.processed,
+      totalFiles: hashing.observed,
+      phase: 'hashing'
+    };
+  }
+  const metadata = poolCounts(pools.metadata);
+  const discovery = poolCounts(pools.discovery);
+  const phase1 = metadata.observed > 0 ? metadata : discovery;
+  if (phase1.observed > 0) {
+    const raw = Math.round((phase1.processed / phase1.observed) * 100);
+    return { percent: Math.min(Math.round(raw / 2), 50), hashed: 0, totalFiles: null, phase: 'discovering' };
+  }
+  return { percent: 0, hashed: 0, totalFiles: null, phase: 'starting' };
+}
+
 function scanTask(progress) {
+  const view = scanProgressView(progress);
   return {
     id: progress.scan_id,
     kind: 'scan',
@@ -73,7 +109,10 @@ function scanTask(progress) {
     status: normalizedStatus(progress.status),
     processed: Number(progress.file_count || 0),
     total: null,
-    percent: null,
+    percent: view.percent,
+    hashed: view.hashed,
+    totalFiles: view.totalFiles,
+    phase: view.phase,
     errors: Number(progress.error_count || 0),
     progress
   };
@@ -400,19 +439,39 @@ export default function TasksPage({
               <div className="grid min-h-[76px] grid-cols-[minmax(200px,0.8fr)_minmax(0,1.5fr)] border-b border-sidebar-border bg-sidebar-bg max-[1100px]:grid-cols-[180px_minmax(0,1fr)]">
                 <div className="grid content-center gap-2 border-r border-sidebar-border px-3.5 py-2.5">
                   <span className="flex items-baseline gap-2">
-                    <strong className="text-lg font-semibold text-text">
-                      {selectedTask.percent != null ? `${selectedTask.percent}%` : Number(selectedTask.processed || 0).toLocaleString()}
+                    <strong className="text-lg font-semibold tabular-nums text-text">
+                      {selectedTask.isScan
+                        ? Number(selectedTask.processed || 0).toLocaleString()
+                        : selectedTask.percent != null
+                          ? `${selectedTask.percent}%`
+                          : Number(selectedTask.processed || 0).toLocaleString()}
                     </strong>
                     <small className="text-[11px] text-muted">
-                      {selectedTask.percent != null ? statusLabel(selectedTask.status) : 'indexed files'}
+                      {selectedTask.isScan
+                        ? 'indexed files'
+                        : selectedTask.percent != null
+                          ? statusLabel(selectedTask.status)
+                          : 'processed'}
                     </small>
                   </span>
                   <span className="block h-1 overflow-hidden rounded-sm bg-surface-muted">
                     <span
                       className={`block h-full ${selectedTask.status === 'failed' ? 'bg-danger' : 'bg-muted-strong'} ${selectedTask.percent == null ? 'animate-pulse' : ''}`}
-                      style={{ width: `${selectedTask.percent ?? 100}%` }}
+                      style={{ width: `${selectedTask.percent ?? (selectedTask.isScan ? 0 : 100)}%` }}
                     />
                   </span>
+                  {selectedTask.isScan && (
+                    <span className="flex items-center justify-between gap-2 text-[10px] tabular-nums text-muted">
+                      <span>{selectedTask.percent != null ? `${selectedTask.percent}% hashed` : ''}</span>
+                      <span className="truncate">
+                        {selectedTask.totalFiles
+                          ? `${Number(selectedTask.hashed || 0).toLocaleString()} / ${Number(selectedTask.totalFiles).toLocaleString()} files`
+                          : selectedTask.phase === 'discovering'
+                            ? 'discovering…'
+                            : ''}
+                      </span>
+                    </span>
+                  )}
                 </div>
                 <dl
                   className="m-0 grid"
