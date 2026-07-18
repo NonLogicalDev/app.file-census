@@ -41,12 +41,12 @@ touches the hashing hot path and delete-check safety.
 ## Implementation Steps
 
 1. [x] Sampler primitive: `light_hash_slice_plan(size)` + `blake3_light_of_bytes`/file, compile-time knobs, tests (whole-file threshold, slice offsets, determinism).
-2. [ ] `files.blake3_light` column + `NewFile.blake3_light`; insert path; populate in `hash_open_file` (Full).
-3. [ ] `HashPolicy` (Full/Light) through `prepare_scan`/scanner; Light computes light-only.
-4. [ ] CLI `scans start --hash-policy` + UI scan-start control.
-5. [ ] `likely_safe` delete-check taxonomy (SAFETY-CRITICAL, dedicated).
+2. [x] `files.blake3_light` column + `NewFile.blake3_light`; insert path; populate in `hash_open_file` (Full = full+sampled second pass). Landed with plan-070 #4 (commit `acee3a3`).
+3. [x] `HashPolicy` (Full/Light) through `prepare_scan_with_policy`/scanner; Light computes sampled-only. `scans.hash_policy` column; **light scans excluded from the duplicate/delete-check scope** (safety). Tests: small file light==full; Light scan flagged.
+4. [x] UI scan-start Full/Light control (the scan-start modal, plan-070 #4). CLI `scans start --hash-policy` still pending (see below).
+5. [ ] `likely_safe` delete-check taxonomy (SAFETY-CRITICAL, dedicated) — "Likely covered elsewhere" using `blake3_light`+size.
 6. [ ] CAS metadata store + EXIF refs.
-7. [ ] Expose blake3_light in grid/search where useful.
+7. [ ] Expose `blake3_light` in grid/search where useful; CLI `scans start --hash-policy` flag.
 
 ## Learning Log
 
