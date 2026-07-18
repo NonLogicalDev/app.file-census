@@ -249,7 +249,7 @@ export default function TasksPage({
   }));
 
   const eventsSection = (
-    <section className="grid min-h-0 grid-rows-[34px_minmax(0,1fr)] overflow-hidden" aria-label="Recent events">
+    <section className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[34px_minmax(0,1fr)] overflow-hidden" aria-label="Recent events">
       <div className="flex items-center justify-between border-b border-sidebar-border bg-sidebar-bg px-3 text-[11px] font-medium text-muted-strong">
         <span className="inline-flex items-center gap-1.5"><Icon name="tasks" className="h-3.5 w-3.5" /> Recent events</span>
         <small className="text-muted">Newest first</small>
@@ -277,7 +277,7 @@ export default function TasksPage({
   );
 
   return (
-    <section className="grid min-h-0 min-w-0 grid-rows-[auto_44px_minmax(0,1fr)] overflow-hidden text-[13px]">
+    <section className="grid min-h-0 w-full min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_44px_minmax(0,1fr)] overflow-hidden text-[13px]">
       {/* Route bar */}
       <header className="flex items-center justify-between gap-3 pb-2">
         <div className="flex items-baseline gap-2 text-[11px]">
@@ -331,11 +331,11 @@ export default function TasksPage({
 
       {/* Workspace */}
       <div
-        className="grid min-h-0 min-w-0"
+        className="grid min-h-0 w-full min-w-0 max-w-full overflow-hidden"
         style={{ gridTemplateColumns: `${queueWidth}px 6px minmax(0,1fr)` }}
       >
         {/* Master */}
-        <div className="grid min-h-0 grid-rows-[31px_minmax(0,1fr)] overflow-hidden border-r border-sidebar-border bg-sidebar-bg">
+        <div className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[31px_minmax(0,1fr)] overflow-hidden border-r border-sidebar-border bg-sidebar-bg">
           <div className="flex items-center justify-between border-b border-sidebar-border px-3 text-[11px] font-semibold uppercase tracking-[0.04em] text-muted">
             <span>Task queue</span>
             <span>{visibleTasks.length} shown</span>
@@ -400,8 +400,9 @@ export default function TasksPage({
           <span className="absolute inset-y-0 -left-1 -right-1 z-[1] block group-hover:bg-accent-line/20" />
         </div>
 
-        {/* Detail */}
-        <div className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden">
+        {/* Detail — explicit single column so rows can't be sized to their
+            widest content (long paths / pool counts) and overflow the pane. */}
+        <div className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden">
           {selectedTask ? (
             <>
               <header className="flex min-h-16 items-center justify-between gap-3 border-b border-sidebar-border px-3.5 py-2">
@@ -410,7 +411,7 @@ export default function TasksPage({
                     <Icon name={selectedTask.isScan ? 'scan' : 'exif'} className="h-4 w-4" />
                   </span>
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2.5">
+                    <div className="flex min-w-0 items-center gap-2.5">
                       <h3 className="m-0 truncate text-sm font-semibold text-text">{selectedTask.title}</h3>
                       <StatusText status={selectedTask.status} />
                     </div>
@@ -440,7 +441,7 @@ export default function TasksPage({
               </header>
 
               {/* Overview: metric/progress | metric strip */}
-              <div className="grid min-h-[76px] grid-cols-[minmax(200px,0.8fr)_minmax(0,1.5fr)] border-b border-sidebar-border bg-sidebar-bg max-[1100px]:grid-cols-[180px_minmax(0,1fr)]">
+              <div className="grid min-h-[76px] grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)] border-b border-sidebar-border bg-sidebar-bg">
                 <div className="grid content-center gap-2 border-r border-sidebar-border px-3.5 py-2.5">
                   <span className="flex items-baseline gap-2">
                     <strong className="text-lg font-semibold tabular-nums text-text">
@@ -482,17 +483,17 @@ export default function TasksPage({
                   style={{ gridTemplateColumns: `repeat(${taskMetrics(selectedTask).length}, minmax(0, 1fr))` }}
                 >
                   {taskMetrics(selectedTask).map(([label, value, warn], i, arr) => (
-                    <div key={label} className={`grid content-center gap-1 px-3 py-2.5 ${i < arr.length - 1 ? 'border-r border-sidebar-border' : ''}`}>
-                      <dt className="text-[11px] text-muted">{label}</dt>
-                      <dd className={`m-0 text-[11px] ${warn ? 'text-warning' : 'text-muted-strong'}`}>{value}</dd>
+                    <div key={label} className={`grid min-w-0 content-center gap-1 px-3 py-2.5 ${i < arr.length - 1 ? 'border-r border-sidebar-border' : ''}`}>
+                      <dt className="truncate text-[11px] text-muted">{label}</dt>
+                      <dd className={`m-0 truncate text-[11px] tabular-nums ${warn ? 'text-warning' : 'text-muted-strong'}`} title={String(value)}>{value}</dd>
                     </div>
                   ))}
                 </dl>
               </div>
 
               {/* Body: worker pool | events */}
-              <div className="grid min-h-0 grid-cols-[minmax(0,1.25fr)_minmax(280px,0.8fr)] max-[1100px]:grid-cols-[minmax(0,1fr)_260px]">
-                <section className="grid min-h-0 grid-rows-[34px_minmax(0,1fr)] overflow-hidden border-r border-sidebar-border" aria-label="Worker pool">
+              <div className="grid min-h-0 grid-cols-[minmax(0,1.25fr)_minmax(0,0.8fr)]">
+                <section className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[34px_minmax(0,1fr)] overflow-hidden border-r border-sidebar-border" aria-label="Worker pool">
                   <div className="flex items-center justify-between border-b border-sidebar-border bg-sidebar-bg px-3 text-[11px] font-medium text-muted-strong">
                     <span className="inline-flex items-center gap-1.5"><Icon name="tasks" className="h-3.5 w-3.5" /> Worker pool</span>
                     {selectedTask.isScan && selectedTask.progress?.pools && (

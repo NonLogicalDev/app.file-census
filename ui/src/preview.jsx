@@ -5,8 +5,50 @@ import ScanProgressPools from './components/ScanProgressPools.jsx';
 import ScanScopeSelector from './components/search/ScanScopeSelector.jsx';
 import DuplicatesPage from './pages/DuplicatesPage.jsx';
 import SearchPage from './pages/SearchPage.jsx';
+import TasksPage from './pages/TasksPage.jsx';
 import PrototypeApp from './prototypes/redesign/PrototypeApp.jsx';
+import { appMainClassName } from './components/ui/index.jsx';
 import './style.css';
+
+// Reproduces the real app-shell width chain (sidebar grid col + appMain) so
+// TasksPage overflow behaves exactly as in production, with a punishing long
+// current_path and large pool counts.
+const STRESS_SCAN_PROGRESS = {
+  scan_id: 'stress-scan',
+  location_slug: 'disk-nlbackup',
+  location_name: 'NLBackup',
+  status: 'running',
+  file_count: 3258,
+  dir_count: 8422,
+  error_count: 0,
+  total_bytes: 7516192768,
+  current_path:
+    'PHOTO_FILTER/@Photos/Old Photos.photoslibrary/originals/6/6CE68EFC-27D2-43E6-AA07-480AFED9E4B1_1_105_c.jpeg',
+  pools: {
+    discovery: { completed: 283914, failed: 0, queued: 0, active: 0 },
+    metadata: { completed: 283914, failed: 0, queued: 0, active: 0 },
+    hashing: { completed: 3258, failed: 0, queued: 272230, active: 4 }
+  },
+  log: []
+};
+
+function TasksOverflowPreview() {
+  return (
+    <div className="grid min-h-screen grid-cols-[var(--sidebar-width)_minmax(0,1fr)] bg-bg text-text" style={{ '--sidebar-width': '360px' }}>
+      <aside className="h-screen border-r border-sidebar-border bg-sidebar-bg" />
+      <main className={appMainClassName}>
+        <TasksPage
+          runningProgress={[STRESS_SCAN_PROGRESS]}
+          backgroundTasks={[]}
+          eventLog={[]}
+          onPauseScan={() => {}}
+          onStopScan={() => {}}
+          onResumeScan={() => {}}
+        />
+      </main>
+    </div>
+  );
+}
 
 const SAMPLE_SCAN_PROGRESS = {
   scan_id: 'preview-scan',
@@ -196,6 +238,15 @@ const PREVIEWS = [
     description: 'Backend-free full-screen prototype for scan and enrichment activity.',
     fullScreen: true,
     render: () => <PrototypeApp screen="tasks" />
+  },
+  {
+    path: '/tasks/overflow',
+    group: 'TasksPage',
+    variant: 'live scan overflow',
+    title: 'Tasks live scan (overflow stress)',
+    description: 'Real TasksPage in the app-shell width chain with a long current_path.',
+    fullScreen: true,
+    render: () => <TasksOverflowPreview />
   },
   {
     path: '/scan-scope/search',

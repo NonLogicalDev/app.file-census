@@ -23,7 +23,8 @@ test('redesign prototypes are exposed only as full-screen component previews', (
   assert.match(previewSource, /path: '\/redesign\/location-scan-browser'/);
   assert.match(previewSource, /path: '\/redesign\/duplicates'/);
   assert.match(previewSource, /path: '\/redesign\/tasks'/);
-  assert.equal((previewSource.match(/fullScreen: true/g) || []).length, 3);
+  // 3 redesign prototypes + the TasksPage overflow regression fixture.
+  assert.equal((previewSource.match(/fullScreen: true/g) || []).length, 4);
   assert.match(previewSource, /if \(activePreview\.fullScreen\)/);
   assert.match(previewSource, /replace\(\/\^#\/, ''\) \|\| '\/scan-progress\/expanded'/);
   assert.match(previewSource, /preview\.path === '\/scan-progress\/expanded'/);
