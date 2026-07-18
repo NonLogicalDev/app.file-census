@@ -102,6 +102,10 @@ export default function FileExplorer(props) {
   if (!activeScan) return <p className={emptyTextClassName}>Select or run a scan to browse this location.</p>;
   const showingDeleteCheck = scanSubview === 'delete-check';
   const showingFileTree = scanSubview === 'tree';
+  // Split the staged Delete Check list so folders are listed on their own,
+  // ahead of individually-staged files.
+  const stagedFolders = deleteCheckStaged.filter((item) => item.kind === 'dir' || item.kind === 'parent');
+  const stagedFiles = deleteCheckStaged.filter((item) => item.kind !== 'dir' && item.kind !== 'parent');
   const selectedCount = selectedGridEntries.length;
   const canBuildThumbnails = Boolean(location?.connected && activeScan);
   const canStopScan = typeof onStopScan === 'function';
@@ -472,7 +476,7 @@ export default function FileExplorer(props) {
             <section className="mb-2.5 mt-2 overflow-hidden border border-sidebar-border bg-sidebar-bg">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sidebar-border px-3 py-2">
                 <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted">
-                  Delete Check list · {deleteCheckStaged.length}
+                  Delete Check list · {stagedFolders.length} {stagedFolders.length === 1 ? 'folder' : 'folders'} · {stagedFiles.length} {stagedFiles.length === 1 ? 'file' : 'files'}
                 </span>
                 <div className="flex items-center gap-1.5">
                   <button
@@ -488,22 +492,32 @@ export default function FileExplorer(props) {
                   </button>
                 </div>
               </div>
-              <ul className="max-h-40 divide-y divide-surface overflow-auto">
-                {deleteCheckStaged.map((item) => (
-                  <li key={item.path} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                    <Icon name={item.kind === 'dir' ? 'folder' : 'file'} className="h-3.5 w-3.5 flex-none text-text-tertiary" />
-                    <span className="min-w-0 flex-1 truncate text-muted-strong" title={item.path}>{item.path}</span>
-                    <button
-                      type="button"
-                      onClick={() => onRemoveDeleteCheckStage?.(item.path)}
-                      className="grid h-5 w-5 flex-none place-items-center rounded text-text-tertiary hover:text-text"
-                      aria-label={`Remove ${item.name} from Delete Check list`}
-                    >
-                      <Icon name="close" className="h-3 w-3" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <div className="max-h-52 overflow-auto">
+                {stagedFolders.length > 0 && (
+                  <>
+                    <p className="sticky top-0 z-[1] bg-sidebar-bg px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
+                      Folders · {stagedFolders.length}
+                    </p>
+                    <ul className="divide-y divide-surface">
+                      {stagedFolders.map((item) => (
+                        <StagedDeleteCheckRow key={item.path} item={item} onRemove={onRemoveDeleteCheckStage} />
+                      ))}
+                    </ul>
+                  </>
+                )}
+                {stagedFiles.length > 0 && (
+                  <>
+                    <p className="sticky top-0 z-[1] bg-sidebar-bg px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
+                      Files · {stagedFiles.length}
+                    </p>
+                    <ul className="divide-y divide-surface">
+                      {stagedFiles.map((item) => (
+                        <StagedDeleteCheckRow key={item.path} item={item} onRemove={onRemoveDeleteCheckStage} />
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </div>
             </section>
           )}
           {deleteCheck ? (
@@ -565,6 +579,29 @@ export default function FileExplorer(props) {
         {!(activeScan.log || []).length && <span>No live log for this scan.</span>}
       </section>
     </div>
+  );
+}
+
+function StagedDeleteCheckRow({ item, onRemove }) {
+  const isFolder = item.kind === 'dir' || item.kind === 'parent';
+  return (
+    <li className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
+      <Icon
+        name={isFolder ? 'folder' : 'file'}
+        className={`h-3.5 w-3.5 flex-none ${isFolder ? 'text-accent' : 'text-text-tertiary'}`}
+      />
+      <span className="min-w-0 flex-1 truncate text-muted-strong" title={item.path}>
+        {item.path}
+      </span>
+      <button
+        type="button"
+        onClick={() => onRemove?.(item.path)}
+        className="grid h-5 w-5 flex-none place-items-center rounded text-text-tertiary hover:text-text"
+        aria-label={`Remove ${item.name} from Delete Check list`}
+      >
+        <Icon name="close" className="h-3 w-3" />
+      </button>
+    </li>
   );
 }
 
