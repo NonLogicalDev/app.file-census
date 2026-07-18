@@ -574,6 +574,26 @@ impl Database {
         if !column_exists(conn, "files", "ctime")? {
             conn.execute("ALTER TABLE files ADD COLUMN ctime TEXT", [])?;
         }
+        // Columns below live in the fresh CREATE TABLE, but a pre-existing
+        // database only picks them up through these idempotent ALTERs. They are
+        // required by current queries (representative-scan selection reads
+        // `scans.hash_policy`; the scan/dedup paths read `files.blake3_light`),
+        // so a database missing them fails on load, not just on write.
+        if !column_exists(conn, "scans", "nickname")? {
+            conn.execute("ALTER TABLE scans ADD COLUMN nickname TEXT", [])?;
+        }
+        if !column_exists(conn, "scans", "hash_policy")? {
+            conn.execute(
+                "ALTER TABLE scans ADD COLUMN hash_policy TEXT NOT NULL DEFAULT 'full'",
+                [],
+            )?;
+        }
+        if !column_exists(conn, "files", "blake3_light")? {
+            conn.execute(
+                "ALTER TABLE files ADD COLUMN blake3_light TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         migrate_locations_type_check(conn)?;
         Ok(())
     }
@@ -4540,6 +4560,101 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn legacy_database_gains_hash_policy_and_blake3_light_columns_on_open() {
+        // Reproduces the recovery gap where a pre-existing database lacked the
+        // `scans.hash_policy`, `scans.nickname`, and `files.blake3_light`
+        // columns that current queries require. Opening it must add them so the
+        // representative-scan / duplicate-scope queries stop failing with
+        // "no such column".
+        let root = test_root("legacy-hash-policy-columns");
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("state.db");
+
+        let legacy = Connection::open(&db_path).unwrap();
+        legacy
+            .execute_batch(
+                r#"
+                CREATE TABLE locations (
+                    id TEXT PRIMARY KEY,
+                    slug TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL CHECK (type IN ('local', 'disk', 'nas')),
+                    root_path TEXT NOT NULL,
+                    notes TEXT,
+                    representative_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL,
+                    disabled INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE scans (
+                    id TEXT PRIMARY KEY,
+                    location_id TEXT NOT NULL REFERENCES locations(id),
+                    offset_path TEXT NOT NULL DEFAULT '/',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    file_count INTEGER NOT NULL DEFAULT 0,
+                    dir_count INTEGER NOT NULL DEFAULT 0,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    notes TEXT
+                );
+                CREATE TABLE files (
+                    id INTEGER PRIMARY KEY,
+                    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                    path TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    blake3 TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'file',
+                    ctime TEXT,
+                    mtime TEXT,
+                    mode INTEGER,
+                    error TEXT,
+                    UNIQUE(scan_id, path)
+                );
+                INSERT INTO locations (id, slug, name, type, root_path, disabled, created_at)
+                VALUES ('loc-1', 'archive', 'Archive', 'disk', '/Volumes/archive', 0, '2026-07-14T00:00:00Z');
+                INSERT INTO scans (id, location_id, started_at, status)
+                VALUES ('scan-1', 'loc-1', '2026-07-14T00:00:00Z', 'complete');
+                "#,
+            )
+            .unwrap();
+        drop(legacy);
+
+        // Opening runs migrate(), which must add the missing columns.
+        let db = Database::open(&db_path).unwrap();
+        let conn = db.connect().unwrap();
+        assert!(column_exists(&conn, "scans", "hash_policy").unwrap());
+        assert!(column_exists(&conn, "scans", "nickname").unwrap());
+        assert!(column_exists(&conn, "files", "blake3_light").unwrap());
+
+        // The added column carries the correct default and the query that
+        // previously failed now runs.
+        let policy: String = conn
+            .query_row(
+                "SELECT hash_policy FROM scans WHERE id = 'scan-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(policy, "full");
+        let rep: Option<String> = conn
+            .query_row(
+                r#"SELECT (
+                    SELECT s2.id FROM scans s2
+                    WHERE s2.location_id = l.id AND s2.status = 'complete'
+                      AND s2.hash_policy != 'light'
+                    ORDER BY s2.started_at DESC LIMIT 1
+                ) FROM locations l WHERE l.id = 'loc-1'"#,
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rep.as_deref(), Some("scan-1"));
     }
 
     #[test]
