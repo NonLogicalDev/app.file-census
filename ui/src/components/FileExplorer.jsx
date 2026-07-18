@@ -155,6 +155,7 @@ export default function FileExplorer(props) {
   const resultsTable = (
     <div className="relative block min-h-[420px] flex-1 overflow-auto bg-bg">
       <FileGrid
+        storageKey={showingDeleteCheck ? 'locations-delete-check' : 'locations-files'}
         rows={visibleGridRows}
         visibleColumns={gridVisibleColumns}
         fullPathName={showingDeleteCheck}

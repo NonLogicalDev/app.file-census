@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ScanProgressPools from '../components/ScanProgressPools.jsx';
 import { Icon } from '../components/Icon.jsx';
 import { Button } from '../components/ui/index.jsx';
@@ -144,6 +144,44 @@ export default function TasksPage({
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState(null);
 
+  // Resizable Task Queue column, persisted across sessions.
+  const QUEUE_MIN = 260;
+  const QUEUE_MAX = 640;
+  const [queueWidth, setQueueWidth] = useState(() => {
+    const stored = Number(window.localStorage.getItem('tasks.queueWidth'));
+    return Number.isFinite(stored) && stored >= QUEUE_MIN && stored <= QUEUE_MAX ? stored : 360;
+  });
+  const queueWidthRef = useRef(queueWidth);
+  queueWidthRef.current = queueWidth;
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('tasks.queueWidth', String(queueWidth));
+    } catch {
+      /* best-effort persistence */
+    }
+  }, [queueWidth]);
+
+  function startQueueResize(event) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = queueWidthRef.current;
+    const onMove = (moveEvent) => {
+      const next = Math.min(QUEUE_MAX, Math.max(QUEUE_MIN, startWidth + (moveEvent.clientX - startX)));
+      setQueueWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
   const visibleTasks = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return taskRows.filter((task) => {
@@ -182,7 +220,7 @@ export default function TasksPage({
             >
               <span className={`mt-1 h-[5px] w-[5px] rounded-full ${statusDotClass(event.status || event.kind)}`} />
               <time className="tabular-nums text-muted">{formatted.timeLabel || ''}</time>
-              <span className="min-w-0">
+              <span className="min-w-0 [overflow-wrap:anywhere]">
                 <span className="text-text">{formatted.title}</span>
                 {formatted.detail ? <span className="text-muted"> — {formatted.detail}</span> : null}
               </span>
@@ -249,9 +287,12 @@ export default function TasksPage({
       </div>
 
       {/* Workspace */}
-      <div className="grid min-h-0 min-w-0 grid-cols-[360px_minmax(0,1fr)] max-[1100px]:grid-cols-[300px_minmax(0,1fr)]">
+      <div
+        className="grid min-h-0 min-w-0"
+        style={{ gridTemplateColumns: `${queueWidth}px 6px minmax(0,1fr)` }}
+      >
         {/* Master */}
-        <div className="grid min-h-0 grid-rows-[31px_minmax(0,1fr)] border-r border-sidebar-border bg-sidebar-bg">
+        <div className="grid min-h-0 grid-rows-[31px_minmax(0,1fr)] overflow-hidden border-r border-sidebar-border bg-sidebar-bg">
           <div className="flex items-center justify-between border-b border-sidebar-border px-3 text-[11px] font-semibold uppercase tracking-[0.04em] text-muted">
             <span>Task queue</span>
             <span>{visibleTasks.length} shown</span>
@@ -303,8 +344,21 @@ export default function TasksPage({
           </div>
         </div>
 
+        {/* Resize handle for the Task Queue column */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize task queue"
+          onMouseDown={startQueueResize}
+          onDoubleClick={() => setQueueWidth(360)}
+          className="group relative cursor-col-resize select-none border-r border-sidebar-border bg-sidebar-bg"
+          title="Drag to resize · double-click to reset"
+        >
+          <span className="absolute inset-y-0 -left-1 -right-1 z-[1] block group-hover:bg-accent-line/20" />
+        </div>
+
         {/* Detail */}
-        <div className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)]">
+        <div className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden">
           {selectedTask ? (
             <>
               <header className="flex min-h-16 items-center justify-between gap-3 border-b border-sidebar-border px-3.5 py-2">

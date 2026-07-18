@@ -56,6 +56,9 @@ function DirectoryBranch({
   const isLoading = loading.has(entry.path);
   const hasPotentialChildren = root || !page || isLoading || children.length > 0 || page.hasMore;
   const isSelected = selectedPath === entry.path;
+  // Match the indentation the node's own children get (rendered at depth + 1),
+  // including the 24px chevron gutter so placeholders align under child labels.
+  const childIndent = 4 + (depth + 1) * 14 + 24;
 
   return (
     <div role="treeitem" aria-level={depth + 1} aria-selected={isSelected} aria-expanded={hasPotentialChildren ? isExpanded : undefined}>
@@ -107,14 +110,23 @@ function DirectoryBranch({
               onLoadMore={onLoadMore}
             />
           ))}
-          {isLoading && <p className="px-2 py-1 text-[10px] text-muted">Loading folders…</p>}
+          {/* Status/placeholder rows sit at the child indent so they read as
+              nested under this node rather than flush against the tree's edge. */}
+          {isLoading && (
+            <p className="py-1 pr-2 text-[10px] text-muted" style={{ paddingInlineStart: `${childIndent}px` }}>
+              Loading folders…
+            </p>
+          )}
           {!isLoading && page && !children.length && !page.hasMore && (
-            <p className="px-2 py-1 text-[10px] text-muted">No child folders.</p>
+            <p className="py-1 pr-2 text-[10px] text-muted" style={{ paddingInlineStart: `${childIndent}px` }}>
+              No child folders.
+            </p>
           )}
           {!isLoading && page?.hasMore && (
             <button
               type="button"
-              className="ml-6 mt-1 rounded-ui border border-border bg-surface px-2 py-1 text-[10px] font-semibold text-muted-strong hover:border-accent-line hover:bg-surface-muted hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-line"
+              className="mt-1 rounded-ui border border-border bg-surface px-2 py-1 text-[10px] font-semibold text-muted-strong hover:border-accent-line hover:bg-surface-muted hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-line"
+              style={{ marginInlineStart: `${childIndent}px` }}
               onClick={() => onLoadMore?.(entry.path)}
             >
               Scan next directory page

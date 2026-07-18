@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   flexRender,
   getCoreRowModel,
@@ -40,6 +40,84 @@ const centeredControlColumnMeta = {
   className: fileGridSelectClassName
 };
 
+// Control columns stay pinned to the left and never participate in reordering.
+const CONTROL_COLUMN_IDS = ['actions', 'select'];
+
+function isReorderableColumn(columnId) {
+  return !CONTROL_COLUMN_IDS.includes(columnId);
+}
+
+// Folders (and the `../` parent entry) always sort ahead of files, regardless
+// of the active column or direction.
+function kindRank(entry) {
+  if (entry?.kind === 'parent') return 0;
+  if (entry?.kind === 'dir') return 1;
+  return 2;
+}
+
+function compareCellValues(a, b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+// Keep control columns first (in their canonical order) regardless of any
+// stored/dragged ordering, so a reorder can never bury the checkbox/actions.
+function pinControlColumns(order) {
+  const controls = order
+    .filter((id) => CONTROL_COLUMN_IDS.includes(id))
+    .sort((a, b) => CONTROL_COLUMN_IDS.indexOf(a) - CONTROL_COLUMN_IDS.indexOf(b));
+  const rest = order.filter((id) => !CONTROL_COLUMN_IDS.includes(id));
+  return [...controls, ...rest];
+}
+
+// Merge a persisted/previous order with the current natural order: keep the
+// user's order for columns that still exist, append any new columns, drop any
+// that disappeared (e.g. when `selectable` toggles the select column off).
+function reconcileColumnOrder(previous, natural) {
+  const naturalSet = new Set(natural);
+  const kept = previous.filter((id) => naturalSet.has(id));
+  const keptSet = new Set(kept);
+  const merged = [...kept];
+  natural.forEach((id) => {
+    if (!keptSet.has(id)) merged.push(id);
+  });
+  return pinControlColumns(merged);
+}
+
+// Drop `sourceId` immediately before `targetId`.
+function moveColumnBefore(order, sourceId, targetId) {
+  if (sourceId === targetId) return order;
+  const next = order.filter((id) => id !== sourceId);
+  const targetIndex = next.indexOf(targetId);
+  if (targetIndex === -1) return order;
+  next.splice(targetIndex, 0, sourceId);
+  return pinControlColumns(next);
+}
+
+function layoutStorageKey(storageKey) {
+  return `fileGrid.layout:${storageKey}`;
+}
+
+function loadStoredLayout(storageKey) {
+  try {
+    const raw = window.localStorage.getItem(layoutStorageKey(storageKey));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return {
+      columnOrder: Array.isArray(parsed?.columnOrder) ? parsed.columnOrder : undefined,
+      columnSizing:
+        parsed?.columnSizing && typeof parsed.columnSizing === 'object'
+          ? parsed.columnSizing
+          : undefined
+    };
+  } catch {
+    return {};
+  }
+}
+
 export default function FileGrid({
   rows = [],
   visibleColumns = [],
@@ -48,6 +126,7 @@ export default function FileGrid({
   selectedPaths = [],
   inspectedPath = null,
   canBuildThumbnails = true,
+  storageKey = 'file-grid',
   onOpen,
   onInspect,
   onInspectRow,
@@ -70,23 +149,109 @@ export default function FileGrid({
       return [id, id === 'select' || id === 'name' || id === 'actions' || visibleColumns.includes(id)];
     }));
   }, [columns, visibleColumns]);
-  const [columnSizing, setColumnSizing] = useState({});
+  const naturalColumnOrder = useMemo(
+    () => columns.map((column) => column.id || column.accessorKey),
+    [columns]
+  );
+
+  // Baseline (unsorted) order: parent → dirs → files. Array.sort is stable, so
+  // within-group order from the source is preserved.
+  const orderedRows = useMemo(() => {
+    return [...rows].sort((a, b) => kindRank(a) - kindRank(b));
+  }, [rows]);
+
+  // Live sort direction, read by the folders-first sorting fn to cancel
+  // TanStack's descending negation so folders stay on top in both directions.
+  const sortingStateRef = useRef([]);
+  const foldersFirstSortingFn = useMemo(
+    () => (rowA, rowB, columnId) => {
+      const rankDelta = kindRank(rowA.original) - kindRank(rowB.original);
+      if (rankDelta !== 0) {
+        const desc = sortingStateRef.current?.some((sort) => sort.id === columnId && sort.desc);
+        return rankDelta * (desc ? -1 : 1);
+      }
+      return compareCellValues(rowA.getValue(columnId), rowB.getValue(columnId));
+    },
+    []
+  );
+
+  const [columnSizing, setColumnSizing] = useState(() => loadStoredLayout(storageKey).columnSizing || {});
+  const [columnOrder, setColumnOrder] = useState(() =>
+    reconcileColumnOrder(loadStoredLayout(storageKey).columnOrder || [], naturalColumnOrder)
+  );
+  // { dragging: columnId | null, over: columnId | null } for drag feedback.
+  const [dragState, setDragState] = useState({ dragging: null, over: null });
+
+  // Keep the order in sync when the column set changes (selectable toggling the
+  // checkbox column, path/name header swap, etc.) while preserving user order.
+  useEffect(() => {
+    setColumnOrder((previous) => {
+      const next = reconcileColumnOrder(previous, naturalColumnOrder);
+      if (next.length === previous.length && next.every((id, index) => id === previous[index])) {
+        return previous;
+      }
+      return next;
+    });
+  }, [naturalColumnOrder]);
+
+  // Persist order + sizing so a user's layout survives navigation/reloads.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        layoutStorageKey(storageKey),
+        JSON.stringify({ columnOrder, columnSizing })
+      );
+    } catch {
+      /* storage unavailable (private mode, quota) — layout is best-effort */
+    }
+  }, [storageKey, columnOrder, columnSizing]);
 
   const table = useReactTable({
-    data: rows,
+    data: orderedRows,
     columns,
-    state: { columnVisibility, columnSizing },
+    state: { columnVisibility, columnSizing, columnOrder },
     columnResizeMode: 'onChange',
     defaultColumn: {
       minSize: 56,
       size: 120,
-      maxSize: 900
+      maxSize: 900,
+      sortingFn: foldersFirstSortingFn
     },
     onColumnSizingChange: setColumnSizing,
+    onColumnOrderChange: setColumnOrder,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getRowId: (row) => row.path || row.name
   });
+  // Keep the ref current so the folders-first sort can read the live direction.
+  sortingStateRef.current = table.getState().sorting;
+
+  function handleHeaderDragStart(event, columnId) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', columnId);
+    setDragState({ dragging: columnId, over: null });
+  }
+
+  function handleHeaderDragOver(event, columnId) {
+    if (!dragState.dragging || dragState.dragging === columnId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    if (dragState.over !== columnId) {
+      setDragState((state) => ({ ...state, over: columnId }));
+    }
+  }
+
+  function handleHeaderDrop(event, targetId) {
+    event.preventDefault();
+    const sourceId = dragState.dragging || event.dataTransfer.getData('text/plain');
+    setDragState({ dragging: null, over: null });
+    if (!sourceId || sourceId === targetId || !isReorderableColumn(sourceId)) return;
+    setColumnOrder((previous) => moveColumnBefore(previous, sourceId, targetId));
+  }
+
+  function handleHeaderDragEnd() {
+    setDragState({ dragging: null, over: null });
+  }
 
   return (
     <div className={fileGridClassName}>
@@ -97,22 +262,44 @@ export default function FileGrid({
               {headerGroup.headers.map((header) => {
                 const sortable = header.column.getCanSort();
                 const headerAlign = header.column.columnDef.meta?.align;
+                const columnId = header.column.id;
+                const reorderable = !header.isPlaceholder && isReorderableColumn(columnId);
+                const isDragging = dragState.dragging === columnId;
+                const isDragOver =
+                  reorderable &&
+                  dragState.over === columnId &&
+                  dragState.dragging &&
+                  dragState.dragging !== columnId;
+                const dragClasses = `${isDragging ? ' opacity-40' : ''}${
+                  isDragOver ? ' !bg-accent-soft [box-shadow:inset_2px_0_0_0_var(--accent)]' : ''
+                }`;
 
                 return (
                   <th
                     key={header.id}
-                    className={fileGridHeaderCellClassName({
-                      sortable,
-                      className: header.column.columnDef.meta?.className
-                    })}
+                    className={
+                      fileGridHeaderCellClassName({
+                        sortable,
+                        className: header.column.columnDef.meta?.className
+                      }) + dragClasses
+                    }
                     style={{ width: header.getSize() }}
+                    onDragOver={reorderable ? (event) => handleHeaderDragOver(event, columnId) : undefined}
+                    onDrop={reorderable ? (event) => handleHeaderDrop(event, columnId) : undefined}
                   >
                     {header.isPlaceholder ? null : (
                       <button
                         type="button"
-                        className={fileGridHeaderButtonClassName({ align: headerAlign })}
+                        className={fileGridHeaderButtonClassName({
+                          align: headerAlign,
+                          className: reorderable ? 'cursor-grab active:cursor-grabbing' : undefined
+                        })}
                         disabled={!sortable}
+                        draggable={reorderable}
+                        onDragStart={reorderable ? (event) => handleHeaderDragStart(event, columnId) : undefined}
+                        onDragEnd={reorderable ? handleHeaderDragEnd : undefined}
                         onClick={header.column.getToggleSortingHandler()}
+                        title={reorderable ? 'Drag to reorder · click to sort' : undefined}
                       >
                         {flexRender(header.column.columnDef.header, header.getContext())}
                         <span className={fileGridSortClassName}>{sortIndicator(header.column.getIsSorted())}</span>

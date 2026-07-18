@@ -111,6 +111,7 @@ export default function SearchPage({
         <p className={emptyTextClassName}>Searching files...</p>
       ) : rows.length ? (
         <FileGrid
+          storageKey="search-results"
           rows={rows}
           visibleColumns={searchColumns}
           fullPathName={false}

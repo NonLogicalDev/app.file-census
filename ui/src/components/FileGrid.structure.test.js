@@ -23,7 +23,7 @@ test('file grid numeric columns align headers with numeric cell values', () => {
   for (const column of ['size', 'file_count', 'duplicate_file_count', 'original_file_count', 'same_scan_duplicate_file_count']) {
     assert.match(fileGridSource, new RegExp(`accessorKey: '${column}'[\\s\\S]*?meta: numericColumnMeta`));
   }
-  assert.match(fileGridSource, /fileGridHeaderButtonClassName\(\{ align: headerAlign \}\)/);
+  assert.match(fileGridSource, /fileGridHeaderButtonClassName\(\{\s*align: headerAlign/);
 });
 
 test('file grid keeps normal scan actions out of the explicit Delete Check workflow', () => {
@@ -40,7 +40,10 @@ test('file grid keeps normal scan actions out of the explicit Delete Check workf
 });
 
 test('file grid remains a flat main workspace beside the directory-only navigation tree', () => {
-  assert.match(fileGridSource, /data: rows/);
+  // Rows are pre-ordered folders-first (parent → dirs → files) but stay a flat,
+  // non-hierarchical row model.
+  assert.match(fileGridSource, /data: orderedRows/);
+  assert.match(fileGridSource, /\[\.\.\.rows\]\.sort\(\(a, b\) => kindRank\(a\) - kindRank\(b\)\)/);
   assert.match(fileGridSource, /getCoreRowModel: getCoreRowModel\(\)/);
   assert.doesNotMatch(fileGridSource, /getExpandedRowModel|getSubRows|hierarchical/);
   assert.match(fileExplorerSource, /<DirectoryTree/);
