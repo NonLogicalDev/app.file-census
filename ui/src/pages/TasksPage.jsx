@@ -103,15 +103,21 @@ function scanProgressView(progress) {
 
 function scanTask(progress) {
   const view = scanProgressView(progress);
+  // Files seen by the discovery walker lead the pipeline, so they are the
+  // truthful live "files found" count; the hashed/indexed count trails.
+  const discovered = Number(progress.discovered_files || 0);
+  const indexed = Number(progress.file_count || 0);
+  const filesFound = Math.max(discovered, indexed);
   return {
     id: progress.scan_id,
     kind: 'scan',
     isScan: true,
     title: progress.location_name || progress.location_slug,
     subtitle: progress.current_path
-      || `${Number(progress.file_count || 0).toLocaleString()} indexed files`,
+      || `${filesFound.toLocaleString()} files found`,
     status: normalizedStatus(progress.status),
-    processed: Number(progress.file_count || 0),
+    processed: filesFound,
+    indexed,
     total: null,
     percent: view.percent,
     hashed: view.hashed,
@@ -153,7 +159,7 @@ function taskMetrics(task) {
   if (task.isScan) {
     const p = task.progress;
     return [
-      ['Files', Number(p.file_count || 0).toLocaleString()],
+      ['Files found', Number(task.processed || 0).toLocaleString()],
       ['Dirs', Number(p.dir_count || 0).toLocaleString()],
       ['Size', bytes(p.total_bytes || 0)],
       ['Errors', Number(p.error_count || 0).toLocaleString(), Number(p.error_count) > 0],
@@ -453,7 +459,7 @@ export default function TasksPage({
                     </strong>
                     <small className="text-[11px] text-muted">
                       {selectedTask.isScan
-                        ? 'indexed files'
+                        ? 'files found'
                         : selectedTask.percent != null
                           ? statusLabel(selectedTask.status)
                           : 'processed'}

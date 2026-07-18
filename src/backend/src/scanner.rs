@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::{File, Metadata};
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -49,6 +49,11 @@ pub struct ScanProgress {
     pub status: String,
     pub file_count: u64,
     pub dir_count: u64,
+    /// Files seen by the discovery walker — the fast front-of-pipeline count.
+    /// Leads `file_count` (which only counts fully hashed+persisted files) so
+    /// the UI shows real progress during the discovery/metadata phase.
+    #[serde(default)]
+    pub discovered_files: u64,
     pub error_count: u64,
     pub total_bytes: u64,
     pub current_path: Option<String>,
@@ -150,6 +155,7 @@ impl ScanProgressStore {
             status: "running".to_string(),
             file_count: 0,
             dir_count: 0,
+            discovered_files: 0,
             error_count: 0,
             total_bytes: 0,
             current_path: None,
@@ -877,6 +883,11 @@ pub fn run_prepared_scan(
     // memory cost of holding all pending hash jobs between the two phases.
     let (hash_tx, hash_rx) = channel::<HashJob>();
 
+    // Files seen by the discovery walker, updated lock-free by the walk and read
+    // into the live progress snapshot. Seeded so repair scans start from their
+    // physically-seeded totals.
+    let discovered_files = Arc::new(AtomicU64::new(prepared.seeded_file_count));
+
     // Result handling (DB batching + progress) is identical for both phases, so
     // both phase loops funnel every PipelineResult through this closure. Mutable
     // tallies are passed as arguments (not captured) so the closure can run in
@@ -957,6 +968,7 @@ pub fn run_prepared_scan(
             *dir_count,
             *error_count,
             *total_bytes,
+            discovered_files.load(Ordering::Relaxed),
         );
         Ok(())
     };
@@ -964,7 +976,9 @@ pub fn run_prepared_scan(
     // ---- Phase 1: discovery + metadata (directory rows flushed now, file hash
     // jobs buffered for phase 2) ----
     {
-        let (work_tx, work_rx) = sync_channel::<WorkItem>(512);
+        // Unbounded so discovery walks at full speed and never backpressures on
+        // metadata — the walk is the fast front that feeds every later stage.
+        let (work_tx, work_rx) = channel::<WorkItem>();
         let (result_tx, result_rx) = sync_channel::<PipelineResult>(256);
         let work_rx = Arc::new(Mutex::new(work_rx));
 
@@ -1002,6 +1016,7 @@ pub fn run_prepared_scan(
             let discovery_scan_id = prepared.scan_id.clone();
             let scan_root = &canonical_scan_root;
             let discovery_result_tx = result_tx.clone();
+            let discovery_discovered_files = Arc::clone(&discovered_files);
             scope.spawn(move || {
                 discovery_worker(
                     scan_root,
@@ -1009,6 +1024,7 @@ pub fn run_prepared_scan(
                     discovery_result_tx,
                     discovery_progress,
                     discovery_scan_id,
+                    &discovery_discovered_files,
                 );
             });
             drop(result_tx);
@@ -1133,10 +1149,11 @@ pub fn run_prepared_scan(
 
 fn discovery_worker(
     scan_root: &Path,
-    work_tx: SyncSender<WorkItem>,
+    work_tx: Sender<WorkItem>,
     result_tx: SyncSender<PipelineResult>,
     progress: Option<ScanProgressStore>,
     scan_id: String,
+    discovered_files: &AtomicU64,
 ) {
     for entry in WalkDir::new(scan_root)
         .follow_links(false)
@@ -1164,6 +1181,11 @@ fn discovery_worker(
         let Some(work_item) = work_item_from_entry(scan_root, entry) else {
             continue;
         };
+        // Count discovered files lock-free so the walk stays fast; the main
+        // loop reads this into the live progress snapshot.
+        if matches!(work_item.kind, WorkKind::File) {
+            discovered_files.fetch_add(1, Ordering::Relaxed);
+        }
         let path = progress_path(&work_item.relative_path);
         let operation_id = pool_activate(progress.as_ref(), &scan_id, PoolKind::Discovery, &path);
         pool_queue(progress.as_ref(), &scan_id, PoolKind::Metadata, &path);
@@ -1630,11 +1652,13 @@ fn update_progress_counts(
     dir_count: u64,
     error_count: u64,
     total_bytes: u64,
+    discovered_files: u64,
 ) {
     if let Some(progress) = progress {
         progress.update(scan_id, |state| {
             state.file_count = file_count;
             state.dir_count = dir_count;
+            state.discovered_files = discovered_files;
             state.error_count = error_count;
             state.total_bytes = total_bytes;
         });
