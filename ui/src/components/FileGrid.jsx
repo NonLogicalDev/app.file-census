@@ -55,6 +55,81 @@ function kindRank(entry) {
   return 2;
 }
 
+// Delete Check status: 'unsafe' (no copy anywhere), 'warn' (light-hash match
+// only — probably the same file but unproven), 'safe' (exact full-hash copy
+// elsewhere). Ranked riskiest-first for sorting.
+function deleteCheckRank(status) {
+  if (status === 'unsafe') return 0;
+  if (status === 'warn') return 1;
+  return 2;
+}
+
+const deleteCheckBadgeBase =
+  'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.03em] whitespace-nowrap';
+
+// `here` = surviving copies of this content in the same location/scan (outside
+// the deletion selection); `away` = exact copies in other locations'
+// representative scans. Together they explain the status via the refcount model.
+function CopyCounts({ here = 0, away = 0 }) {
+  if (!here && !away) return null;
+  return (
+    <span className="ml-1.5 inline-flex items-center gap-1.5 text-[10px] text-muted" title={`${here} more in this location, ${away} in other locations`}>
+      {here > 0 && <span className="tabular-nums">⌂{here}</span>}
+      {away > 0 && <span className="tabular-nums">↗{away}</span>}
+    </span>
+  );
+}
+
+function DeleteCheckStatusBadge({ status, here = 0, away = 0 }) {
+  if (!status) {
+    // No ready duplicate cache yet — backup status is unknown.
+    return <span className="text-[10px] text-text-tertiary">—</span>;
+  }
+  if (status === 'unsafe') {
+    return (
+      <span className="inline-flex items-center">
+        <span className={`${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`} title="Deleting the selection removes the last surviving copy of this content">
+          <Icon name="warning" className="h-3 w-3" /> Last copy
+        </span>
+      </span>
+    );
+  }
+  if (status === 'warn') {
+    return (
+      <span className="inline-flex items-center">
+        <span className={`${deleteCheckBadgeBase} border-warning/50 bg-warning-soft text-warning`} title="Only a light-hash match survives: probably the same file, but not proven by full hash">
+          <Icon name="warning" className="h-3 w-3" /> Similar
+        </span>
+        <CopyCounts here={here} away={away} />
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center">
+      <span className={`${deleteCheckBadgeBase} border-success/40 bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`} title="An exact full-hash copy survives the deletion">
+        <Icon name="check" className="h-3 w-3" /> Safe
+      </span>
+      <CopyCounts here={here} away={away} />
+    </span>
+  );
+}
+
+function FolderRollupBadge({ unsafe = 0, warn = 0 }) {
+  if (!unsafe && !warn) {
+    return <span className="text-[10px] font-medium text-success/80">all backed up</span>;
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {unsafe > 0 && (
+        <span className="rounded-full border border-danger/50 px-1.5 py-[1px] text-[10px] font-bold text-danger">{unsafe} unsafe</span>
+      )}
+      {warn > 0 && (
+        <span className="rounded-full border border-warning/50 px-1.5 py-[1px] text-[10px] font-bold text-warning">{warn} similar</span>
+      )}
+    </span>
+  );
+}
+
 function compareCellValues(a, b) {
   if (a == null && b == null) return 0;
   if (a == null) return 1;
@@ -127,6 +202,7 @@ export default function FileGrid({
   inspectedPath = null,
   canBuildThumbnails = true,
   storageKey = 'file-grid',
+  deleteCheck = false,
   onOpen,
   onInspect,
   onInspectRow,
@@ -140,13 +216,13 @@ export default function FileGrid({
   const selectableRows = useMemo(() => rows.filter(isSelectableRow), [rows]);
   const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedSet.has(row.path));
   const columns = useMemo(
-    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete }),
-    [allSelected, canBuildThumbnails, fullPathName, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
+    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete }),
+    [allSelected, canBuildThumbnails, deleteCheck, fullPathName, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
   );
   const columnVisibility = useMemo(() => {
     return Object.fromEntries(columns.map((column) => {
       const id = column.id || column.accessorKey;
-      return [id, id === 'select' || id === 'name' || id === 'actions' || visibleColumns.includes(id)];
+      return [id, id === 'select' || id === 'name' || id === 'actions' || id === 'backup' || visibleColumns.includes(id)];
     }));
   }, [columns, visibleColumns]);
   const naturalColumnOrder = useMemo(
@@ -369,6 +445,7 @@ function baseColumns(options) {
     allSelected,
     selectableRows,
     canBuildThumbnails,
+    deleteCheck,
     onToggleSelection,
     onSetSelection,
     onBuildThumbnails,
@@ -481,7 +558,34 @@ function baseColumns(options) {
       size: fullPathName ? 520 : 360,
       minSize: 220,
       cell: ({ row, getValue }) => <NameCell fullPathName={fullPathName} row={row} value={getValue()} />
-    },
+    }
+  );
+
+  // Delete Check "Backup" status column: whether this file has a copy in another
+  // location. Sorts riskiest-first (unsafe < warn < safe) so blockers surface.
+  if (deleteCheck) {
+    columns.push({
+      id: 'backup',
+      header: 'Backup',
+      size: 200,
+      minSize: 130,
+      meta: { contentOverflowVisible: true },
+      accessorFn: (row) => deleteCheckRank(row.backup_status),
+      sortingFn: 'basic',
+      cell: ({ row }) =>
+        row.original.kind === 'file' ? (
+          <DeleteCheckStatusBadge
+            status={row.original.backup_status}
+            here={row.original.copies_here}
+            away={row.original.copies_away}
+          />
+        ) : (
+          <FolderRollupBadge unsafe={row.original.unsafe_count} warn={row.original.warn_count} />
+        )
+    });
+  }
+
+  columns.push(
     {
       accessorKey: 'size',
       header: 'Size',

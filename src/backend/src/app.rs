@@ -44,11 +44,22 @@ impl AppCore {
                 eprintln!("failed to reconcile interrupted scans on startup: {error:#}");
             }
         }
-        Ok(Self {
+        let app = Self {
             db: Arc::new(db),
             progress: ScanProgressStore::with_events(events.clone()),
             events,
-        })
+        };
+        // Warm the duplicate/backup cache in the background so browse safety
+        // markers populate without waiting for the next scan. Idempotent: the
+        // rebuild skips when the cache already matches the current scope.
+        {
+            let db = (*app.db).clone();
+            let events = app.events.clone();
+            std::thread::spawn(move || {
+                crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &events);
+            });
+        }
+        Ok(app)
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AppEvent> {

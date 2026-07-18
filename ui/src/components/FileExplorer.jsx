@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import FileGrid from './FileGrid.jsx';
 import DirectoryTree from './DirectoryTree.jsx';
 import { Icon } from './Icon.jsx';
@@ -98,6 +98,9 @@ export default function FileExplorer(props) {
 
   const [inspected, setInspected] = useState(null);
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  // Backup safety filter over the current listing. This is "Delete Check" in the
+  // unified model: markers are always shown; the filter narrows to a tier.
+  const [backupFilter, setBackupFilter] = useState('all');
 
   if (!activeScan) return <p className={emptyTextClassName}>Select or run a scan to browse this location.</p>;
   const showingDeleteCheck = scanSubview === 'delete-check';
@@ -121,6 +124,38 @@ export default function FileExplorer(props) {
     ['tree', 'File tree', 'folder'],
     ['delete-check', 'Delete Check', 'deleteCheck']
   ];
+
+  // Backup-tier totals for the current listing (files here + descendants of the
+  // folders shown), used for the filter chip counts and gating.
+  const backupTotals = useMemo(() => {
+    const totals = { unsafe: 0, warn: 0, safe: 0 };
+    for (const row of visibleGridRows) {
+      if (row.kind === 'file') {
+        if (row.backup_status === 'unsafe') totals.unsafe += 1;
+        else if (row.backup_status === 'warn') totals.warn += 1;
+        else if (row.backup_status === 'safe') totals.safe += 1;
+      } else if (row.kind === 'dir') {
+        totals.unsafe += row.unsafe_count || 0;
+        totals.warn += row.warn_count || 0;
+        totals.safe += Math.max(0, (row.file_count || 0) - (row.unsafe_count || 0) - (row.warn_count || 0));
+      }
+    }
+    return totals;
+  }, [visibleGridRows]);
+  const hasBackupData = backupTotals.unsafe + backupTotals.warn + backupTotals.safe > 0;
+
+  const filteredGridRows = useMemo(() => {
+    if (backupFilter === 'all') return visibleGridRows;
+    return visibleGridRows.filter((row) => {
+      if (row.kind === 'parent') return true;
+      if (row.kind === 'dir') {
+        if (backupFilter === 'unsafe') return (row.unsafe_count || 0) > 0;
+        if (backupFilter === 'warn') return (row.warn_count || 0) > 0;
+        return (row.file_count || 0) - (row.unsafe_count || 0) - (row.warn_count || 0) > 0;
+      }
+      return row.backup_status === backupFilter;
+    });
+  }, [visibleGridRows, backupFilter]);
 
   const breadcrumbBar = (
     <nav className="flex min-h-8 flex-none items-center gap-1 overflow-x-auto border-b border-sidebar-border bg-sidebar-bg px-2" aria-label="Current path">
@@ -152,7 +187,20 @@ export default function FileExplorer(props) {
           </button>
         </span>
       ))}
-      <span className="ml-auto flex-none pl-3 text-[10px] tabular-nums text-text-tertiary">{visibleGridRows.length} items</span>
+      {hasBackupData && (
+        <div className="ml-auto flex flex-none items-center gap-1.5 pl-3">
+          <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Backup</span>
+          <div className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5">
+            <BackupFilterChip label="All" active={backupFilter === 'all'} onClick={() => setBackupFilter('all')} />
+            <BackupFilterChip label="Unsafe" count={backupTotals.unsafe} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
+            <BackupFilterChip label="Warn" count={backupTotals.warn} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
+            <BackupFilterChip label="Safe" count={backupTotals.safe} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
+          </div>
+        </div>
+      )}
+      {!hasBackupData && (
+        <span className="ml-auto flex-none pl-3 text-[10px] tabular-nums text-text-tertiary">{filteredGridRows.length} items</span>
+      )}
     </nav>
   );
 
@@ -160,10 +208,11 @@ export default function FileExplorer(props) {
     <div className="relative block min-h-[420px] flex-1 overflow-auto bg-bg">
       <FileGrid
         storageKey={showingDeleteCheck ? 'locations-delete-check' : 'locations-files'}
-        rows={visibleGridRows}
+        rows={showingDeleteCheck ? visibleGridRows : filteredGridRows}
         visibleColumns={gridVisibleColumns}
         fullPathName={showingDeleteCheck}
         selectable={!showingDeleteCheck}
+        deleteCheck
         selectedPaths={selectedGridPaths}
         inspectedPath={inspected?.path}
         canBuildThumbnails={canBuildThumbnails}
@@ -579,6 +628,29 @@ export default function FileExplorer(props) {
         {!(activeScan.log || []).length && <span>No live log for this scan.</span>}
       </section>
     </div>
+  );
+}
+
+function BackupFilterChip({ label, count, tone, active, onClick }) {
+  const toneActive =
+    tone === 'danger'
+      ? 'bg-[color:color-mix(in_srgb,var(--danger)_16%,var(--surface))] text-danger shadow-sm'
+      : tone === 'warn'
+        ? 'bg-warning-soft text-warning shadow-sm'
+        : tone === 'success'
+          ? 'bg-[color:color-mix(in_srgb,var(--success)_14%,var(--surface))] text-success shadow-sm'
+          : 'bg-surface-muted text-text shadow-sm';
+  const dotColor = tone === 'danger' ? 'text-danger' : tone === 'warn' ? 'text-warning' : tone === 'success' ? 'text-success' : '';
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold transition ${active ? toneActive : 'text-muted hover:text-text'}`}
+    >
+      {dotColor && <span className={dotColor}>●</span>}
+      {label}
+      {count != null && <span className="tabular-nums opacity-70">{count}</span>}
+    </button>
   );
 }
 

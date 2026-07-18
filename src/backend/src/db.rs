@@ -4583,6 +4583,92 @@ mod tests {
     }
 
     #[test]
+    fn scan_tree_page_surfaces_backup_status_from_built_cache() {
+        let root = test_root("backup-status-tree");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let loc = |slug: &str, name: &str| {
+            db.add_location(LocationInput {
+                kind: LocationType::Local,
+                name: name.to_string(),
+                slug: slug.to_string(),
+                root_path: root.join(slug),
+                notes: None,
+            })
+            .unwrap()
+        };
+        let src = loc("src", "Source");
+        let bak = loc("bak", "Backup");
+        let src_scan = db.start_scan(&src, Path::new("/")).unwrap();
+        let bak_scan = db.start_scan(&bak, Path::new("/")).unwrap();
+        let file = |scan: &str, path: &str, size: u64, b3: &str, light: &str| NewFile {
+            scan_id: scan.to_string(),
+            kind: "file".to_string(),
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap().to_string(),
+            size,
+            blake3: b3.to_string(),
+            sha256: b3.to_string(),
+            blake3_light: light.to_string(),
+            ctime: None,
+            mtime: None,
+            mode: None,
+            error: None,
+        };
+        let dir = |scan: &str, path: &str| NewFile {
+            scan_id: scan.to_string(),
+            kind: "dir".to_string(),
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap().to_string(),
+            size: 0,
+            blake3: String::new(),
+            sha256: String::new(),
+            blake3_light: String::new(),
+            ctime: None,
+            mtime: None,
+            mode: None,
+            error: None,
+        };
+        db.insert_file_batch(&[
+            dir(&src_scan, "dir"),
+            file(&src_scan, "dir/exact.jpg", 100, "HEX", "LEX"),
+            file(&src_scan, "dir/only.raw", 300, "HONLY", "LONLY"),
+            file(&src_scan, "dir/similar.jpg", 200, "HSIMA", "LSIM"),
+        ])
+        .unwrap();
+        db.insert_file_batch(&[
+            file(&bak_scan, "exact.jpg", 100, "HEX", "LEX"), // exact copy of src exact.jpg
+            file(&bak_scan, "similar.jpg", 200, "HSIMB", "LSIM"), // light-only match
+        ])
+        .unwrap();
+        db.finish_scan(&src_scan, 3, 1, 0, 600, "complete").unwrap();
+        db.finish_scan(&bak_scan, 2, 0, 0, 300, "complete").unwrap();
+        db.set_representative_scan(&src_scan).unwrap();
+        db.set_representative_scan(&bak_scan).unwrap();
+
+        crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &crate::events::EventHub::default());
+        assert_eq!(db.current_duplicate_cache_status().unwrap().status, "ready");
+
+        let page = db.scan_tree_page(&src_scan, "dir", Some(50), 0, 1, None).unwrap();
+        let status = |name: &str| {
+            page.entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .backup_status
+                .clone()
+        };
+        assert_eq!(status("exact.jpg"), "safe");
+        assert_eq!(status("only.raw"), "unsafe");
+        assert_eq!(status("similar.jpg"), "warn");
+
+        // The parent folder rolls up 1 unsafe + 1 warn.
+        let root_page = db.scan_tree_page(&src_scan, "", Some(50), 0, 1, None).unwrap();
+        let folder = root_page.entries.iter().find(|e| e.name == "dir").unwrap();
+        assert_eq!(folder.unsafe_count, 1);
+        assert_eq!(folder.warn_count, 1);
+    }
+
+    #[test]
     fn duplicate_cache_path_counts_classifies_backup_safety() {
         let f = |scan: &str, loc: &str, path: &str, blake3: &str, light: &str, size: u64| DuplicateCacheFile {
             scan_id: scan.to_string(),
