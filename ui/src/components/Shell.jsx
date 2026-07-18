@@ -181,7 +181,11 @@ export default function Shell({
   useEffect(() => {
     if (!message) return undefined;
     const id = (toastSeq.current += 1);
-    setToasts((current) => [...current, { id, text: message }]);
+    const tone = toastTone(message);
+    setToasts((current) => [...current, { id, text: message, tone }]);
+    // Errors persist until dismissed so they can be read and copied; other
+    // toasts stay short-lived to avoid clutter.
+    if (tone === 'error') return undefined;
     const timer = setTimeout(() => {
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, 5200);
@@ -190,6 +194,10 @@ export default function Shell({
 
   const dismissToast = useCallback((id) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+
+  const copyToast = useCallback((text) => {
+    if (navigator?.clipboard?.writeText) navigator.clipboard.writeText(text).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -505,21 +513,71 @@ export default function Shell({
       {toasts.length > 0 && (
         <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-[min(360px,calc(100vw-32px))] flex-col gap-2" role="status" aria-live="polite">
           {toasts.map((toast) => (
-            <button
+            <div
               key={toast.id}
-              type="button"
-              onClick={() => dismissToast(toast.id)}
-              className="pointer-events-auto flex items-start gap-2 rounded-ui border border-border bg-surface px-3.5 py-2.5 text-left text-[12px] leading-relaxed text-text shadow-lg transition hover:border-border-strong"
-              title="Dismiss"
+              className={`pointer-events-auto flex items-start gap-2 rounded-ui border px-3.5 py-2.5 text-left text-[12px] leading-relaxed shadow-lg ${toastToneClassName(toast.tone)}`}
+              role={toast.tone === 'error' ? 'alert' : 'status'}
             >
-              <Icon name="tasks" className="mt-0.5 h-3.5 w-3.5 flex-none text-muted" />
-              <span className="min-w-0 flex-1 break-words">{toast.text}</span>
-            </button>
+              <Icon
+                name={toast.tone === 'error' ? 'warning' : toast.tone === 'success' ? 'check' : 'tasks'}
+                className={`mt-0.5 h-3.5 w-3.5 flex-none ${toastToneIconClassName(toast.tone)}`}
+              />
+              <span className="min-w-0 flex-1 select-text break-words [overflow-wrap:anywhere]">{toast.text}</span>
+              <span className="flex flex-none items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => copyToast(toast.text)}
+                  className="grid h-5 w-5 place-items-center rounded opacity-70 transition hover:opacity-100"
+                  title="Copy message"
+                  aria-label="Copy message"
+                >
+                  <Icon name="copy" className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => dismissToast(toast.id)}
+                  className="grid h-5 w-5 place-items-center rounded opacity-70 transition hover:opacity-100"
+                  title="Dismiss"
+                  aria-label="Dismiss"
+                >
+                  <Icon name="close" className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            </div>
           ))}
         </div>
       )}
     </div>
   );
+}
+
+// Toasts carry no explicit tone, so infer one from the text: backend/runtime
+// failures read as errors (red), completed actions as success (green).
+function toastTone(text) {
+  const value = String(text || '').toLowerCase();
+  if (/\b(error|failed|fail|could not|couldn't|cannot|can't|unable|denied|invalid|not found|no such|refused|timed out|timeout)\b/.test(value)) {
+    return 'error';
+  }
+  if (/\b(started|completed|complete|finished|added|created|saved|removed|deleted|cleared|updated|reconciled|done|success)\b/.test(value)) {
+    return 'success';
+  }
+  return 'neutral';
+}
+
+function toastToneClassName(tone) {
+  if (tone === 'error') {
+    return 'border-danger bg-[color:color-mix(in_srgb,var(--danger)_16%,var(--surface))] text-text';
+  }
+  if (tone === 'success') {
+    return 'border-success bg-[color:color-mix(in_srgb,var(--success)_16%,var(--surface))] text-text';
+  }
+  return 'border-border bg-surface text-text';
+}
+
+function toastToneIconClassName(tone) {
+  if (tone === 'error') return 'text-danger';
+  if (tone === 'success') return 'text-success';
+  return 'text-muted';
 }
 
 function connectionLabel(status, detail) {
