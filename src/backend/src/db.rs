@@ -1878,8 +1878,16 @@ impl Database {
         } else {
             None
         };
-        let rows = scan_tree_source_rows(&tx, scan_id, &normalized, ready_run_id)?;
-        let entries = build_tree_page_entries(rows, &normalized, depth, query.and_then(|q| q.filter.as_ref()))?;
+        let filter = query.and_then(|q| q.filter.as_ref());
+        // Browsing (depth 1, no filter) is the hot path: aggregate immediate
+        // children in SQL rather than folding every descendant row in Rust.
+        // Deeper/filtered reads keep the general row-fold path.
+        let entries = if depth == 1 && filter.is_none() {
+            scan_tree_immediate_children(&tx, scan_id, &normalized, ready_run_id)?
+        } else {
+            let rows = scan_tree_source_rows(&tx, scan_id, &normalized, ready_run_id)?;
+            build_tree_page_entries(rows, &normalized, depth, filter)?
+        };
         let total = entries.len() as u64;
         let limit = limit.unwrap_or(DEFAULT_TREE_PAGE_LIMIT).max(1);
         let start = usize::try_from(offset)
@@ -2779,6 +2787,121 @@ where
     }
 
     Ok(())
+}
+
+/// Fast path for the browsing hot case (depth 1, no filter): aggregate the
+/// immediate children entirely in SQL and return only the ~N child rows, instead
+/// of streaming every descendant row into Rust and folding there. Browsing a
+/// top folder of a 275k-file scan fetched ~283k rows per navigation; this
+/// returns ~20. Semantics match `build_tree_page_entries` for depth 1: each
+/// descendant file rolls into its immediate-child directory, and immediate-child
+/// files are listed directly.
+fn scan_tree_immediate_children(
+    conn: &Connection,
+    scan_id: &str,
+    normalized_prefix: &str,
+    ready_run_id: Option<&str>,
+) -> Result<Vec<TreeEntry>> {
+    let prefix_len = normalized_prefix.chars().count() as i64;
+    let like = if normalized_prefix.is_empty() {
+        "%".to_string()
+    } else {
+        format!(
+            "{}%",
+            normalized_prefix.replace('%', "\\%").replace('_', "\\_")
+        )
+    };
+    let mut stmt = conn.prepare(
+        r#"
+        WITH src AS (
+            SELECT
+                substr(f.path, ?4 + 1) AS rest,
+                f.path AS path, f.kind AS kind, f.size AS size,
+                f.blake3 AS blake3, f.sha256 AS sha256,
+                f.ctime AS ctime, f.mtime AS mtime, f.mode AS mode,
+                COALESCE(dc.duplicate_file_count, 0) AS dfc,
+                COALESCE(dc.original_file_count, 0) AS ofc,
+                COALESCE(dc.same_scan_duplicate_file_count, 0) AS sdfc
+            FROM files f
+            LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+            LEFT JOIN duplicate_cache_path_counts dc
+                   ON dc.run_id = ?3 AND dc.scan_id = f.scan_id AND dc.path = f.path
+            WHERE excluded_f.id IS NULL
+              AND f.scan_id = ?1
+              AND f.error IS NULL
+              AND f.path LIKE ?2 ESCAPE '\'
+        )
+        SELECT
+            CASE WHEN instr(rest, '/') > 0 THEN substr(rest, 1, instr(rest, '/') - 1) ELSE rest END AS child,
+            MAX(CASE WHEN instr(rest, '/') > 0 OR kind = 'dir' THEN 1 ELSE 0 END) AS is_dir,
+            SUM(CASE WHEN kind = 'file' THEN 1 ELSE 0 END) AS file_count,
+            SUM(CASE WHEN kind = 'file' THEN size ELSE 0 END) AS total_size,
+            -- Duplicate counters roll up from FILE rows only; the cache also
+            -- stores rolled-up rows on directory paths, which must not be summed.
+            SUM(CASE WHEN kind = 'file' THEN dfc ELSE 0 END) AS dup,
+            SUM(CASE WHEN kind = 'file' THEN ofc ELSE 0 END) AS orig,
+            SUM(CASE WHEN kind = 'file' THEN sdfc ELSE 0 END) AS same_dup,
+            MAX(CASE WHEN kind = 'dir' AND instr(rest, '/') = 0 THEN ctime END) AS dir_ctime,
+            MAX(CASE WHEN kind = 'dir' AND instr(rest, '/') = 0 THEN mtime END) AS dir_mtime,
+            MAX(CASE WHEN kind = 'dir' AND instr(rest, '/') = 0 THEN mode END) AS dir_mode,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN path END) AS file_path,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN size END) AS file_size,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN blake3 END) AS file_blake3,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN sha256 END) AS file_sha256,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ctime END) AS file_ctime,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN mtime END) AS file_mtime,
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN mode END) AS file_mode
+        FROM src
+        WHERE rest <> ''
+        GROUP BY child
+        ORDER BY child
+        "#,
+    )?;
+    let rows = stmt.query_map(params![scan_id, like, ready_run_id, prefix_len], |row| {
+        let child: String = row.get(0)?;
+        let is_dir: i64 = row.get(1)?;
+        let file_count = row.get::<_, i64>(2)?.max(0) as u64;
+        let total_size = row.get::<_, i64>(3)?.max(0) as u64;
+        let dup = row.get::<_, i64>(4)?.max(0) as u64;
+        let orig = row.get::<_, i64>(5)?.max(0) as u64;
+        let same_dup = row.get::<_, i64>(6)?.max(0) as u64;
+        if is_dir == 1 {
+            Ok(TreeEntry {
+                path: format!("{normalized_prefix}{child}"),
+                name: child,
+                kind: "dir".to_string(),
+                size: total_size,
+                file_count,
+                blake3: None,
+                sha256: None,
+                ctime: row.get(7)?,
+                mtime: row.get(8)?,
+                mode: row.get(9)?,
+                duplicate_file_count: dup,
+                original_file_count: orig,
+                same_scan_duplicate_file_count: same_dup,
+            })
+        } else {
+            let file_path: Option<String> = row.get(10)?;
+            Ok(TreeEntry {
+                path: file_path.unwrap_or_else(|| format!("{normalized_prefix}{child}")),
+                name: child,
+                kind: "file".to_string(),
+                size: row.get::<_, Option<i64>>(11)?.unwrap_or(0).max(0) as u64,
+                file_count: 1,
+                blake3: row.get(12)?,
+                sha256: row.get(13)?,
+                ctime: row.get(14)?,
+                mtime: row.get(15)?,
+                mode: row.get(16)?,
+                duplicate_file_count: dup,
+                original_file_count: orig,
+                same_scan_duplicate_file_count: same_dup,
+            })
+        }
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn scan_tree_source_rows(
