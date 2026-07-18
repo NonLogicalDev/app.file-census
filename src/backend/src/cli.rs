@@ -264,6 +264,11 @@ struct ScanStartArgs {
     /// Optional subpath under the location root.
     #[arg(long, default_value = "/")]
     offset: PathBuf,
+    /// Hashing policy: "full" (exact blake3+sha256) or "light" (sampled
+    /// fingerprint only, for cheaply inventorying slow media like SD cards).
+    /// Light scans are excluded from exact duplicate/delete-check scope.
+    #[arg(long, default_value = "full")]
+    hash_policy: String,
 }
 
 #[derive(Args)]
@@ -920,7 +925,18 @@ fn run_scans(
         }
         ScanSubcommand::Start(args) => {
             let db = Database::open(db_path)?;
-            let prepared = scanner::prepare_scan(&db, &args.slug, &args.offset)?;
+            if !matches!(
+                args.hash_policy.to_ascii_lowercase().as_str(),
+                "full" | "light"
+            ) {
+                anyhow::bail!(
+                    "unknown --hash-policy '{}'; expected \"full\" or \"light\"",
+                    args.hash_policy
+                );
+            }
+            let policy = scanner::HashPolicy::from_label(Some(&args.hash_policy));
+            let prepared =
+                scanner::prepare_scan_with_policy(&db, &args.slug, &args.offset, policy)?;
             run_prepared_scan_cli(&db, prepared, json)
         }
         ScanSubcommand::Update(args) => {
