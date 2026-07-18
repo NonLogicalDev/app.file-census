@@ -3,7 +3,7 @@ use std::fs::{File, Metadata};
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -869,148 +869,207 @@ pub fn run_prepared_scan(
     let _ = build_scan_exclude_matcher(&exclude_patterns)?;
     let metadata_workers = 2;
     let hash_workers = hash_worker_count();
-    let (work_tx, work_rx) = sync_channel::<WorkItem>(512);
-    let (hash_tx, hash_rx) = sync_channel::<HashJob>(128);
-    let (result_tx, result_rx) = sync_channel::<PipelineResult>(256);
-    let work_rx = Arc::new(Mutex::new(work_rx));
-    let hash_rx = Arc::new(Mutex::new(hash_rx));
 
-    thread::scope(|scope| {
-        let hash_policy = prepared.hash_policy;
-        for _ in 0..hash_workers {
-            let hash_rx = Arc::clone(&hash_rx);
-            let result_tx = result_tx.clone();
-            let progress = progress.clone();
-            let scan_id = prepared.scan_id.clone();
-            let scan_root = &canonical_scan_root;
-            scope.spawn(move || {
-                hash_worker(hash_rx, result_tx, progress, scan_id, scan_root, hash_policy);
-            });
-        }
+    // Two-phase scan (plan-071): discovery + metadata run to completion first,
+    // buffering every file hash job in an UNBOUNDED channel so the walker never
+    // competes with heavy hash reads on slow/removable media (SD cards). Phase 2
+    // then drains the buffered jobs through the hash workers. We accept the
+    // memory cost of holding all pending hash jobs between the two phases.
+    let (hash_tx, hash_rx) = channel::<HashJob>();
 
-        for _ in 0..metadata_workers {
-            let work_rx = Arc::clone(&work_rx);
-            let hash_tx = hash_tx.clone();
-            let result_tx = result_tx.clone();
-            let progress = progress.clone();
-            let scan_id = prepared.scan_id.clone();
-            let reusable_files = &prepared.reusable_files;
-            let seeded_paths = &prepared.seeded_paths;
-            let db_path = db_path.as_ref();
-            let db_wal_path = db_wal_path.as_ref();
-            let db_shm_path = db_shm_path.as_ref();
-            let scan_root = &canonical_scan_root;
-            scope.spawn(move || {
-                metadata_worker(
-                    work_rx,
-                    hash_tx,
-                    result_tx,
-                    progress,
-                    scan_id,
-                    reusable_files,
-                    seeded_paths,
-                    db_path,
-                    db_wal_path,
-                    db_shm_path,
-                    scan_root,
-                );
-            });
-        }
-        drop(hash_tx);
-
-        let discovery_progress = progress.clone();
-        let discovery_scan_id = prepared.scan_id.clone();
-        let scan_root = &canonical_scan_root;
-        let discovery_result_tx = result_tx.clone();
-        scope.spawn(move || {
-            discovery_worker(
-                scan_root,
-                work_tx,
-                discovery_result_tx,
-                discovery_progress,
-                discovery_scan_id,
-            );
-        });
-        drop(result_tx);
-
-        for result in result_rx {
-            match result {
-                PipelineResult::Directory { row } => {
-                    dir_count += 1;
-                    if let Some(row) = row {
-                        batch.push(row);
-                    }
-                }
-                PipelineResult::File {
-                    row,
-                    reused,
-                    relative_path,
-                } => {
-                    file_count += 1;
-                    total_bytes += row.size;
+    // Result handling (DB batching + progress) is identical for both phases, so
+    // both phase loops funnel every PipelineResult through this closure. Mutable
+    // tallies are passed as arguments (not captured) so the closure can run in
+    // sequence across two separate `thread::scope` blocks.
+    let process_result = |result: PipelineResult,
+                          batch: &mut Vec<NewFile>,
+                          file_count: &mut u64,
+                          dir_count: &mut u64,
+                          error_count: &mut u64,
+                          total_bytes: &mut u64|
+     -> Result<()> {
+        match result {
+            PipelineResult::Directory { row } => {
+                *dir_count += 1;
+                if let Some(row) = row {
                     batch.push(row);
-                    if let Some(progress) = &progress {
-                        progress.update(&prepared.scan_id, |state| {
-                            state.current_path = Some(relative_path.clone());
-                            push_log(state, format!("processed {relative_path}"));
-                            if reused {
-                                push_log(state, format!("reused metadata for {relative_path}"));
-                            }
-                        });
-                    }
-                }
-                PipelineResult::Error {
-                    row,
-                    message,
-                    relative_path,
-                } => {
-                    error_count += 1;
-                    batch.push(row);
-                    if let Some(progress) = &progress {
-                        progress.update(&prepared.scan_id, |state| {
-                            state.message = Some(message.clone());
-                            push_log(
-                                state,
-                                format!("Error processing {relative_path}: {message}"),
-                            );
-                        });
-                    }
-                }
-                PipelineResult::WalkError(message) => {
-                    error_count += 1;
-                    if let Some(progress) = &progress {
-                        progress.update(&prepared.scan_id, |state| {
-                            state.message = Some(message.clone());
-                            push_log(state, format!("Walk error: {message}"));
-                        });
-                    }
-                    eprintln!("walk error: {message}");
                 }
             }
-
-            flush_scan_batch(
-                db,
-                &prepared.scan_id,
-                &mut batch,
-                flush_size,
-                file_count,
-                dir_count,
-                error_count,
-                total_bytes,
-                progress.as_ref(),
-            )?;
-            update_progress_counts(
-                progress.as_ref(),
-                &prepared.scan_id,
-                file_count,
-                dir_count,
-                error_count,
-                total_bytes,
-            );
+            PipelineResult::File {
+                row,
+                reused,
+                relative_path,
+            } => {
+                *file_count += 1;
+                *total_bytes += row.size;
+                batch.push(row);
+                if let Some(progress) = &progress {
+                    progress.update(&prepared.scan_id, |state| {
+                        state.current_path = Some(relative_path.clone());
+                        push_log(state, format!("processed {relative_path}"));
+                        if reused {
+                            push_log(state, format!("reused metadata for {relative_path}"));
+                        }
+                    });
+                }
+            }
+            PipelineResult::Error {
+                row,
+                message,
+                relative_path,
+            } => {
+                *error_count += 1;
+                batch.push(row);
+                if let Some(progress) = &progress {
+                    progress.update(&prepared.scan_id, |state| {
+                        state.message = Some(message.clone());
+                        push_log(state, format!("Error processing {relative_path}: {message}"));
+                    });
+                }
+            }
+            PipelineResult::WalkError(message) => {
+                *error_count += 1;
+                if let Some(progress) = &progress {
+                    progress.update(&prepared.scan_id, |state| {
+                        state.message = Some(message.clone());
+                        push_log(state, format!("Walk error: {message}"));
+                    });
+                }
+                eprintln!("walk error: {message}");
+            }
         }
 
-        Ok::<(), anyhow::Error>(())
-    })?;
+        flush_scan_batch(
+            db,
+            &prepared.scan_id,
+            batch,
+            flush_size,
+            *file_count,
+            *dir_count,
+            *error_count,
+            *total_bytes,
+            progress.as_ref(),
+        )?;
+        update_progress_counts(
+            progress.as_ref(),
+            &prepared.scan_id,
+            *file_count,
+            *dir_count,
+            *error_count,
+            *total_bytes,
+        );
+        Ok(())
+    };
+
+    // ---- Phase 1: discovery + metadata (directory rows flushed now, file hash
+    // jobs buffered for phase 2) ----
+    {
+        let (work_tx, work_rx) = sync_channel::<WorkItem>(512);
+        let (result_tx, result_rx) = sync_channel::<PipelineResult>(256);
+        let work_rx = Arc::new(Mutex::new(work_rx));
+
+        thread::scope(|scope| {
+            for _ in 0..metadata_workers {
+                let work_rx = Arc::clone(&work_rx);
+                let hash_tx = hash_tx.clone();
+                let result_tx = result_tx.clone();
+                let progress = progress.clone();
+                let scan_id = prepared.scan_id.clone();
+                let reusable_files = &prepared.reusable_files;
+                let seeded_paths = &prepared.seeded_paths;
+                let db_path = db_path.as_ref();
+                let db_wal_path = db_wal_path.as_ref();
+                let db_shm_path = db_shm_path.as_ref();
+                let scan_root = &canonical_scan_root;
+                scope.spawn(move || {
+                    metadata_worker(
+                        work_rx,
+                        hash_tx,
+                        result_tx,
+                        progress,
+                        scan_id,
+                        reusable_files,
+                        seeded_paths,
+                        db_path,
+                        db_wal_path,
+                        db_shm_path,
+                        scan_root,
+                    );
+                });
+            }
+
+            let discovery_progress = progress.clone();
+            let discovery_scan_id = prepared.scan_id.clone();
+            let scan_root = &canonical_scan_root;
+            let discovery_result_tx = result_tx.clone();
+            scope.spawn(move || {
+                discovery_worker(
+                    scan_root,
+                    work_tx,
+                    discovery_result_tx,
+                    discovery_progress,
+                    discovery_scan_id,
+                );
+            });
+            drop(result_tx);
+
+            for result in result_rx {
+                process_result(
+                    result,
+                    &mut batch,
+                    &mut file_count,
+                    &mut dir_count,
+                    &mut error_count,
+                    &mut total_bytes,
+                )?;
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })?;
+    }
+    // Every metadata worker has finished, so no more hash jobs will be queued.
+    // Dropping the last sender lets phase 2's hash workers terminate once the
+    // buffer drains.
+    drop(hash_tx);
+
+    // ---- Phase 2: hashing (drain the buffered jobs into file rows) ----
+    // A scan stopped during phase 1 skips hashing entirely; the buffered jobs
+    // are simply dropped and the scan finalizes as "stopped".
+    let stopped_before_hashing = progress
+        .as_ref()
+        .is_some_and(|progress| progress.is_stop_requested(&prepared.scan_id));
+    if !stopped_before_hashing {
+        let hash_rx = Arc::new(Mutex::new(hash_rx));
+        let (result_tx, result_rx) = sync_channel::<PipelineResult>(256);
+
+        thread::scope(|scope| {
+            let hash_policy = prepared.hash_policy;
+            for _ in 0..hash_workers {
+                let hash_rx = Arc::clone(&hash_rx);
+                let result_tx = result_tx.clone();
+                let progress = progress.clone();
+                let scan_id = prepared.scan_id.clone();
+                let scan_root = &canonical_scan_root;
+                scope.spawn(move || {
+                    hash_worker(hash_rx, result_tx, progress, scan_id, scan_root, hash_policy);
+                });
+            }
+            drop(result_tx);
+
+            for result in result_rx {
+                process_result(
+                    result,
+                    &mut batch,
+                    &mut file_count,
+                    &mut dir_count,
+                    &mut error_count,
+                    &mut total_bytes,
+                )?;
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })?;
+    }
 
     if !batch.is_empty() {
         db.insert_file_batch(&batch)?;
@@ -1124,7 +1183,7 @@ fn discovery_worker(
 
 fn metadata_worker(
     work_rx: Arc<Mutex<Receiver<WorkItem>>>,
-    hash_tx: SyncSender<HashJob>,
+    hash_tx: Sender<HashJob>,
     result_tx: SyncSender<PipelineResult>,
     progress: Option<ScanProgressStore>,
     scan_id: String,
@@ -1346,6 +1405,14 @@ fn hash_worker(
             Ok(job) => job,
             Err(_) => break,
         };
+        // Phase 2 drains a buffer of already-queued jobs, so honor a stop
+        // request per item rather than only between phases.
+        if progress
+            .as_ref()
+            .is_some_and(|progress| progress.is_stop_requested(&scan_id))
+        {
+            break;
+        }
         if let Some(progress) = progress.as_ref() {
             progress.wait_while_paused(&scan_id);
         }
@@ -2866,7 +2933,7 @@ mod tests {
         symlink(&outside, scan_root.join("candidate.txt")).unwrap();
         drop(work_tx);
 
-        let (hash_tx, _hash_rx) = sync_channel(1);
+        let (hash_tx, _hash_rx) = channel::<HashJob>();
         let (result_tx, result_rx) = sync_channel(1);
         metadata_worker(
             Arc::new(Mutex::new(work_rx)),
@@ -2922,7 +2989,7 @@ mod tests {
         symlink(&outside, &candidate).unwrap();
         drop(work_tx);
 
-        let (hash_tx, _hash_rx) = sync_channel(1);
+        let (hash_tx, _hash_rx) = channel::<HashJob>();
         let (result_tx, result_rx) = sync_channel(1);
         metadata_worker(
             Arc::new(Mutex::new(work_rx)),
