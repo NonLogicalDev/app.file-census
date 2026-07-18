@@ -538,6 +538,23 @@ impl Database {
                 PRIMARY KEY (run_id, scan_id, path)
             );
 
+            -- Persistent exclusion cache. Recomputing which files an exclude
+            -- pattern hides means glob-matching every file in the scan, which is
+            -- O(files) per browse/search/delete-check. Materialize it once,
+            -- keyed by a fingerprint of (patterns + file_count + max_id), and
+            -- only rebuild when that changes.
+            CREATE TABLE IF NOT EXISTS scan_exclusion_cache (
+                scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,
+                fingerprint TEXT NOT NULL,
+                built_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_excluded_files (
+                scan_id TEXT NOT NULL,
+                file_id INTEGER NOT NULL,
+                PRIMARY KEY (scan_id, file_id)
+            ) WITHOUT ROWID;
+
             CREATE INDEX IF NOT EXISTS idx_locations_slug ON locations(slug);
             CREATE INDEX IF NOT EXISTS idx_scans_location ON scans(location_id);
             CREATE INDEX IF NOT EXISTS idx_files_scan_path ON files(scan_id, path);
@@ -2763,14 +2780,65 @@ where
     )?;
     conn.execute("DELETE FROM excluded_file_ids", [])?;
 
-    let mut files_stmt = conn.prepare("SELECT id, path, kind FROM files WHERE scan_id = ?1")?;
-    let mut insert_stmt =
-        conn.prepare("INSERT OR IGNORE INTO excluded_file_ids (id) VALUES (?1)")?;
-
     for (scan_id, matcher) in &visibility.matchers {
         if matcher.is_none() {
             continue;
         }
+        // Materialize (or reuse) the persistent per-scan exclusion set instead
+        // of glob-matching every file on every call, then copy the matched ids
+        // into the connection-local temp table the queries anti-join.
+        ensure_scan_exclusion_cache(conn, scan_id, matcher)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO excluded_file_ids (id)
+             SELECT file_id FROM scan_excluded_files WHERE scan_id = ?1",
+            [scan_id],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Ensures `scan_excluded_files` holds the current exclusion set for `scan_id`.
+/// The set only changes when the exclude patterns change or the scan's files
+/// change, so a fingerprint of (patterns, file_count, max_id) gates the rebuild:
+/// the expensive O(files) glob pass runs once, and every later browse/search
+/// just reads the cached ids.
+fn ensure_scan_exclusion_cache(
+    conn: &Connection,
+    scan_id: &str,
+    matcher: &Option<Gitignore>,
+) -> Result<()> {
+    let patterns: String = {
+        let mut stmt =
+            conn.prepare("SELECT pattern FROM scan_excludes WHERE scan_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([scan_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?.join("\n")
+    };
+    let (file_count, max_id): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM files WHERE scan_id = ?1",
+        [scan_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let fingerprint = format!("{patterns}\u{1f}{file_count}\u{1f}{max_id}");
+
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT fingerprint FROM scan_exclusion_cache WHERE scan_id = ?1",
+            [scan_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if stored.as_deref() == Some(fingerprint.as_str()) {
+        return Ok(());
+    }
+
+    conn.execute("DELETE FROM scan_excluded_files WHERE scan_id = ?1", [scan_id])?;
+    {
+        let mut files_stmt =
+            conn.prepare("SELECT id, path, kind FROM files WHERE scan_id = ?1")?;
+        let mut insert_stmt = conn.prepare(
+            "INSERT OR IGNORE INTO scan_excluded_files (scan_id, file_id) VALUES (?1, ?2)",
+        )?;
         let rows = files_stmt.query_map([scan_id], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -2781,11 +2849,15 @@ where
         for row in rows {
             let (id, path, kind) = row?;
             if scan_path_is_excluded(matcher, &path, kind == "dir") {
-                insert_stmt.execute([id])?;
+                insert_stmt.execute(params![scan_id, id])?;
             }
         }
     }
-
+    conn.execute(
+        "INSERT OR REPLACE INTO scan_exclusion_cache (scan_id, fingerprint, built_at)
+         VALUES (?1, ?2, ?3)",
+        params![scan_id, fingerprint, Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 
