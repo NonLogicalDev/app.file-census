@@ -19,6 +19,11 @@ use crate::db::{
 };
 use crate::events::EventHub;
 
+/// Minimum wall-clock gap between full `scan_progress` snapshot emits per scan.
+/// Bounds the clone+serialize cost to ~10 snapshots/second so per-item counter
+/// updates stay cheap. Log events and forced flushes bypass this.
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+
 #[derive(Clone, Debug)]
 pub struct ScanSummary {
     pub scan_id: String,
@@ -66,6 +71,11 @@ pub struct ScanProgress {
     pub finished_at: Option<String>,
     #[serde(skip)]
     next_active_operation_id: u64,
+    /// Last time a full `scan_progress` snapshot was emitted for this scan.
+    /// High-frequency per-item counter updates coalesce between emits so the
+    /// hot path never pays the clone+serialize cost more than ~10×/second.
+    #[serde(skip)]
+    last_progress_emit: Option<Instant>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -180,6 +190,7 @@ impl ScanProgressStore {
             started_at: Utc::now().to_rfc3339(),
             finished_at: None,
             next_active_operation_id: 1,
+            last_progress_emit: None,
         };
         self.inner
             .lock()
@@ -197,30 +208,67 @@ impl ScanProgressStore {
         scan_id: &str,
         update: impl FnOnce(&mut ScanProgress) -> T,
     ) -> Option<T> {
-        let (progress, log_lines, result) = if let Some(progress) = self
-            .inner
-            .lock()
-            .expect("scan progress lock poisoned")
-            .get_mut(scan_id)
-        {
+        self.update_with_result_inner(scan_id, false, update)
+    }
+
+    /// Like `update`, but always emits a fresh snapshot regardless of the
+    /// throttle window. Use at phase boundaries / terminal transitions where
+    /// the final state must reach the UI promptly.
+    fn update_flush(&self, scan_id: &str, update: impl FnOnce(&mut ScanProgress)) {
+        let _ = self.update_with_result_inner(scan_id, true, |progress| update(progress));
+    }
+
+    fn update_with_result_inner<T>(
+        &self,
+        scan_id: &str,
+        force_emit: bool,
+        update: impl FnOnce(&mut ScanProgress) -> T,
+    ) -> Option<T> {
+        // Coalesce high-frequency progress updates: hold the lock only long
+        // enough to mutate counters and decide whether this update crosses the
+        // emit window. The full-struct clone + JSON serialize (the expensive
+        // part) happens at most ~10×/second per scan, so discovery/metadata run
+        // near their raw walk speed instead of paying it on every entry.
+        let (snapshot, log_lines, log_ids, result) = {
+            let mut guard = self.inner.lock().expect("scan progress lock poisoned");
+            let Some(progress) = guard.get_mut(scan_id) else {
+                return None;
+            };
             let old_len = progress.log.len();
             let result = update(progress);
-            let log_lines = progress.log[old_len..].to_vec();
-            (Some(progress.clone()), log_lines, Some(result))
-        } else {
-            (None, Vec::new(), None)
+            let has_new_log = progress.log.len() > old_len;
+            let now = Instant::now();
+            let window_elapsed = progress
+                .last_progress_emit
+                .map_or(true, |last| now.duration_since(last) >= PROGRESS_EMIT_INTERVAL);
+            // New log lines always flush (they mark meaningful events); pure
+            // counter churn only emits once the throttle window elapses.
+            let should_emit = force_emit || has_new_log || window_elapsed;
+            let log_lines = if has_new_log {
+                progress.log[old_len..].to_vec()
+            } else {
+                Vec::new()
+            };
+            let log_ids = (progress.scan_id.clone(), progress.location_slug.clone());
+            let snapshot = if should_emit {
+                progress.last_progress_emit = Some(now);
+                Some(progress.clone())
+            } else {
+                None
+            };
+            (snapshot, log_lines, log_ids, Some(result))
         };
-        if let Some(progress) = progress {
-            for line in log_lines {
-                self.emit(
-                    "scan_log",
-                    serde_json::json!({
-                        "scan_id": progress.scan_id,
-                        "location_slug": progress.location_slug,
-                        "line": line,
-                    }),
-                );
-            }
+        for line in log_lines {
+            self.emit(
+                "scan_log",
+                serde_json::json!({
+                    "scan_id": log_ids.0,
+                    "location_slug": log_ids.1,
+                    "line": line,
+                }),
+            );
+        }
+        if let Some(progress) = snapshot {
             self.emit("scan_progress", &progress);
         }
         result
@@ -236,7 +284,7 @@ impl ScanProgressStore {
             "stopped" => "scan_stopped",
             _ => "scan_finished",
         };
-        self.update(&summary.scan_id, |progress| {
+        self.update_flush(&summary.scan_id, |progress| {
             progress.status = summary.status.clone();
             progress.file_count = summary.file_count;
             progress.dir_count = summary.dir_count;
@@ -535,6 +583,9 @@ impl ScanProgress {
             .retain(|operation| operation.operation_id != operation_id);
     }
 
+    // Retained for pool-lifecycle tests; discovery no longer activates a
+    // per-entry operation now that its walk is lock-free.
+    #[allow(dead_code)]
     fn remove_active_operations_for_pool(&mut self, kind: PoolKind) {
         self.active_operations
             .retain(|operation| operation.pool != kind.name());
@@ -883,10 +934,11 @@ pub fn run_prepared_scan(
     // memory cost of holding all pending hash jobs between the two phases.
     let (hash_tx, hash_rx) = channel::<HashJob>();
 
-    // Files seen by the discovery walker, updated lock-free by the walk and read
-    // into the live progress snapshot. Seeded so repair scans start from their
-    // physically-seeded totals.
+    // Files (and all entries) seen by the discovery walker, updated lock-free by
+    // the parallel walk and read into the live progress snapshot. `files` is
+    // seeded so repair scans start from their physically-seeded totals.
     let discovered_files = Arc::new(AtomicU64::new(prepared.seeded_file_count));
+    let discovered_entries = Arc::new(AtomicU64::new(0));
 
     // Result handling (DB batching + progress) is identical for both phases, so
     // both phase loops funnel every PipelineResult through this closure. Mutable
@@ -969,6 +1021,7 @@ pub fn run_prepared_scan(
             *error_count,
             *total_bytes,
             discovered_files.load(Ordering::Relaxed),
+            discovered_entries.load(Ordering::Relaxed),
         );
         Ok(())
     };
@@ -1017,6 +1070,7 @@ pub fn run_prepared_scan(
             let scan_root = &canonical_scan_root;
             let discovery_result_tx = result_tx.clone();
             let discovery_discovered_files = Arc::clone(&discovered_files);
+            let discovery_discovered_entries = Arc::clone(&discovered_entries);
             scope.spawn(move || {
                 discovery_worker(
                     scan_root,
@@ -1025,6 +1079,7 @@ pub fn run_prepared_scan(
                     discovery_progress,
                     discovery_scan_id,
                     &discovery_discovered_files,
+                    &discovery_discovered_entries,
                 );
             });
             drop(result_tx);
@@ -1154,11 +1209,17 @@ fn discovery_worker(
     progress: Option<ScanProgressStore>,
     scan_id: String,
     discovered_files: &AtomicU64,
+    discovered_entries: &AtomicU64,
 ) {
-    for entry in WalkDir::new(scan_root)
-        .follow_links(false)
-        .into_iter()
-    {
+    let walk_start = Instant::now();
+    // Single-threaded walk on purpose: discovery shares the disk with the
+    // metadata `stat()` workers, and on slow/removable media (USB, SD) a
+    // many-threaded walk just adds seek contention and runs SLOWER than one
+    // walker feeding the metadata pool (measured 13s parallel vs ~5s here).
+    // Bookkeeping is lock-free — only atomics + an unbounded send — so the walk
+    // never contends on the progress mutex; the main loop syncs the atomics into
+    // the live snapshot.
+    for entry in WalkDir::new(scan_root).follow_links(false) {
         if progress
             .as_ref()
             .is_some_and(|progress| progress.is_stop_requested(&scan_id))
@@ -1168,7 +1229,6 @@ fn discovery_worker(
         if let Some(progress) = progress.as_ref() {
             progress.wait_while_paused(&scan_id);
         }
-
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
@@ -1177,30 +1237,28 @@ fn discovery_worker(
                 continue;
             }
         };
-
         let Some(work_item) = work_item_from_entry(scan_root, entry) else {
             continue;
         };
-        // Count discovered files lock-free so the walk stays fast; the main
-        // loop reads this into the live progress snapshot.
         if matches!(work_item.kind, WorkKind::File) {
             discovered_files.fetch_add(1, Ordering::Relaxed);
         }
-        let path = progress_path(&work_item.relative_path);
-        let operation_id = pool_activate(progress.as_ref(), &scan_id, PoolKind::Discovery, &path);
-        pool_queue(progress.as_ref(), &scan_id, PoolKind::Metadata, &path);
+        discovered_entries.fetch_add(1, Ordering::Relaxed);
         if work_tx.send(work_item).is_err() {
             break;
         }
-        pool_complete(
-            progress.as_ref(),
-            &scan_id,
-            PoolKind::Discovery,
-            operation_id,
-        );
     }
 
-    pool_deactivate(progress.as_ref(), &scan_id, PoolKind::Discovery);
+    if std::env::var_os("FC_SCAN_TIMING").is_some() {
+        let secs = walk_start.elapsed().as_secs_f64();
+        let walked = discovered_entries.load(Ordering::Relaxed);
+        eprintln!(
+            "[DISCOVERY] {walked} entries in {secs:.3}s ({:.0} entries/s)",
+            walked as f64 / secs.max(1e-9)
+        );
+    } else {
+        let _ = walk_start;
+    }
 }
 
 fn metadata_worker(
@@ -1653,6 +1711,7 @@ fn update_progress_counts(
     error_count: u64,
     total_bytes: u64,
     discovered_files: u64,
+    discovered_entries: u64,
 ) {
     if let Some(progress) = progress {
         progress.update(scan_id, |state| {
@@ -1661,6 +1720,12 @@ fn update_progress_counts(
             state.discovered_files = discovered_files;
             state.error_count = error_count;
             state.total_bytes = total_bytes;
+            // Discovery counters come from the lock-free walk atomics; the
+            // metadata backlog is what's been discovered but not yet stat'd.
+            state.pools.discovery.completed = discovered_entries;
+            let metadata = &mut state.pools.metadata;
+            metadata.queued = discovered_entries
+                .saturating_sub(metadata.completed + metadata.active + metadata.failed);
         });
     }
 }
@@ -1703,6 +1768,7 @@ fn pool_start(
     })
 }
 
+#[allow(dead_code)]
 fn pool_activate(
     progress: Option<&ScanProgressStore>,
     scan_id: &str,
@@ -1724,6 +1790,7 @@ fn pool_activate(
     })
 }
 
+#[allow(dead_code)]
 fn pool_deactivate(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind) {
     let Some(progress) = progress else {
         return;
