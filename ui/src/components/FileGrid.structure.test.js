@@ -31,13 +31,19 @@ test('file grid numeric columns align headers with numeric cell values', () => {
   assert.match(fileGridSource, /fileGridHeaderButtonClassName\(\{\s*align: headerAlign/);
 });
 
-test('file grid keeps normal scan actions out of the explicit Delete Check workflow', () => {
-  assert.match(fileGridSource, /if \(onDelete \|\| onBuildThumbnails \|\| onExclude \|\| onAddDeleteCheck\)/);
-  assert.match(fileGridSource, /columns\.push\(\{\s*id: 'actions'/);
+test('file grid row actions live in a right-click context menu (no trigger column)', () => {
+  // The old per-row "..." actions column is retired; actions open via
+  // onContextMenu at the cursor, close on outside click/Escape/scroll.
+  assert.doesNotMatch(fileGridSource, /id: 'actions'/);
+  assert.doesNotMatch(fileGridSource, /MenuTrigger/);
+  assert.match(fileGridSource, /onContextMenu=\{\(event\) => \{/);
+  assert.match(fileGridSource, /setContextMenu\(\{ x: event\.clientX, y: event\.clientY, entry: row\.original \}\)/);
+  assert.match(fileGridSource, /event\.key === 'Escape'/);
   assert.match(fileGridSource, /Build thumbnails/);
   assert.match(fileGridSource, /Remove from scan/);
   assert.match(fileGridSource, /Exclude from scan/);
-  assert.match(fileGridSource, /<MenuContent align="start"/);
+  assert.match(fileGridSource, /Add to Delete Check/);
+  assert.match(fileGridSource, /Remove from Delete Check/);
   assert.doesNotMatch(fileGridSource, /Include in Delete Check|Exclude from Delete Check|deleteCheckPathStateByPath/);
   // Row actions are wired directly now that the browse grid is the only surface
   // (the delete-check subview that suppressed them is retired).
@@ -70,8 +76,8 @@ test('file grid uses stable path identities and routes file inspection separatel
   assert.match(fileGridSource, /if \(row\.original\.kind === 'dir' \|\| row\.original\.kind === 'parent'\) onOpen\?\.\(row\.original\)/);
 });
 
-test('column picker visibility leaves the identity and action columns available', () => {
+test('column picker visibility leaves the identity columns available', () => {
   assert.match(fileGridSource, /visibleColumns = \[\]/);
   assert.match(fileGridSource, /visibleColumns\.includes\(id\)/);
-  assert.match(fileGridSource, /id === 'select' \|\| id === 'name' \|\| id === 'actions'/);
+  assert.match(fileGridSource, /id === 'select' \|\| id === 'name' \|\| id === 'backup'/);
 });

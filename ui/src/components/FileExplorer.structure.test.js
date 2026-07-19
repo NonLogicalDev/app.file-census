@@ -33,6 +33,14 @@ test('backup filter is always-on, and the Delete Check SET is a distinct staged 
   assert.match(fileExplorerSource, /\{inspectorOpen && inspectorPane\}/);
 });
 
+test('clear set is an icon-only confirmed action beside Add to Delete Check', () => {
+  // "Clear set" moved out of the Delete Check bar: icon-only button in nav
+  // row 2, which asks for confirmation via the app-level ConfirmModal.
+  assert.match(fileExplorerSource, /onRequestClearDeleteCheck/);
+  assert.match(fileExplorerSource, /aria-label="Clear the Delete Check set"/);
+  assert.doesNotMatch(fileExplorerSource, /Clear set/);
+});
+
 test('inspector has lazy collapsible Preview and EXIF sections', () => {
   // Sections are disclosure-style, persisted, and fetch via the lightweight
   // files.preview RPC only while the inspector + section are open.

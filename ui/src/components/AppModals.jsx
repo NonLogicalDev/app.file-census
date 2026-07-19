@@ -138,6 +138,19 @@ export default function AppModals(props) {
           busy={props.busy}
         />
       )}
+      {props.confirmClearDeleteCheck && (
+        <ConfirmModal
+          title="Clear Delete Check set"
+          body={`This removes all ${props.deleteCheckSetSize || ''} staged ${props.deleteCheckSetSize === 1 ? 'path' : 'paths'} from the Delete Check set for this scan. Nothing on disk is touched.`}
+          confirmLabel="Clear set"
+          onConfirm={() => {
+            props.onClearDeleteCheck();
+            props.setConfirmClearDeleteCheck(false);
+          }}
+          onCancel={() => props.setConfirmClearDeleteCheck(false)}
+          busy={props.busy}
+        />
+      )}
       {props.confirmDeleteLocationSlug && (
         <ConfirmModal
           title="Delete location"
@@ -250,9 +263,21 @@ function groupOccurrences(occurrences = []) {
   }));
 }
 
+// Toggle a key's membership in a Set (immutable — returns a new Set).
+function toggleKey(keys, key) {
+  const next = new Set(keys);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
+}
+
 function FileInfoModal(props) {
   const { fileInfo, busy } = props;
   const [tab, setTab] = useState('preview');
+  // Locations tab: both grouping levels are collapsible — per-location cards
+  // and each scan group inside them. Expanded by default; collapse on demand.
+  const [collapsedLocations, setCollapsedLocations] = useState(() => new Set());
+  const [collapsedScans, setCollapsedScans] = useState(() => new Set());
   const thumbnail = fileInfo.thumbnail;
   const exif = fileInfo.exif || { status: 'unavailable', fields: [] };
   const occurrenceCount = fileInfo.occurrence_count ?? fileInfo.occurrences.length;
@@ -360,39 +385,63 @@ function FileInfoModal(props) {
               )}
             </div>
             <div className={occurrenceListClassName}>
-              {groupOccurrences(fileInfo.occurrences).map((location) => (
-                <article className={occurrenceCardClassName} key={location.slug}>
-                  <div className={occurrenceHeaderClassName}>
-                    <strong>{location.slug} <span className={occurrenceLocationNameClassName}>{location.name}</span></strong>
-                    <span className={occurrenceHeaderMetaClassName}>
-                      {location.total} {location.total === 1 ? 'copy' : 'copies'} · {location.scans.length} {location.scans.length === 1 ? 'scan' : 'scans'}
-                    </span>
-                  </div>
-                  {location.scans.map((scan) => (
-                    <div key={scan.scan_id} className="mt-2 first:mt-0">
-                      <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-                        <Icon name="scan" className="h-3.5 w-3.5" />
-                        <span>{when(scan.started_at)}</span>
-                        <span>· {statusLabel(scan.status)}</span>
-                        {scan.representative && (
-                          <span className="rounded-full border border-accent-line px-1.5 text-[10px] font-semibold text-accent">representative</span>
-                        )}
-                        <code className="text-[10px] text-text-tertiary">{scan.scan_id.slice(0, 8)}</code>
-                      </div>
-                      {scan.occurrences.map((occurrence) => (
-                        <div className={occurrencePathRowClassName} key={occurrence.path}>
-                          <code className={occurrencePathTextClassName}>{occurrence.path}</code>
-                          <span className="whitespace-nowrap text-[11px] text-text-tertiary">{when(occurrence.mtime)}</span>
-                          <Toolbar className={actionToolbarClassName}>
-                            <Button type="button" variant="secondary" onClick={() => props.onOpenOccurrence(occurrence)} disabled={busy} icon={<Icon name="openFile" />}>Open</Button>
-                            <Button type="button" variant="secondary" onClick={() => props.onRevealOccurrence(occurrence)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal</Button>
-                          </Toolbar>
+              {groupOccurrences(fileInfo.occurrences).map((location) => {
+                const locationCollapsed = collapsedLocations.has(location.slug);
+                return (
+                  <article className={occurrenceCardClassName} key={location.slug}>
+                    <button
+                      type="button"
+                      className={`${occurrenceHeaderClassName} w-full cursor-pointer border-0 bg-transparent text-left`}
+                      aria-expanded={!locationCollapsed}
+                      onClick={() => setCollapsedLocations((keys) => toggleKey(keys, location.slug))}
+                    >
+                      <strong className="inline-flex items-center gap-1.5">
+                        <Icon name={locationCollapsed ? 'chevronRight' : 'chevronDown'} className="h-3.5 w-3.5 text-muted" />
+                        {location.slug} <span className={occurrenceLocationNameClassName}>{location.name}</span>
+                      </strong>
+                      <span className={occurrenceHeaderMetaClassName}>
+                        {location.total} {location.total === 1 ? 'copy' : 'copies'} · {location.scans.length} {location.scans.length === 1 ? 'scan' : 'scans'}
+                      </span>
+                    </button>
+                    {!locationCollapsed && location.scans.map((scan) => {
+                      const scanKey = `${location.slug}:${scan.scan_id}`;
+                      const scanCollapsed = collapsedScans.has(scanKey);
+                      return (
+                        <div key={scan.scan_id} className="mt-2 first:mt-0">
+                          <button
+                            type="button"
+                            className="mb-1 flex w-full cursor-pointer flex-wrap items-center gap-2 border-0 bg-transparent p-0 text-left text-[11px] text-muted transition-colors hover:text-text"
+                            aria-expanded={!scanCollapsed}
+                            onClick={() => setCollapsedScans((keys) => toggleKey(keys, scanKey))}
+                          >
+                            <Icon name={scanCollapsed ? 'chevronRight' : 'chevronDown'} className="h-3 w-3" />
+                            <Icon name="scan" className="h-3.5 w-3.5" />
+                            <span>{when(scan.started_at)}</span>
+                            <span>· {statusLabel(scan.status)}</span>
+                            {scan.representative && (
+                              <span className="rounded-full border border-accent-line px-1.5 text-[10px] font-semibold text-accent">representative</span>
+                            )}
+                            <code className="text-[10px] text-text-tertiary">{scan.scan_id.slice(0, 8)}</code>
+                            <span className="ml-auto text-[10px] text-text-tertiary">
+                              {scan.occurrences.length} {scan.occurrences.length === 1 ? 'path' : 'paths'}
+                            </span>
+                          </button>
+                          {!scanCollapsed && scan.occurrences.map((occurrence) => (
+                            <div className={occurrencePathRowClassName} key={occurrence.path}>
+                              <code className={occurrencePathTextClassName}>{occurrence.path}</code>
+                              <span className="whitespace-nowrap text-[11px] text-text-tertiary">{when(occurrence.mtime)}</span>
+                              <Toolbar className={actionToolbarClassName}>
+                                <Button type="button" variant="secondary" onClick={() => props.onOpenOccurrence(occurrence)} disabled={busy} icon={<Icon name="openFile" />}>Open</Button>
+                                <Button type="button" variant="secondary" onClick={() => props.onRevealOccurrence(occurrence)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal</Button>
+                              </Toolbar>
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
-                  ))}
-                </article>
-              ))}
+                      );
+                    })}
+                  </article>
+                );
+              })}
             </div>
           </section>
         )}

@@ -104,6 +104,7 @@ export default function App() {
   const [confirmDeleteScanId, setConfirmDeleteScanId] = useState(null);
   const [confirmDeletePath, setConfirmDeletePath] = useState(null);
   const [confirmDeleteLocationSlug, setConfirmDeleteLocationSlug] = useState(null);
+  const [confirmClearDeleteCheck, setConfirmClearDeleteCheck] = useState(false);
   const [form, setForm] = useState({ kind: 'local', name: '', slug: '', root_path: '', notes: '' });
   const [editForm, setEditForm] = useState({ slug: '', kind: 'local', name: '', root_path: '', notes: '' });
   const [scanNotesForm, setScanNotesForm] = useState({ scan_id: '', notes: '' });
@@ -2131,6 +2132,7 @@ export default function App() {
     onAddDeleteCheck: addToDeleteCheck,
     onRemoveDeleteCheck: removeFromDeleteCheck,
     onClearDeleteCheck: clearDeleteCheck,
+    onRequestClearDeleteCheck: () => setConfirmClearDeleteCheck(true),
     locationList,
     selectedLocationSlug,
     selectedLocationView,
@@ -2681,6 +2683,10 @@ export default function App() {
         setConfirmDeletePath={setConfirmDeletePath}
         confirmDeleteLocationSlug={confirmDeleteLocationSlug}
         setConfirmDeleteLocationSlug={setConfirmDeleteLocationSlug}
+        confirmClearDeleteCheck={confirmClearDeleteCheck}
+        setConfirmClearDeleteCheck={setConfirmClearDeleteCheck}
+        deleteCheckSetSize={deleteCheckSet.length}
+        onClearDeleteCheck={clearDeleteCheck}
         form={form}
         setForm={setForm}
         editForm={editForm}

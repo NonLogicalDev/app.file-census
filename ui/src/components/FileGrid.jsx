@@ -8,7 +8,6 @@ import {
 } from '@tanstack/react-table';
 import { Icon } from './Icon.jsx';
 import {
-  fileGridActionsClassName,
   fileGridCellClassName,
   fileGridCellContentClassName,
   fileGridCheckboxClassName,
@@ -17,9 +16,6 @@ import {
   fileGridHeaderCellClassName,
   fileGridNumericClassName,
   fileGridResizerClassName,
-  fileGridRowActionMenuClassName,
-  fileGridRowActionPanelClassName,
-  fileGridRowActionTriggerClassName,
   fileGridRowClassName,
   fileGridSelectClassName,
   fileGridSortClassName,
@@ -27,10 +23,7 @@ import {
   fileKindIconClassName,
   fileNameCellClassName,
   fileNameLabelClassName,
-  Menu,
-  MenuContent,
-  MenuItem,
-  MenuTrigger
+  MenuItem
 } from './ui/index.jsx';
 import { bytes, shortHash } from '../utils/format.js';
 
@@ -42,7 +35,7 @@ const centeredControlColumnMeta = {
 };
 
 // Control columns stay pinned to the left and never participate in reordering.
-const CONTROL_COLUMN_IDS = ['actions', 'select'];
+const CONTROL_COLUMN_IDS = ['select'];
 
 function isReorderableColumn(columnId) {
   return !CONTROL_COLUMN_IDS.includes(columnId);
@@ -283,13 +276,13 @@ function FileGridInner({
   const selectableRows = useMemo(() => rows.filter(isSelectableRow), [rows]);
   const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedSet.has(row.path));
   const columns = useMemo(
-    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths }),
-    [allSelected, canBuildThumbnails, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, fullPathName, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
+    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, onToggleSelection, onSetSelection }),
+    [allSelected, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, fullPathName, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
   );
   const columnVisibility = useMemo(() => {
     return Object.fromEntries(columns.map((column) => {
       const id = column.id || column.accessorKey;
-      return [id, id === 'select' || id === 'name' || id === 'actions' || id === 'backup' || visibleColumns.includes(id)];
+      return [id, id === 'select' || id === 'name' || id === 'backup' || visibleColumns.includes(id)];
     }));
   }, [columns, visibleColumns]);
   const naturalColumnOrder = useMemo(
@@ -302,6 +295,35 @@ function FileGridInner({
   const orderedRows = useMemo(() => {
     return [...rows].sort((a, b) => kindRank(a) - kindRank(b));
   }, [rows]);
+
+  // Row actions live in a right-click context menu (the old per-row "..."
+  // trigger column is retired). Position is the cursor point, clamped to the
+  // viewport; closes on outside pointerdown, Escape, scroll, or resize.
+  const [contextMenu, setContextMenu] = useState(null);
+  const contextMenuRef = useRef(null);
+  const hasRowActions = Boolean(onDelete || onBuildThumbnails || onExclude || onAddDeleteCheck || onRemoveDeleteCheck);
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    function onPointerDown(event) {
+      if (!contextMenuRef.current?.contains(event.target)) setContextMenu(null);
+    }
+    function onKeyDown(event) {
+      if (event.key === 'Escape') setContextMenu(null);
+    }
+    function onDismiss() {
+      setContextMenu(null);
+    }
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    window.addEventListener('scroll', onDismiss, true);
+    window.addEventListener('resize', onDismiss);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', onDismiss, true);
+      window.removeEventListener('resize', onDismiss);
+    };
+  }, [contextMenu]);
 
   // Live sort direction, read by the folders-first sorting fn to cancel
   // TanStack's descending negation so folders stay on top in both directions.
@@ -496,6 +518,11 @@ function FileGridInner({
                 if (row.original.kind === 'file') onInspect?.(row.original);
                 if (row.original.kind === 'dir' || row.original.kind === 'parent') onOpen?.(row.original);
               }}
+              onContextMenu={(event) => {
+                if (!hasRowActions || !isSelectableRow(row.original)) return;
+                event.preventDefault();
+                setContextMenu({ x: event.clientX, y: event.clientY, entry: row.original });
+              }}
             >
               {row.getVisibleCells().map((cell) => (
                 <td
@@ -512,6 +539,80 @@ function FileGridInner({
           ))}
         </tbody>
       </table>
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          role="menu"
+          aria-label={`Actions for ${contextMenu.entry.name}`}
+          className="fixed z-50 min-w-44 rounded-panel border border-border bg-surface p-1 shadow-md"
+          style={{
+            left: Math.min(contextMenu.x, (window.innerWidth || 1200) - 208),
+            top: Math.min(contextMenu.y, (window.innerHeight || 800) - 220)
+          }}
+          onClick={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          {stagedPaths?.has(contextMenu.entry.path) && onRemoveDeleteCheck ? (
+            <MenuItem
+              variant="warning"
+              icon={<Icon name="close" />}
+              onClick={() => {
+                onRemoveDeleteCheck(contextMenu.entry.path);
+                setContextMenu(null);
+              }}
+            >
+              Remove from Delete Check
+            </MenuItem>
+          ) : onAddDeleteCheck ? (
+            <MenuItem
+              icon={<Icon name="add" />}
+              onClick={() => {
+                onAddDeleteCheck([contextMenu.entry]);
+                setContextMenu(null);
+              }}
+            >
+              Add to Delete Check
+            </MenuItem>
+          ) : null}
+          {onBuildThumbnails && (
+            <MenuItem
+              disabled={!canBuildThumbnails}
+              icon={<Icon name="thumbnails" />}
+              onClick={() => {
+                onBuildThumbnails(contextMenu.entry);
+                setContextMenu(null);
+              }}
+            >
+              Build thumbnails
+            </MenuItem>
+          )}
+          {onExclude && (
+            <MenuItem
+              variant="warning"
+              icon={<Icon name="exclude" />}
+              onClick={() => {
+                onExclude(contextMenu.entry);
+                setContextMenu(null);
+              }}
+            >
+              Exclude from scan
+            </MenuItem>
+          )}
+          {onDelete && (
+            <MenuItem
+              variant="danger"
+              icon={<Icon name="delete" />}
+              onClick={() => {
+                onDelete(contextMenu.entry);
+                setContextMenu(null);
+              }}
+            >
+              Remove from scan
+            </MenuItem>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -523,100 +624,15 @@ function baseColumns(options) {
     selectedSet,
     allSelected,
     selectableRows,
-    canBuildThumbnails,
     deleteCheck,
     scope = 'external',
     dcMode = false,
     expandableFolders = false,
     onToggleFolderExpand,
     onToggleSelection,
-    onSetSelection,
-    onBuildThumbnails,
-    onExclude,
-    onDelete,
-    onAddDeleteCheck,
-    onRemoveDeleteCheck,
-    stagedPaths
+    onSetSelection
   } = options;
   const columns = [];
-
-  // Row actions sit at the far left, before the select checkbox.
-  if (onDelete || onBuildThumbnails || onExclude || onAddDeleteCheck) {
-    columns.push({
-      id: 'actions',
-      header: '',
-      size: 44,
-      minSize: 44,
-      maxSize: 54,
-      enableSorting: false,
-      enableResizing: false,
-      meta: {
-        ...centeredControlColumnMeta,
-        className: fileGridActionsClassName
-      },
-      cell: ({ row }) => {
-        if (!row.original || row.original.kind === 'parent') return '';
-        return (
-          <Menu className={fileGridRowActionMenuClassName} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
-            <MenuTrigger
-              aria-label={`Actions for ${row.original.name}`}
-              title="Row actions"
-              variant="ghost"
-              size="sm"
-              className={fileGridRowActionTriggerClassName}
-              icon={<Icon name="rowActions" />}
-            />
-            <MenuContent align="start" className={fileGridRowActionPanelClassName}>
-              {isSelectableRow(row.original) &&
-                (stagedPaths?.has(row.original.path) && onRemoveDeleteCheck ? (
-                  <MenuItem
-                    variant="warning"
-                    icon={<Icon name="close" />}
-                    onClick={() => onRemoveDeleteCheck(row.original.path)}
-                  >
-                    Remove from Delete Check
-                  </MenuItem>
-                ) : onAddDeleteCheck ? (
-                  <MenuItem
-                    icon={<Icon name="add" />}
-                    onClick={() => onAddDeleteCheck([row.original])}
-                  >
-                    Add to Delete Check
-                  </MenuItem>
-                ) : null)}
-              {onBuildThumbnails && (
-                <MenuItem
-                  disabled={!canBuildThumbnails}
-                  icon={<Icon name="thumbnails" />}
-                  onClick={() => onBuildThumbnails(row.original)}
-                >
-                  Build thumbnails
-                </MenuItem>
-              )}
-              {onExclude && (
-                <MenuItem
-                  variant="warning"
-                  icon={<Icon name="exclude" />}
-                  onClick={() => onExclude(row.original)}
-                >
-                  Exclude from scan
-                </MenuItem>
-              )}
-              {onDelete && (
-                <MenuItem
-                  variant="danger"
-                  icon={<Icon name="delete" />}
-                  onClick={() => onDelete(row.original)}
-                >
-                  Remove from scan
-                </MenuItem>
-              )}
-            </MenuContent>
-          </Menu>
-        );
-      }
-    });
-  }
 
   if (selectable) {
     columns.push({

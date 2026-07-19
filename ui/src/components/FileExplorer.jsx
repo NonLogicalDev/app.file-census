@@ -33,7 +33,6 @@ export default function FileExplorer(props) {
     deleteCheckSet = [],
     onAddDeleteCheck,
     onRemoveDeleteCheck,
-    onClearDeleteCheck,
     selectedPath,
     pathHistoryIndex,
     pathHistory,
@@ -450,11 +449,6 @@ export default function FileExplorer(props) {
           </span>
         )
       )}
-      <span className="ml-auto inline-flex items-center gap-1.5">
-        <button type="button" className={`${ctrlBtn} h-6 px-2`} onClick={onClearDeleteCheck} disabled={busy || !deleteCheckSet.length}>
-          Clear set
-        </button>
-      </span>
     </div>
   );
 
@@ -770,6 +764,20 @@ export default function FileExplorer(props) {
             >
               <Icon name="add" className="h-3.5 w-3.5" />
               {selectedCount ? `Add to Delete Check (${selectedCount})` : 'Add to Delete Check'}
+            </button>
+          )}
+          {typeof props.onRequestClearDeleteCheck === 'function' && (
+            <button
+              type="button"
+              className={`${ctrlBtn} w-[30px] justify-center px-0`}
+              onClick={props.onRequestClearDeleteCheck}
+              disabled={busy || !deleteCheckSet.length}
+              aria-label="Clear the Delete Check set"
+              title={deleteCheckSet.length
+                ? `Clear all ${deleteCheckSet.length} staged ${deleteCheckSet.length === 1 ? 'path' : 'paths'} from the Delete Check set`
+                : 'The Delete Check set is empty'}
+            >
+              <Icon name="delete" className="h-3.5 w-3.5" />
             </button>
           )}
           <button

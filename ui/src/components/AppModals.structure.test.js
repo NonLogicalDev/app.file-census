@@ -37,6 +37,18 @@ test('file details metadata and EXIF use the current compact data primitives', (
   assert.doesNotMatch(modalSource, /metadataRows\.map/);
 });
 
+test('locations groups collapse at both levels and clearing the set asks first', () => {
+  // Each location card AND each scan group inside it is collapsible.
+  assert.match(modalSource, /collapsedLocations/);
+  assert.match(modalSource, /collapsedScans/);
+  assert.match(modalSource, /function toggleKey/);
+  assert.match(modalSource, /\{!locationCollapsed &&/);
+  assert.match(modalSource, /\{!scanCollapsed &&/);
+  // Clear Delete Check set goes through a ConfirmModal.
+  assert.match(modalSource, /confirmClearDeleteCheck/);
+  assert.match(modalSource, /Clear Delete Check set/);
+});
+
 test('scan notes modal uses the supported notes RPC', () => {
   assert.match(modalSource, /<h2>Scan notes<\/h2>/);
   assert.match(modalSource, /scanNotesForm\.notes/);
