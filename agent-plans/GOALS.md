@@ -4,6 +4,9 @@ The app must let the user deduplicate photos/files across their backups (disk,
 SD, NAS): browse a backup, see honestly what is/isn't backed up elsewhere, plan
 deletions safely, and act.
 
+Update this file with new status of goals/planfiles as it will be used as your ongoing goal.
+Do not stop till all tasks are finished. You have autonomy to work on your own, try unblocking yourself if you get stuck, do not defer to me till you finish all work.
+
 ## Ground rule (after a trust breach)
 
 Every feature is proven by driving the REAL running app in Chrome via the CDP
@@ -20,14 +23,20 @@ Verified working in the live app (release serve, CDP-driven):
   [X copies exist]", Uniq = distinct hashes. Cross-location (External) verdicts.
 - TSV export of per-file verdicts (CLI + web + UI button).
 
-Known BROKEN / NOT shipped (must fix this session):
-- **Flat view is broken**: the web `scans.tree` RPC ignored the `flat` param, so
-  Flat returned the immediate-children TREE (folders), not a paginated list of
-  all descendant FILES. (Fix in progress: added `flat`/`backup` to
-  `TreeRpcParams` + branch to `scan_flat_page`.)
-- **Internal/External toggle is NOT built** — it exists only in the mock
-  prototype. Only External classification is live.
-- **Delete Check set is NOT built** — backend drafted (uncommitted), no UI.
+Fixed + CDP-verified this session:
+- **Flat view** — was broken (web `scans.tree` ignored `flat`, returned folders).
+  Fixed: added `flat`/`backup` to `TreeRpcParams` + branch to `scan_flat_page`.
+  Verified: Flat shows 500 file rows, "Showing 500 of 275,224", Load more.
+- **Internal/External toggle** — now REAL (was prototype-only). Cache v7 stores
+  per-file + per-folder Internal (same-disk) unique-content tiers. UI Scope
+  toggle. Verified: External Safe=0, Internal Safe=23,501 at root.
+- **Bogus "Safe 189255" filter count** — UI derived folder-safe from instance
+  file_count; fixed to use real safe_count. Verified: External Safe=0.
+
+Still to build this session:
+- **Delete Check set** — backend committed (members table, antichain add/remove,
+  survivor validate); needs unit tests + RPCs + UI (add-to-set, membership,
+  filter toggle), CDP-verified.
 
 ## Plan (this session, ~5h, each phase gated by CDP verification)
 

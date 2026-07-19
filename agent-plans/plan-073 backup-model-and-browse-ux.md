@@ -77,6 +77,16 @@ Durable direction the user gave while this plan was built:
 - Process: use $Tasker_Plan religiously to record all work updates; keep this
   steering guidance in the plan in summarized form; prototype + screenshot UX
   before wiring.
+- (2026-07-19, corrections) Do NOT present prototype mockups as shipped. The
+  Internal/External toggle was called "shipped-adjacent" but was prototype-only —
+  now built for real. Flat view was broken (web scans.tree ignored the flat
+  param, returned folders) — fixed. Backup "Safe" filter showed a bogus ~189K at
+  root (UI derived folder-safe as instance file_count minus unique unsafe/warn) —
+  fixed to use the real safe_count. Use Chrome via CDP (`scratchpad/cdp.mjs`) to
+  verify every feature in the RUNNING app (click → screenshot → assert); no
+  "done" without a live screenshot. Work autonomously to completion, self-unblock,
+  don't defer. Record ALL steering in the plan files; maintain
+  `agent-plans/GOALS.md` as the ongoing goal doc.
 
 ## Product Integration
 
