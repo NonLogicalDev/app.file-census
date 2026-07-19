@@ -45,6 +45,31 @@ Remaining polish (optional):
 - Flat-view Delete Check filtering is client-side on the loaded page only.
 - Actual file deletion is intentionally NOT wired (analysis/planning only).
 
+## SESSION OUTCOME (2026-07-19 ~05:30) — core dedup app DONE + CDP-verified
+
+The cross-backup dedup app is usable end-to-end (run `just run-release`):
+- Browse (fast, ~0.15s) with unique-content folder chips [N safe][N partial]
+  [N unsafe], file badges (Safe/Partial/Last copy/No off-disk backup + [X copies
+  exist]), Uniq = distinct hashes.
+- Flat: paginated table of all descendant files.
+- Scope toggle External (off-disk backup) vs Internal (same-disk duplicate) —
+  real, different data.
+- Backup filter All/Unsafe/Warn/Safe with correct counts.
+- Delete Check set: stage folders/files (antichain), toggle to filter to the
+  set, Validate the deletion impact (affected / safe to delete / would lose last
+  copy). Analysis only — no file deletion wired.
+- Export TSV of per-file verdicts.
+All CDP-verified in the running app. 73 backend + 8 perf-gate + 139 UI tests.
+
+### Remaining backlog (not blocking dedup use; need a fresh session / setup)
+- #7 UI "seizures" (blinking) during a LIVE scan — needs an active scan to
+  reproduce/verify; not exercised this session.
+- #18 residual "eventually-consistent" event-lag after the release-build fix
+  (RPCs are ~0.15s now; the debug build was the main cause).
+- #10 a separate "Hash Light" (blake3_light) column (Hash Full done).
+- #6 Ratatui alt CLI for scan progress (separate feature).
+- Internal-scope filtering in Flat is client-side on the loaded page only.
+
 ## Plan (this session, ~5h, each phase gated by CDP verification)
 
 1. Ground-truth audit of the live app via CDP (Browse/Flat/filters/export);
