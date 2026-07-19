@@ -537,6 +537,28 @@ treats missing storage as default. CDP receipts: rail h=757 flush right,
 populates on row click, drag 320→440 persisted; peek handle display=block +
 aria-disabled=false, peek-drag 292→370 persisted. Tests: 144 UI.
 
+## Inspector batch work log 2026-07-20 (~00:50) — CDP-verified live (`74c0dea`)
+
+Five AddTasks from the user, all shipped:
+1. Rail hover/peek: collapsed Inspector peeks from the right edge on hover
+   (fixed overlay + hover zone, mirror of the sidebar's pattern); resize
+   handle works during peek and holds it open through a drag. BUG caught by
+   receipts: appending 'relative' after 'fixed' let Tailwind's position order
+   flip the overlay into flow on the LEFT edge (left=422) — removed the class;
+   now tucks to an 18px right-edge sliver and peeks flush right.
+2. Inspector structure: [Icon+Name] / [Open File Info] / Preview(collapsible)
+   / info fields / EXIF(collapsible). Verified order 25<40<112<225 in
+   innerText offsets.
+3. Table keyboard nav: focusable grid, ArrowUp/Down move the inspected row
+   through the VISIBLE order (sorted + expanded subRows; parent/placeholder
+   skipped), scrollIntoView nearest. Verified: Down×2 @Photos→Hmm→MergedLib,
+   Up→Hmm.
+4. Folder inspection: single click on dir rows feeds the Inspector (Folder
+   label, Files 187,950 / Unique contents 76,210 for @Photos); dbl-click
+   still navigates. Preview/EXIF show "Select a file…" hints for dirs.
+5. Tree-in-table indent 16→48px per depth level (3x).
+Tests: 146 UI. Screenshots: shot-rail-peek.png.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
