@@ -20,3 +20,11 @@ export async function chooseFolder(currentPath = '') {
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke('folder_choose', { currentPath });
 }
+
+// Desktop counterpart of the web verdicts TSV download: native save dialog +
+// file write. Resolves to the saved path, or null when cancelled.
+export async function exportVerdictsNative({ scanId, path, backup, scope }) {
+  if (!isTauriRuntime()) return null;
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke('verdicts_export', { scanId, path, backup, scope });
+}

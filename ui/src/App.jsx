@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { chooseDatabase, chooseFolder, databaseInfo as loadDatabaseInfo, isTauriRuntime } from './api/desktopDatabase.js';
+import { chooseDatabase, chooseFolder, databaseInfo as loadDatabaseInfo, exportVerdictsNative, isTauriRuntime } from './api/desktopDatabase.js';
 import { requireTreePage } from './api/treePage.js';
 import { useRpcConnection } from './api/useRpcConnection.js';
 import AppModals from './components/AppModals.jsx';
@@ -1913,6 +1913,22 @@ export default function App() {
     setInspected(entry);
   }, []);
 
+  // Verdicts TSV export. Web: browser download via the HTTP endpoint.
+  // Desktop: no HTTP server, so a native save dialog writes the file.
+  async function exportVerdicts({ scanId, path, backup, scope }) {
+    if (!isTauriRuntime()) {
+      const params = new URLSearchParams({ path: path || '', backup, scope });
+      window.open(`/api/scans/${scanId}/verdicts?${params.toString()}`, '_blank');
+      return;
+    }
+    try {
+      const saved = await exportVerdictsNative({ scanId, path: path || '', backup, scope });
+      if (saved) setMessage(`Verdicts TSV saved to ${saved}`);
+    } catch (error) {
+      setMessage(error.message || String(error));
+    }
+  }
+
   // Inline Browse-table folder expansion: side-loads a folder's page WITHOUT
   // changing the selected path (that's loadTree's job). Respects the current
   // search query and Delete Check mode so expanded children match the table.
@@ -2223,6 +2239,7 @@ export default function App() {
     onLoadMoreDirectoryTree: loadMoreDirectoryTree,
     onOpenGridEntry: openGridEntry,
     onInspectFile: inspectFile,
+    onExportVerdicts: exportVerdicts,
     onLoadFolderChildren: loadFolderChildren,
     inspected,
     inspectorOpen,

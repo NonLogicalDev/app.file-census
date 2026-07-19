@@ -78,8 +78,9 @@ test('rows are keyboard-navigable and folders are inspectable', () => {
   assert.match(fileGridSource, /scrollIntoView\(\{ block: 'nearest' \}\)/);
   assert.match(fileGridSource, /data-path=\{row\.original\.path\}/);
   assert.match(fileGridSource, /if \(isSelectableRow\(row\.original\)\) onInspectRow\?\.\(row\.original\)/);
-  // Nested tree rows indent 48px per level (user: at least 3x the old 16px).
-  assert.match(fileGridSource, /row\.depth \* 48/);
+  // Nested rows indent 22px/level so each child's chevron centers under its
+  // parent's icon (user steering after 16px too subtle / 48px too much).
+  assert.match(fileGridSource, /row\.depth \* 22/);
 });
 
 test('file grid uses stable path identities and routes file inspection separately from folder navigation', () => {

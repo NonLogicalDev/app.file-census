@@ -538,10 +538,12 @@ export default function FileExplorer(props) {
           <button
             type="button"
             className={ctrlBtn}
-            onClick={() => {
-              const params = new URLSearchParams({ path: selectedPath || '', backup: backupFilter, scope });
-              window.open(`/api/scans/${activeScan.id}/verdicts?${params.toString()}`, '_blank');
-            }}
+            onClick={() => props.onExportVerdicts?.({
+              scanId: activeScan.id,
+              path: selectedPath || '',
+              backup: backupFilter,
+              scope
+            })}
             title={`Download a TSV of every file here with its ${scope} backup verdict and copy counts`}
           >
             <Icon name="download" className="h-3.5 w-3.5" /> Export TSV

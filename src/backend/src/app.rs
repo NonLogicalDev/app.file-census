@@ -66,6 +66,34 @@ impl AppCore {
         self.events.subscribe()
     }
 
+    /// Verdicts TSV for the desktop app's native save-dialog export — parity
+    /// with the web GET /api/scans/:id/verdicts download.
+    pub fn export_verdicts_tsv(
+        &self,
+        scan_id: &str,
+        path: &str,
+        backup: &str,
+        scope: &str,
+    ) -> Result<String> {
+        self.db.export_verdicts_tsv(scan_id, path, backup, scope)
+    }
+
+    /// Rebuilds the Delete Check survival classification off the request path
+    /// and announces completion so open UIs refresh their markers/rollups.
+    /// Parity with web.rs::spawn_delete_check_class_rebuild.
+    fn spawn_delete_check_class_rebuild(&self, scan_id: String) {
+        let db = (*self.db).clone();
+        let events = self.events.clone();
+        std::thread::spawn(move || match db.rebuild_delete_check_class(&scan_id) {
+            Ok(true) => events.emit(
+                "delete_check_class_ready",
+                serde_json::json!({ "scan_id": scan_id }),
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!("delete-check classification rebuild failed: {error:#}"),
+        });
+    }
+
     pub async fn handle(&self, method: &str, params: Option<Value>) -> Result<Value> {
         match method {
             "overview.get" => Ok(serde_json::to_value(self.db.overview()?)?),
@@ -216,12 +244,14 @@ impl AppCore {
                 let params: ScanIdParams = decode_params(params)?;
                 let scan = self.db.set_representative_scan(&params.scan_id)?;
                 self.events.emit("scan_representative_set", &scan);
+                crate::duplicate_cache::spawn_rebuild_if_stale(self.db.clone(), self.events.clone());
                 Ok(serde_json::to_value(scan)?)
             }
             "scans.clear_representative" => {
                 let params: ScanIdParams = decode_params(params)?;
                 let scan = self.db.clear_representative_scan(&params.scan_id)?;
                 self.events.emit("scan_representative_set", &scan);
+                crate::duplicate_cache::spawn_rebuild_if_stale(self.db.clone(), self.events.clone());
                 Ok(serde_json::to_value(scan)?)
             }
             "scans.update_notes" => {
@@ -243,6 +273,7 @@ impl AppCore {
                     "scan_excludes_updated",
                     serde_json::json!({ "scan_id": params.scan_id }),
                 );
+                crate::duplicate_cache::spawn_rebuild_if_stale(self.db.clone(), self.events.clone());
                 Ok(serde_json::to_value(excludes)?)
             }
             "scans.excludes.append_exact_path" => {
@@ -254,6 +285,7 @@ impl AppCore {
                     "scan_excludes_updated",
                     serde_json::json!({ "scan_id": params.scan_id }),
                 );
+                crate::duplicate_cache::spawn_rebuild_if_stale(self.db.clone(), self.events.clone());
                 Ok(serde_json::to_value(excludes)?)
             }
             "scans.delete_check" => {
@@ -273,21 +305,26 @@ impl AppCore {
             }
             "delete_check.add" => {
                 let params: DeleteCheckAddRpcParams = decode_params(params)?;
-                Ok(serde_json::to_value(self.db.delete_check_add(
+                let outcome = self.db.delete_check_add(
                     &params.scan_id,
                     &params.path,
                     &params.kind,
-                )?)?)
+                )?;
+                if outcome.added {
+                    self.spawn_delete_check_class_rebuild(params.scan_id.clone());
+                }
+                Ok(serde_json::to_value(outcome)?)
             }
             "delete_check.remove" => {
                 let params: DeleteCheckRemoveRpcParams = decode_params(params)?;
-                Ok(serde_json::to_value(
-                    self.db.delete_check_remove(&params.scan_id, &params.path)?,
-                )?)
+                let members = self.db.delete_check_remove(&params.scan_id, &params.path)?;
+                self.spawn_delete_check_class_rebuild(params.scan_id);
+                Ok(serde_json::to_value(members)?)
             }
             "delete_check.clear" => {
                 let params: ScanIdParams = decode_params(params)?;
                 self.db.delete_check_clear(&params.scan_id)?;
+                self.spawn_delete_check_class_rebuild(params.scan_id.clone());
                 Ok(serde_json::to_value(self.db.delete_check_set(&params.scan_id)?)?)
             }
             "delete_check.validate" => {
@@ -296,6 +333,12 @@ impl AppCore {
             }
             "scans.tree" => {
                 let params: TreeRpcParams = decode_params(params)?;
+                // Keep the Delete Check classification pass fresh in the
+                // background while the mode is in use (idempotent; emits
+                // delete_check_class_ready when done) — parity with web.rs.
+                if params.delete_check && !self.db.delete_check_class_is_ready(&params.scan_id)? {
+                    self.spawn_delete_check_class_rebuild(params.scan_id.clone());
+                }
                 if params.flat {
                     Ok(serde_json::to_value(self.db.scan_flat_page(
                         &params.scan_id,
@@ -856,6 +899,35 @@ struct FilePathActionParams {
 mod tests {
     use super::*;
     use crate::db::NewFile;
+
+    /// Extracts `"name.space" =>` match-arm method names from a source file.
+    fn rpc_methods(source: &str) -> std::collections::BTreeSet<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let rest = line.strip_prefix('"')?;
+                let end = rest.find('"')?;
+                let name = &rest[..end];
+                let after = rest[end + 1..].trim_start();
+                (after.starts_with("=>") && name.contains('.')).then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    /// The desktop app must be a SUPERSET of the web app: every RPC the web
+    /// UI can issue must be handled natively too (the web UI and Tauri UI are
+    /// the same bundle). Guards against web.rs-only feature drift.
+    #[test]
+    fn native_app_handles_every_web_rpc() {
+        let web = rpc_methods(include_str!("web.rs"));
+        let app = rpc_methods(include_str!("app.rs"));
+        let missing: Vec<_> = web.difference(&app).collect();
+        assert!(
+            missing.is_empty(),
+            "app.rs is missing web RPC handlers: {missing:?}"
+        );
+    }
 
     #[test]
     fn scan_action_path_keeps_indexed_entry_under_nested_offset() {

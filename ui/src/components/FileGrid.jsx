@@ -793,8 +793,10 @@ function baseColumns(options) {
 
 function NameCell({ fullPathName, row, value, expandableFolders = false, onToggleFolderExpand }) {
   const entry = row.original;
-  // row.depth > 0 = an inline-expanded child; indent it under its folder.
-  const indent = row.depth ? { paddingInlineStart: `${row.depth * 48}px` } : undefined;
+  // row.depth > 0 = an inline-expanded child. 22px/level lines the child's
+  // chevron center (+8px) up with its parent's icon center (16px chevron +
+  // 7px gap + 7.5px half-icon ≈ 30.5px into the parent's content).
+  const indent = row.depth ? { paddingInlineStart: `${row.depth * 22}px` } : undefined;
   if (entry.kind === 'placeholder') {
     return (
       <span className={fileNameCellClassName({ kind: 'file' })} style={indent}>

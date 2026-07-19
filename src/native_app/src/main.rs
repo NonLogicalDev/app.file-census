@@ -14,7 +14,8 @@ fn main() {
             rpc,
             database_info,
             database_choose,
-            folder_choose
+            folder_choose,
+            verdicts_export
         ])
         .setup(|app| {
             let db_path = initial_db_path(app)?;
@@ -99,6 +100,42 @@ fn database_choose(
         },
     );
     Ok(Some(info))
+}
+
+/// Native counterpart of the web app's GET /api/scans/:id/verdicts TSV
+/// download: builds the TSV and writes it to a user-chosen file. Returns the
+/// saved path, or None when the dialog is cancelled.
+#[tauri::command]
+fn verdicts_export(
+    state: State<'_, Mutex<DesktopState>>,
+    scan_id: String,
+    path: Option<String>,
+    backup: Option<String>,
+    scope: Option<String>,
+) -> Result<Option<String>, String> {
+    let core = state
+        .lock()
+        .map_err(|_| "desktop state lock poisoned".to_string())?
+        .core()?;
+    let tsv = core
+        .export_verdicts_tsv(
+            &scan_id,
+            path.as_deref().unwrap_or(""),
+            backup.as_deref().unwrap_or("all"),
+            scope.as_deref().unwrap_or("external"),
+        )
+        .map_err(|error| error.to_string())?;
+    let suggested = format!("verdicts-{}.tsv", &scan_id[..scan_id.len().min(8)]);
+    let Some(target) = rfd::FileDialog::new()
+        .set_title("Export backup verdicts TSV")
+        .set_file_name(&suggested)
+        .add_filter("Tab-separated values", &["tsv"])
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    std::fs::write(&target, tsv).map_err(|error| error.to_string())?;
+    Ok(Some(target.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
