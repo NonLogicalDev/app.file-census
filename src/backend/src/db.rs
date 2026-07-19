@@ -160,6 +160,10 @@ pub struct FileOccurrence {
     pub mtime: Option<String>,
     pub mode: Option<u32>,
     pub error: Option<String>,
+    /// True when this occurrence's scan is its location's effective scan (the
+    /// representative scan, else the latest complete full-hash scan).
+    #[serde(default)]
+    pub representative: bool,
 }
 
 /// A filesystem target that was authorized against one scan's current
@@ -288,23 +292,24 @@ pub struct TreePage {
     pub delete_check_summary: Option<DeleteCheckSummary>,
 }
 
-/// Unique-content tier totals over the Delete Check set's members (summed from
-/// each member's own cache row; members are an antichain so nothing nests, but
-/// content shared BETWEEN members counts once per member — same caveat as
-/// sibling folder chips).
+/// Delete Check MODE summary: FILE counts of staged files classified by what
+/// SURVIVES deleting the set (safe = exact survivor in the remain-set or on
+/// another location; warn = light survivor only; unsafe = last copy). Totals
+/// cover the whole set; `folder_dc_*` covers the browsed folder. Valid when
+/// `ready` (the background classification pass matches the current set).
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DeleteCheckSummary {
+    pub ready: bool,
     pub folder_members: u64,
     pub file_members: u64,
-    /// Staged file instances (files under staged folders + staged files).
+    /// Total staged files (set-wide), = dc_safe + dc_warn + dc_unsafe.
     pub file_count: u64,
-    pub safe_count: u64,
-    pub warn_count: u64,
-    pub unsafe_count: u64,
-    pub int_safe_count: u64,
-    pub int_warn_count: u64,
-    pub int_unsafe_count: u64,
-    pub cache_ready: bool,
+    pub dc_safe: u64,
+    pub dc_warn: u64,
+    pub dc_unsafe: u64,
+    pub folder_dc_safe: u64,
+    pub folder_dc_warn: u64,
+    pub folder_dc_unsafe: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -614,6 +619,27 @@ impl Database {
                 kind TEXT NOT NULL CHECK (kind IN ('file', 'dir')),
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (scan_id, path)
+            );
+
+            -- Delete Check classification rollups: for the current set, per-dir
+            -- FILE counts of staged files by what SURVIVES the deletion (safe =
+            -- exact survivor in the remain-set or externally, warn = light-only
+            -- survivor, unsafe = nothing survives). path='' row = set totals.
+            -- Valid only while the meta fingerprint (members + cache run)
+            -- matches; rebuilt in the background on set changes.
+            CREATE TABLE IF NOT EXISTS delete_check_class (
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                dc_safe INTEGER NOT NULL DEFAULT 0,
+                dc_warn INTEGER NOT NULL DEFAULT 0,
+                dc_unsafe INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (scan_id, path)
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS delete_check_class_meta (
+                scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,
+                fingerprint TEXT NOT NULL,
+                built_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS duplicate_cache_runs (
@@ -2153,17 +2179,21 @@ impl Database {
         let has_more = end < entries.len();
         let next_offset = has_more.then(|| u32::try_from(end).unwrap_or(u32::MAX));
         let folder_summary = folder_summary_from_cache(&tx, ready_run_id, scan_id, &normalized)?;
+        let mut page_entries: Vec<TreeEntry> =
+            entries.into_iter().skip(start).take(end - start).collect();
         let delete_check_summary = match dc_members.as_deref() {
-            Some(members) => Some(delete_check_summary_from_cache(
+            Some(members) => Some(apply_delete_check_classification(
                 &tx,
-                ready_run_id,
                 scan_id,
+                ready_run_id,
                 members,
+                &normalized,
+                &mut page_entries,
             )?),
             None => None,
         };
         let page = TreePage {
-            entries: entries.into_iter().skip(start).take(end - start).collect(),
+            entries: page_entries,
             limit,
             offset: u32::try_from(start).unwrap_or(u32::MAX),
             total,
@@ -2367,11 +2397,13 @@ impl Database {
                     scan_id,
                     &normalized,
                 )?,
-                delete_check_summary: Some(delete_check_summary_from_cache(
+                delete_check_summary: Some(apply_delete_check_classification(
                     &tx,
-                    ready_run_id.as_deref(),
                     scan_id,
+                    ready_run_id.as_deref(),
                     &members,
+                    &normalized,
+                    &mut [],
                 )?),
             };
             tx.commit()?;
@@ -2549,12 +2581,15 @@ impl Database {
         let next_offset = has_more.then(|| end as u32);
         let folder_summary =
             folder_summary_from_cache(&tx, ready_run_id.as_deref(), scan_id, &normalized)?;
+        let mut entries = entries;
         let delete_check_summary = if delete_check {
-            Some(delete_check_summary_from_cache(
+            Some(apply_delete_check_classification(
                 &tx,
-                ready_run_id.as_deref(),
                 scan_id,
+                ready_run_id.as_deref(),
                 &members,
+                &normalized,
+                &mut entries,
             )?)
         } else {
             None
@@ -2814,6 +2849,193 @@ impl Database {
         })
     }
 
+    /// True when the persisted Delete Check classification matches the current
+    /// set + cache run (cheap check used to decide background rebuilds).
+    pub fn delete_check_class_is_ready(&self, scan_id: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        let members = delete_check_members_conn(&conn, scan_id)?;
+        let cache = Self::current_duplicate_cache_status_for_conn(&conn)?;
+        let run_id = match (cache.status.as_str(), cache.run_id) {
+            ("ready", Some(id)) => id,
+            _ => return Ok(false),
+        };
+        let fingerprint = delete_check_class_fingerprint(&members, &run_id);
+        let meta: Option<String> = conn
+            .query_row(
+                "SELECT fingerprint FROM delete_check_class_meta WHERE scan_id = ?1",
+                [scan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(meta.as_deref() == Some(fingerprint.as_str()))
+    }
+
+    /// Rebuilds the persisted Delete Check classification (delete_check_class):
+    /// per-directory FILE counts of staged files by survival after deleting the
+    /// set — safe (exact survivor in the remain-set or externally), warn (light
+    /// survivor only), unsafe (last copy). Fingerprinted by members + cache run
+    /// so pages know when the rollups are current. Returns whether it built.
+    pub fn rebuild_delete_check_class(&self, scan_id: &str) -> Result<bool> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        ensure_scan_exists(&tx, scan_id)?;
+        ensure_scan_exclusion_cache_ready(&tx, scan_id)?;
+        let members = delete_check_members_conn(&tx, scan_id)?;
+        let cache = Self::current_duplicate_cache_status_for_conn(&tx)?;
+        let run_id = match (cache.status.as_str(), cache.run_id.clone()) {
+            ("ready", Some(id)) => id,
+            // Without a ready cache there are no copy counts to classify with.
+            _ => return Ok(false),
+        };
+        let fingerprint = delete_check_class_fingerprint(&members, &run_id);
+
+        tx.execute("DELETE FROM delete_check_class WHERE scan_id = ?1", [scan_id])?;
+        if members.is_empty() {
+            tx.execute(
+                "INSERT OR REPLACE INTO delete_check_class_meta (scan_id, fingerprint, built_at) VALUES (?1, ?2, ?3)",
+                params![scan_id, fingerprint, Utc::now().to_rfc3339()],
+            )?;
+            tx.commit()?;
+            return Ok(true);
+        }
+
+        // Load every staged file with its cached copy counts + ext-light flag.
+        let (predicate, binds) = delete_check_member_predicate(&members);
+        let sql = format!(
+            "SELECT f.path, f.blake3, f.blake3_light, f.size, \
+                    COALESCE(dc.copies_here, 0), COALESCE(dc.copies_away, 0), \
+                    COALESCE(dc.warn_file_count, 0) \
+             FROM files f \
+             LEFT JOIN scan_excluded_files ex ON ex.scan_id = f.scan_id AND ex.file_id = f.id \
+             LEFT JOIN duplicate_cache_path_counts dc \
+                    ON dc.run_id = ?1 AND dc.scan_id = f.scan_id AND dc.path = f.path \
+             WHERE ex.file_id IS NULL AND f.scan_id = ?2 AND f.kind = 'file' AND f.error IS NULL \
+               AND ({predicate})"
+        );
+        struct Staged {
+            path: String,
+            blake3: String,
+            light: String,
+            size: u64,
+            copies_here: u64,
+            copies_away: u64,
+            ext_light: bool,
+        }
+        let mut params_values: Vec<rusqlite::types::Value> =
+            vec![run_id.clone().into(), scan_id.to_string().into()];
+        params_values.extend(binds.iter().cloned());
+        let staged: Vec<Staged> = {
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params_values.iter()), |row| {
+                Ok(Staged {
+                    path: row.get(0)?,
+                    blake3: row.get(1)?,
+                    light: row.get(2)?,
+                    size: row.get::<_, i64>(3)?.max(0) as u64,
+                    copies_here: row.get::<_, i64>(4)?.max(0) as u64,
+                    copies_away: row.get::<_, i64>(5)?.max(0) as u64,
+                    ext_light: row.get::<_, i64>(6)? > 0,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        // Inside-set instance counts per content, exact and light.
+        let mut inside_exact = HashMap::<(String, u64), u64>::new();
+        let mut inside_light = HashMap::<(String, u64), u64>::new();
+        for file in &staged {
+            *inside_exact.entry((file.blake3.clone(), file.size)).or_default() += 1;
+            if !file.light.is_empty() {
+                *inside_light.entry((file.light.clone(), file.size)).or_default() += 1;
+            }
+        }
+        // Whole-scan light-instance totals for the staged light hashes (exact
+        // totals are already cached as copies_here). Temp table keeps the IN
+        // list unbounded.
+        tx.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS dc_class_light (h TEXT PRIMARY KEY)",
+            [],
+        )?;
+        tx.execute("DELETE FROM dc_class_light", [])?;
+        {
+            let mut insert = tx.prepare("INSERT OR IGNORE INTO dc_class_light (h) VALUES (?1)")?;
+            for key in inside_light.keys() {
+                insert.execute([&key.0])?;
+            }
+        }
+        let mut light_scan_totals = HashMap::<(String, u64), u64>::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT f.blake3_light, f.size, COUNT(*) FROM files f \
+                 JOIN dc_class_light t ON t.h = f.blake3_light \
+                 LEFT JOIN scan_excluded_files ex ON ex.scan_id = f.scan_id AND ex.file_id = f.id \
+                 WHERE ex.file_id IS NULL AND f.scan_id = ?1 AND f.kind = 'file' AND f.error IS NULL \
+                 GROUP BY f.blake3_light, f.size",
+            )?;
+            let rows = stmt.query_map([scan_id], |row| {
+                Ok(((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u64), row.get::<_, i64>(2)?.max(0) as u64))
+            })?;
+            for row in rows {
+                let (key, count) = row?;
+                light_scan_totals.insert(key, count);
+            }
+        }
+
+        // Classify each staged file against the survivors and roll up per dir.
+        let mut rollups = HashMap::<String, (u64, u64, u64)>::new();
+        for file in &staged {
+            let tier = classify_against_remain(
+                file.copies_here,
+                file.copies_away,
+                inside_exact
+                    .get(&(file.blake3.clone(), file.size))
+                    .copied()
+                    .unwrap_or(1),
+                if file.light.is_empty() {
+                    None
+                } else {
+                    Some((
+                        light_scan_totals
+                            .get(&(file.light.clone(), file.size))
+                            .copied()
+                            .unwrap_or(0),
+                        inside_light
+                            .get(&(file.light.clone(), file.size))
+                            .copied()
+                            .unwrap_or(0),
+                    ))
+                },
+                file.ext_light,
+            );
+            let mut bump = |path: String| {
+                let slot = rollups.entry(path).or_default();
+                match tier {
+                    2 => slot.0 += 1,
+                    1 => slot.1 += 1,
+                    _ => slot.2 += 1,
+                }
+            };
+            bump(String::new()); // whole-set totals row
+            for ancestor in duplicate_cache_ancestor_paths(&file.path) {
+                bump(ancestor);
+            }
+        }
+        {
+            let mut insert = tx.prepare(
+                "INSERT OR REPLACE INTO delete_check_class (scan_id, path, dc_safe, dc_warn, dc_unsafe) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (path, (safe, warn, unsafe_)) in &rollups {
+                insert.execute(params![scan_id, path, safe, warn, unsafe_])?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO delete_check_class_meta (scan_id, fingerprint, built_at) VALUES (?1, ?2, ?3)",
+            params![scan_id, fingerprint, Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn find_files(&self, query: &str, limit: u32) -> Result<Vec<FileRow>> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
@@ -2932,6 +3154,7 @@ impl Database {
         size: u64,
         requested_limit: u32,
         requested_offset: u64,
+        representative_only: bool,
     ) -> Result<FileOccurrencePage> {
         let path = normalize_file_path(path);
         if path.is_empty() {
@@ -2996,6 +3219,18 @@ impl Database {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             x
         };
+        // Mark occurrences whose scan is its location's effective scan, and —
+        // unless every scan was requested — restrict to those, BEFORE
+        // pagination so totals reflect the filtered set.
+        let effective: std::collections::HashSet<String> =
+            duplicate_scope_scan_ids(&tx, None)?.into_iter().collect();
+        let mut occurrences = occurrences;
+        for occurrence in &mut occurrences {
+            occurrence.representative = effective.contains(&occurrence.scan_id);
+        }
+        if representative_only {
+            occurrences.retain(|occurrence| occurrence.representative);
+        }
         let total = occurrences.len();
         let limit = requested_limit.max(1);
         let start = usize::try_from(requested_offset)
@@ -3448,6 +3683,67 @@ fn delete_check_members_conn(conn: &Connection, scan_id: &str) -> Result<Vec<Del
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
+/// SQL predicate matching files inside the Delete Check set (staged files by
+/// equality, staged folders by prefix), with its bind values.
+fn delete_check_member_predicate(
+    members: &[DeleteCheckMember],
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut clauses = Vec::new();
+    let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+    for member in members {
+        if member.kind == "dir" {
+            clauses.push("f.path LIKE ? ESCAPE '\\'".to_string());
+            binds.push(
+                format!("{}/%", member.path.replace('%', "\\%").replace('_', "\\_")).into(),
+            );
+        } else {
+            clauses.push("f.path = ?".to_string());
+            binds.push(member.path.clone().into());
+        }
+    }
+    (clauses.join(" OR "), binds)
+}
+
+/// Fingerprint for the persisted Delete Check classification: any change to the
+/// members or the underlying duplicate-cache run invalidates it.
+fn delete_check_class_fingerprint(members: &[DeleteCheckMember], run_id: &str) -> String {
+    let mut payload = String::from(run_id);
+    for member in members {
+        payload.push('\u{1f}');
+        payload.push_str(&member.kind);
+        payload.push(':');
+        payload.push_str(&member.path);
+    }
+    blake3::hash(payload.as_bytes()).to_hex().to_string()
+}
+
+/// Survival tier of one staged file after deleting the whole set:
+/// 2 = safe (an exact copy survives in the remain-set or on another location),
+/// 1 = warn/partial (only a light-hash survivor), 0 = unsafe (last copy).
+/// `light` is (whole-scan light instances, inside-set light instances) when the
+/// file has a light hash.
+fn classify_against_remain(
+    copies_here: u64,
+    copies_away: u64,
+    inside_exact: u64,
+    light: Option<(u64, u64)>,
+    ext_light: bool,
+) -> u8 {
+    let exact_in_scan = copies_here + 1;
+    let exact_remain = exact_in_scan.saturating_sub(inside_exact);
+    if copies_away > 0 || exact_remain > 0 {
+        return 2;
+    }
+    let light_remain = light
+        .map(|(scan_total, inside)| scan_total.saturating_sub(inside))
+        .unwrap_or(0);
+    if light_remain > 0 || ext_light {
+        1
+    } else {
+        0
+    }
+}
+
 /// True when a browse row at `path` belongs in the Delete Check scope: it is a
 /// staged member, lives under a staged folder, or is an ancestor of a staged
 /// member (ancestors stay visible so the chain to staged paths is navigable).
@@ -3850,53 +4146,210 @@ fn folder_summary_from_cache(
     .map_err(Into::into)
 }
 
-/// Tier totals over the Delete Check set, O(members): each member's own cache
-/// row already carries its unique-content rollup (dir) or one-hot tier (file).
-fn delete_check_summary_from_cache(
+/// Applies Delete Check MODE classification to a served page and returns the
+/// mode summary. File rows are re-classified LIVE against what survives the
+/// deletion (page-local bounded queries); dir rows and the set/folder totals
+/// come from the persisted `delete_check_class` rollups when they match the
+/// current fingerprint (`ready`), otherwise counts stay zero until the
+/// background pass lands.
+fn apply_delete_check_classification(
     conn: &Connection,
-    run_id: Option<&str>,
     scan_id: &str,
+    run_id: Option<&str>,
     members: &[DeleteCheckMember],
+    normalized_prefix: &str,
+    entries: &mut [TreeEntry],
 ) -> Result<DeleteCheckSummary> {
     let mut summary = DeleteCheckSummary {
         folder_members: members.iter().filter(|m| m.kind == "dir").count() as u64,
         file_members: members.iter().filter(|m| m.kind == "file").count() as u64,
-        cache_ready: run_id.is_some(),
         ..Default::default()
     };
     let run_id = match run_id {
         Some(id) => id,
         None => return Ok(summary),
     };
-    let mut stmt = conn.prepare(
-        "SELECT file_count, safe_file_count, warn_file_count, unsafe_file_count, \
-                int_safe_file_count, int_warn_file_count, int_unsafe_file_count \
-         FROM duplicate_cache_path_counts \
-         WHERE run_id = ?1 AND scan_id = ?2 AND path = ?3",
-    )?;
-    for member in members {
-        let row: Option<(i64, i64, i64, i64, i64, i64, i64)> = stmt
-            .query_row(params![run_id, scan_id, member.path], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            })
-            .optional()?;
-        if let Some((files, safe, warn, unsafe_, int_safe, int_warn, int_unsafe)) = row {
-            summary.file_count += files.max(0) as u64;
-            summary.safe_count += safe.max(0) as u64;
-            summary.warn_count += warn.max(0) as u64;
-            summary.unsafe_count += unsafe_.max(0) as u64;
-            summary.int_safe_count += int_safe.max(0) as u64;
-            summary.int_warn_count += int_warn.max(0) as u64;
-            summary.int_unsafe_count += int_unsafe.max(0) as u64;
+
+    // Rollups: valid only when the persisted pass matches members + cache run.
+    let fingerprint = delete_check_class_fingerprint(members, run_id);
+    let meta: Option<String> = conn
+        .query_row(
+            "SELECT fingerprint FROM delete_check_class_meta WHERE scan_id = ?1",
+            [scan_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    summary.ready = meta.as_deref() == Some(fingerprint.as_str());
+    if summary.ready {
+        let class_row = |path: &str| -> Result<Option<(u64, u64, u64)>> {
+            conn.query_row(
+                "SELECT dc_safe, dc_warn, dc_unsafe FROM delete_check_class WHERE scan_id = ?1 AND path = ?2",
+                params![scan_id, path],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?.max(0) as u64,
+                        row.get::<_, i64>(1)?.max(0) as u64,
+                        row.get::<_, i64>(2)?.max(0) as u64,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        };
+        if let Some((safe, warn, unsafe_)) = class_row("")? {
+            summary.dc_safe = safe;
+            summary.dc_warn = warn;
+            summary.dc_unsafe = unsafe_;
+            summary.file_count = safe + warn + unsafe_;
         }
+        let folder = normalized_prefix.strip_suffix('/').unwrap_or(normalized_prefix);
+        if folder.is_empty() {
+            summary.folder_dc_safe = summary.dc_safe;
+            summary.folder_dc_warn = summary.dc_warn;
+            summary.folder_dc_unsafe = summary.dc_unsafe;
+        } else if let Some((safe, warn, unsafe_)) = class_row(folder)? {
+            summary.folder_dc_safe = safe;
+            summary.folder_dc_warn = warn;
+            summary.folder_dc_unsafe = unsafe_;
+        }
+        // Dir rows show their delete-set survival rollups in the mode.
+        for entry in entries.iter_mut() {
+            if entry.kind != "dir" {
+                continue;
+            }
+            if let Some((safe, warn, unsafe_)) = class_row(&entry.path)? {
+                entry.safe_count = safe;
+                entry.warn_count = warn;
+                entry.unsafe_count = unsafe_;
+                entry.int_safe_count = safe;
+                entry.int_warn_count = warn;
+                entry.int_unsafe_count = unsafe_;
+            } else {
+                entry.safe_count = 0;
+                entry.warn_count = 0;
+                entry.unsafe_count = 0;
+                entry.int_safe_count = 0;
+                entry.int_warn_count = 0;
+                entry.int_unsafe_count = 0;
+            }
+        }
+    }
+
+    // Live per-file classification for the visible page (bounded queries).
+    let files: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind == "file" && !e.backup_status.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    if files.is_empty() || members.is_empty() {
+        return Ok(summary);
+    }
+    let (predicate, dc_binds) = delete_check_member_predicate(members);
+
+    // Inside-set exact counts for the page's contents.
+    let mut inside_exact = HashMap::<(String, u64), u64>::new();
+    {
+        let mut hashes: Vec<String> = files
+            .iter()
+            .filter_map(|&i| entries[i].blake3.clone())
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        if !hashes.is_empty() {
+            let in_list = vec!["?"; hashes.len()].join(",");
+            let sql = format!(
+                "SELECT f.blake3, f.size, COUNT(*) FROM files f \
+                 LEFT JOIN scan_excluded_files ex ON ex.scan_id = f.scan_id AND ex.file_id = f.id \
+                 WHERE ex.file_id IS NULL AND f.scan_id = ? AND f.kind = 'file' AND f.error IS NULL \
+                   AND ({predicate}) AND f.blake3 IN ({in_list}) \
+                 GROUP BY f.blake3, f.size"
+            );
+            let mut values: Vec<rusqlite::types::Value> = vec![scan_id.to_string().into()];
+            values.extend(dc_binds.iter().cloned());
+            values.extend(hashes.iter().map(|h| rusqlite::types::Value::from(h.clone())));
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u64),
+                    row.get::<_, i64>(2)?.max(0) as u64,
+                ))
+            })?;
+            for row in rows {
+                let (key, count) = row?;
+                inside_exact.insert(key, count);
+            }
+        }
+    }
+    // Light totals (scan-wide + inside-set) for the page's light hashes.
+    let mut light_scan = HashMap::<(String, u64), u64>::new();
+    let mut light_inside = HashMap::<(String, u64), u64>::new();
+    {
+        let mut lights: Vec<String> = files
+            .iter()
+            .filter_map(|&i| entries[i].blake3_light.clone())
+            .filter(|l| !l.is_empty())
+            .collect();
+        lights.sort();
+        lights.dedup();
+        if !lights.is_empty() {
+            let in_list = vec!["?"; lights.len()].join(",");
+            for (map, extra_where) in [
+                (&mut light_scan, String::new()),
+                (&mut light_inside, format!(" AND ({predicate})")),
+            ] {
+                let sql = format!(
+                    "SELECT f.blake3_light, f.size, COUNT(*) FROM files f \
+                     LEFT JOIN scan_excluded_files ex ON ex.scan_id = f.scan_id AND ex.file_id = f.id \
+                     WHERE ex.file_id IS NULL AND f.scan_id = ? AND f.kind = 'file' AND f.error IS NULL{extra_where} \
+                       AND f.blake3_light IN ({in_list}) \
+                     GROUP BY f.blake3_light, f.size"
+                );
+                let mut values: Vec<rusqlite::types::Value> = vec![scan_id.to_string().into()];
+                if !extra_where.is_empty() {
+                    values.extend(dc_binds.iter().cloned());
+                }
+                values.extend(lights.iter().map(|l| rusqlite::types::Value::from(l.clone())));
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                    Ok((
+                        (row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u64),
+                        row.get::<_, i64>(2)?.max(0) as u64,
+                    ))
+                })?;
+                for row in rows {
+                    let (key, count) = row?;
+                    map.insert(key, count);
+                }
+            }
+        }
+    }
+    for &i in &files {
+        let entry = &mut entries[i];
+        let blake3 = entry.blake3.clone().unwrap_or_default();
+        let light = entry.blake3_light.clone().unwrap_or_default();
+        let ext_light = entry.backup_status == "warn";
+        let tier = classify_against_remain(
+            entry.copies_here,
+            entry.copies_away,
+            inside_exact.get(&(blake3, entry.size)).copied().unwrap_or(1),
+            if light.is_empty() {
+                None
+            } else {
+                Some((
+                    light_scan.get(&(light.clone(), entry.size)).copied().unwrap_or(0),
+                    light_inside.get(&(light, entry.size)).copied().unwrap_or(0),
+                ))
+            },
+            ext_light,
+        );
+        let word = match tier {
+            2 => "safe",
+            1 => "warn",
+            _ => "unsafe",
+        };
+        entry.backup_status = word.to_string();
+        entry.internal_status = word.to_string();
     }
     Ok(summary)
 }
@@ -5821,6 +6274,17 @@ mod tests {
     }
 
     #[test]
+    fn classify_against_remain_covers_all_survivor_tiers() {
+        // (copies_here, copies_away, inside_exact, light(scan,inside), ext_light)
+        assert_eq!(classify_against_remain(0, 1, 1, None, false), 2, "external exact survivor");
+        assert_eq!(classify_against_remain(1, 0, 1, None, false), 2, "remain-set twin survives");
+        assert_eq!(classify_against_remain(1, 0, 2, None, false), 0, "both twins staged -> lost");
+        assert_eq!(classify_against_remain(0, 0, 1, Some((2, 1)), false), 1, "light survivor in remain-set");
+        assert_eq!(classify_against_remain(0, 0, 1, Some((1, 1)), false), 0, "only light twin is staged too");
+        assert_eq!(classify_against_remain(0, 0, 1, None, true), 1, "external light survivor");
+    }
+
+    #[test]
     fn delete_check_set_antichain_and_survivor_validation() {
         let root = test_root("delete-check-set");
         let db = Database::open(root.join("state.db")).unwrap();
@@ -5911,14 +6375,46 @@ mod tests {
         db.delete_check_remove(&s1, "dir2/d.jpg").unwrap();
         let root2 = db.scan_tree_page(&s1, "", Some(50), 0, 1, None, true).unwrap();
         assert_eq!(names(&root2), vec!["dir1"]);
-        // Set summary = dir1's own cache rollup (ext: A safe, B+C unsafe;
-        // int: B+C have same-disk twins, A doesn't).
+        // Before the classification pass runs, the summary reports not-ready.
         let summary = root2.delete_check_summary.as_ref().expect("summary in dc mode");
-        assert!(summary.cache_ready);
         assert_eq!(summary.folder_members, 1);
-        assert_eq!(summary.file_count, 4, "staged instances");
-        assert_eq!((summary.safe_count, summary.warn_count, summary.unsafe_count), (1, 0, 2));
-        assert_eq!((summary.int_safe_count, summary.int_unsafe_count), (2, 1));
+        assert!(!summary.ready, "no classification pass has run yet");
+
+        // AGREED MODEL: markers re-classify against what SURVIVES the deletion.
+        // Set = {dir1}: a survives externally (bak), b survives via remain-set
+        // twin dir2/d.jpg, c+c2 are both staged twins -> nothing survives.
+        assert!(db.rebuild_delete_check_class(&s1).unwrap());
+        let root3 = db.scan_tree_page(&s1, "", Some(50), 0, 1, None, true).unwrap();
+        let summary = root3.delete_check_summary.as_ref().unwrap();
+        assert!(summary.ready);
+        assert_eq!(summary.file_count, 4);
+        assert_eq!((summary.dc_safe, summary.dc_warn, summary.dc_unsafe), (2, 0, 2));
+        assert_eq!(
+            (summary.folder_dc_safe, summary.folder_dc_warn, summary.folder_dc_unsafe),
+            (2, 0, 2),
+            "root folder view covers the whole set"
+        );
+        // The dir1 folder row carries the survival rollup.
+        let dir1_row = root3.entries.iter().find(|e| e.name == "dir1").unwrap();
+        assert_eq!((dir1_row.safe_count, dir1_row.warn_count, dir1_row.unsafe_count), (2, 0, 2));
+        // File rows classify LIVE per page.
+        let dir1_page = db.scan_tree_page(&s1, "dir1", Some(50), 0, 1, None, true).unwrap();
+        let status = |name: &str| {
+            dir1_page.entries.iter().find(|e| e.name == name).unwrap().backup_status.clone()
+        };
+        assert_eq!(status("a.jpg"), "safe", "external survivor");
+        assert_eq!(status("b.jpg"), "safe", "remain-set twin survives");
+        assert_eq!(status("c.jpg"), "unsafe", "both twins staged");
+        assert_eq!(status("c2.jpg"), "unsafe");
+        // Staging the remain-set twin flips b to unsafe.
+        assert!(db.delete_check_add(&s1, "dir2/d.jpg", "file").unwrap().added);
+        assert!(db.rebuild_delete_check_class(&s1).unwrap());
+        let dir1_page2 = db.scan_tree_page(&s1, "dir1", Some(50), 0, 1, None, true).unwrap();
+        let b_status = dir1_page2.entries.iter().find(|e| e.name == "b.jpg").unwrap();
+        assert_eq!(b_status.backup_status, "unsafe", "its twin is staged too");
+        let summary2 = dir1_page2.delete_check_summary.as_ref().unwrap();
+        assert_eq!((summary2.dc_safe, summary2.dc_warn, summary2.dc_unsafe), (1, 0, 4));
+        db.delete_check_remove(&s1, "dir2/d.jpg").unwrap();
         let flat2 = db.scan_flat_page(&s1, "", "all", "external", true, Some(50), 0).unwrap();
         assert_eq!(flat2.total, 4, "only dir1's files remain in scope");
         // Empty set + filter on -> honest empty page, not everything.
@@ -7047,6 +7543,7 @@ mod tests {
                 1,
                 20,
                 0,
+                false,
             )
             .unwrap();
         assert_eq!(occurrences.total, 1);
@@ -7058,6 +7555,7 @@ mod tests {
                 2,
                 20,
                 0,
+                false,
             )
             .is_err());
     }
@@ -7494,5 +7992,6 @@ fn occurrence_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileOccurren
         mtime: row.get(13)?,
         mode: row.get(14)?,
         error: row.get(15)?,
+        representative: false,
     })
 }

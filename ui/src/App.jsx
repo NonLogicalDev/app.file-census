@@ -243,6 +243,14 @@ export default function App() {
     if (appEvent.kind === 'scan_excludes_updated') {
       void refreshAfterScanExcludesUpdate(appEvent.payload?.scan_id);
     }
+    if (
+      appEvent.kind === 'delete_check_class_ready' &&
+      appEvent.payload?.scan_id === latest.current.selectedScanId &&
+      latest.current.deleteCheckMode
+    ) {
+      // The background survival pass finished: refresh markers/rollups.
+      void loadTreeRef.current?.(latest.current.selectedPath, { updateHistory: false });
+    }
     if (appEvent.kind === 'database_changed') {
       setDatabaseInfo(appEvent.payload || null);
       setSelectedLocationSlug(null);
@@ -2003,9 +2011,10 @@ export default function App() {
     [rpc]
   );
 
-  // Per-scan Delete Check set (dirs/files staged for deletion) + validation.
+  // Per-scan Delete Check set (dirs/files staged for deletion). The markers ARE
+  // the validation in the mode (classified against what survives the deletion),
+  // recomputed server-side in the background on set changes.
   const [deleteCheckSet, setDeleteCheckSet] = useState([]);
-  const [deleteCheckValidation, setDeleteCheckValidation] = useState(null);
   // Delete Check mode: server-side filter of Browse/Flat to the staged set.
   // Lives in App so tree/flat fetches carry the flag.
   const [deleteCheckMode, setDeleteCheckModeState] = useState(false);
@@ -2022,6 +2031,12 @@ export default function App() {
       setDeleteCheckSet(members || []);
     } catch { /* transient */ }
   }, [rpc]);
+  const reloadAfterSetChange = useCallback(() => {
+    // The mode's markers/rollups depend on the set: refetch the current view.
+    if (latest.current.deleteCheckMode) {
+      void loadTreeRef.current?.(latest.current.selectedPath, { updateHistory: false });
+    }
+  }, []);
   const addToDeleteCheck = useCallback(async (entries) => {
     const scanId = latest.current.selectedScanId;
     if (!scanId) return;
@@ -2038,29 +2053,23 @@ export default function App() {
       }
     }
     if (members) setDeleteCheckSet(members);
-    setDeleteCheckValidation((prev) => (prev ? { ...prev, stale: true } : prev));
+    reloadAfterSetChange();
     if (refusals.length) setMessage(refusals.join('\n'));
-  }, [rpc]);
+  }, [rpc, reloadAfterSetChange]);
   const removeFromDeleteCheck = useCallback(async (path) => {
     const scanId = latest.current.selectedScanId;
     if (!scanId) return;
     const members = await rpc('delete_check.remove', { scan_id: scanId, path });
     setDeleteCheckSet(members || []);
-    setDeleteCheckValidation((prev) => (prev ? { ...prev, stale: true } : prev));
-  }, [rpc]);
+    reloadAfterSetChange();
+  }, [rpc, reloadAfterSetChange]);
   const clearDeleteCheck = useCallback(async () => {
     const scanId = latest.current.selectedScanId;
     if (!scanId) return;
     const members = await rpc('delete_check.clear', { scan_id: scanId });
     setDeleteCheckSet(members || []);
-    setDeleteCheckValidation((prev) => (prev ? { ...prev, stale: true } : prev));
-  }, [rpc]);
-  const validateDeleteCheck = useCallback(async () => {
-    const scanId = latest.current.selectedScanId;
-    if (!scanId) return;
-    const validation = await rpc('delete_check.validate', { scan_id: scanId });
-    setDeleteCheckValidation(validation);
-  }, [rpc]);
+    reloadAfterSetChange();
+  }, [rpc, reloadAfterSetChange]);
   useEffect(() => {
     void refreshDeleteCheckSet(selectedScanId);
   }, [selectedScanId, refreshDeleteCheckSet]);
@@ -2072,11 +2081,9 @@ export default function App() {
     deleteCheckMode,
     onSetDeleteCheckMode: setDeleteCheckMode,
     deleteCheckSet,
-    deleteCheckValidation,
     onAddDeleteCheck: addToDeleteCheck,
     onRemoveDeleteCheck: removeFromDeleteCheck,
     onClearDeleteCheck: clearDeleteCheck,
-    onValidateDeleteCheck: validateDeleteCheck,
     locationList,
     selectedLocationSlug,
     selectedLocationView,

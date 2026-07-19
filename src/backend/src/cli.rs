@@ -1704,6 +1704,7 @@ fn run_files(db: Database, command: FilesCommand, json: bool) -> Result<()> {
                 args.size,
                 args.limit.max(1),
                 0,
+                true,
             )?;
             let details = file_details_page(&db, page)?;
             emit(&details, json, print_file_details)
@@ -1717,6 +1718,7 @@ fn run_files(db: Database, command: FilesCommand, json: bool) -> Result<()> {
                 args.size,
                 args.limit.max(1),
                 args.offset,
+                true,
             )?;
             emit(&page, json, |page| {
                 for occurrence in &page.occurrences {

@@ -89,12 +89,34 @@ function CopiesChip({ count, title }) {
 }
 
 // File Backup cell. External scope: is this content backed up on ANOTHER disk?
-// Internal scope: is there another copy of it on THIS disk? Kept compact so it
-// fits the column; the exact numbers live in the tooltip. "Last copy" (nothing
-// survives) and a copy count never appear together.
-function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external' }) {
+// Internal scope: is there another copy of it on THIS disk? In Delete Check
+// mode (`dcMode`) the status is the SURVIVAL verdict: would a copy survive
+// deleting the staged set? Kept compact so it fits the column; exact numbers
+// live in the tooltip.
+function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external', dcMode = false }) {
   if (!status) {
     return <span className="text-[10px] text-text-tertiary">—</span>;
+  }
+  if (dcMode) {
+    if (status === 'safe') {
+      return (
+        <span className={badgeGreen} title="An exact copy survives the deletion (in the remain-set or on another location) — safe to delete.">
+          <Icon name="check" className="h-3 w-3" /> Survives
+        </span>
+      );
+    }
+    if (status === 'warn') {
+      return (
+        <span className={badgeAmber} title="Only a light-hash (same size) match survives the deletion — probably the same content, not proven.">
+          <Icon name="warning" className="h-3 w-3" /> Similar survives
+        </span>
+      );
+    }
+    return (
+      <span className={badgeRed} title="No copy survives deleting the staged set — this content would be lost.">
+        <Icon name="warning" className="h-3 w-3" /> Last copy
+      </span>
+    );
   }
   const totalEverywhere = 1 + here + away;
   const wrap = (chip, extra) => (
@@ -238,6 +260,7 @@ function FileGridInner({
   storageKey = 'file-grid',
   deleteCheck = false,
   scope = 'external',
+  dcMode = false,
   onOpen,
   onInspect,
   onInspectRow,
@@ -254,8 +277,8 @@ function FileGridInner({
   const selectableRows = useMemo(() => rows.filter(isSelectableRow), [rows]);
   const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedSet.has(row.path));
   const columns = useMemo(
-    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, scope, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths }),
-    [allSelected, canBuildThumbnails, deleteCheck, scope, fullPathName, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
+    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, scope, dcMode, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths }),
+    [allSelected, canBuildThumbnails, deleteCheck, scope, dcMode, fullPathName, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
   );
   const columnVisibility = useMemo(() => {
     return Object.fromEntries(columns.map((column) => {
@@ -491,6 +514,7 @@ function baseColumns(options) {
     canBuildThumbnails,
     deleteCheck,
     scope = 'external',
+    dcMode = false,
     onToggleSelection,
     onSetSelection,
     onBuildThumbnails,
@@ -648,6 +672,7 @@ function baseColumns(options) {
             here={row.original.copies_here}
             away={row.original.copies_away}
             scope={scope}
+            dcMode={dcMode}
           />
         ) : (
           <FolderRollupBadge

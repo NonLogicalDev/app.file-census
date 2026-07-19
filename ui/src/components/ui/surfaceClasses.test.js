@@ -18,12 +18,13 @@ test('modal surface classes encode default and wide dialog geometry', () => {
   assert.match(modalSurfaceClassName({ className: 'custom-surface' }), /custom-surface/);
 });
 
-test('segmented tabs keep equal-width rounded tab behavior in utilities', () => {
-  assert.match(segmentedTabsClassName, /rounded-full/);
-  assert.match(segmentedTabsClassName, /before:content-\[''\]/);
-  assert.match(segmentedTabClassName({ active: false }), /flex-1/);
-  assert.match(segmentedTabClassName({ active: false }), /text-muted-strong/);
-  assert.match(segmentedTabClassName({ active: true }), /bg-surface/);
+test('segmented tabs use the app-wide compact chip-group form', () => {
+  // Matches the Browse|Flat / backup-filter / scope chip groups.
+  assert.match(segmentedTabsClassName, /rounded-md/);
+  assert.match(segmentedTabsClassName, /border-border/);
+  assert.match(segmentedTabsClassName, /bg-surface-subtle/);
+  assert.match(segmentedTabClassName({ active: false }), /text-muted/);
+  assert.match(segmentedTabClassName({ active: true }), /bg-surface-muted/);
   assert.match(segmentedTabClassName({ active: true }), /text-text/);
 });
 

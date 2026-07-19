@@ -337,7 +337,8 @@ impl AppCore {
                     params.size,
                     params.limit.unwrap_or(100).max(1),
                     params.offset.unwrap_or(0),
-                )?;
+                params.representative_only.unwrap_or(true),
+            )?;
                 Ok(serde_json::to_value(page)?)
             }
             "files.details" => {
@@ -563,7 +564,8 @@ fn file_details_page(db: &Database, params: &FileOccurrencesParams) -> Result<Va
         params.size,
         params.limit.unwrap_or(100).max(1),
         params.offset.unwrap_or(0),
-    )?;
+                params.representative_only.unwrap_or(true),
+            )?;
     let details = media::file_details_from_visible_occurrences(db, &page.occurrences)?;
     let mut response = serde_json::to_value(details)?;
     let object = response
@@ -831,6 +833,8 @@ struct FileOccurrencesParams {
     size: u64,
     limit: Option<u32>,
     offset: Option<u64>,
+    #[serde(default)]
+    representative_only: Option<bool>,
 }
 #[derive(Deserialize)]
 struct FilePathActionParams {

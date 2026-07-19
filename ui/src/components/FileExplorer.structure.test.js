@@ -20,11 +20,14 @@ test('backup filter is always-on, and the Delete Check SET is a distinct staged 
   assert.doesNotMatch(fileExplorerSource, /Check current folder/);
   assert.doesNotMatch(fileExplorerSource, /onSetScanSubview/);
   // Delete Check is a browsing MODE: App-owned toggle (server-side scoping), a
-  // bar above the table (not a side panel hijacking the Inspector), validation.
+  // bar above the table (not a side panel hijacking the Inspector). The markers
+  // ARE the validation (live survival classification) — no Validate button.
   assert.match(fileExplorerSource, /onSetDeleteCheckMode/);
   assert.match(fileExplorerSource, /deleteCheckBar/);
   assert.doesNotMatch(fileExplorerSource, /deleteCheckPanel/);
-  assert.match(fileExplorerSource, /onValidateDeleteCheck/);
+  assert.doesNotMatch(fileExplorerSource, /Validate deletion/);
+  assert.match(fileExplorerSource, /dc_safe/);
+  assert.match(fileExplorerSource, /would lose last copy/);
   assert.match(fileExplorerSource, /onAddDeleteCheck/);
   // The Inspector keeps its column even while the mode is on.
   assert.match(fileExplorerSource, /\{inspectorOpen && inspectorPane\}/);

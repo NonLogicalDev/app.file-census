@@ -31,11 +31,9 @@ export default function FileExplorer(props) {
     folderSummary = null,
     deleteCheckSummary = null,
     deleteCheckSet = [],
-    deleteCheckValidation = null,
     onAddDeleteCheck,
     onRemoveDeleteCheck,
     onClearDeleteCheck,
-    onValidateDeleteCheck,
     selectedPath,
     pathHistoryIndex,
     pathHistory,
@@ -221,12 +219,15 @@ export default function FileExplorer(props) {
   };
 
   const backupTotals = useMemo(() => {
-    // Delete Check mode: the strip reflects the STAGED SET's tiers (what the
-    // deletion would touch), scope-aware — not the browsed folder.
+    // Delete Check mode: the strip shows the BROWSED FOLDER's staged files
+    // classified by survival after deletion (file counts — they sum to the
+    // staged files under this folder). Zeros until the background pass lands.
     if (deleteCheckMode && deleteCheckSummary) {
-      return scope === 'internal'
-        ? { safe: deleteCheckSummary.int_safe_count || 0, warn: deleteCheckSummary.int_warn_count || 0, unsafe: deleteCheckSummary.int_unsafe_count || 0 }
-        : { safe: deleteCheckSummary.safe_count || 0, warn: deleteCheckSummary.warn_count || 0, unsafe: deleteCheckSummary.unsafe_count || 0 };
+      return {
+        safe: deleteCheckSummary.folder_dc_safe || 0,
+        warn: deleteCheckSummary.folder_dc_warn || 0,
+        unsafe: deleteCheckSummary.folder_dc_unsafe || 0
+      };
     }
     // Prefer the browsed folder's OWN unique-content rollup (from the backend) so
     // the totals don't double-count content shared across sibling subfolders. It
@@ -302,10 +303,10 @@ export default function FileExplorer(props) {
   // Flat view: reuse the FileGrid with full paths + a "load more" pager.
   const dcFolders = deleteCheckSet.filter((m) => m.kind === 'dir');
   const dcFiles = deleteCheckSet.filter((m) => m.kind === 'file');
-  // Delete Check MODE bar: sits above the table (Browse and Flat). Browsing
-  // itself is the membership view (server-scoped to the set); this bar carries
-  // the set summary + deletion-impact validation. No side panel — the Inspector
-  // keeps its column.
+  // Delete Check MODE bar: the markers themselves are the validation (each
+  // staged file is classified by what SURVIVES deleting the set), so the bar
+  // just carries the set totals — live, no Validate button.
+  const dcReady = Boolean(deleteCheckSummary?.ready);
   const deleteCheckBar = (
     <div className="flex flex-none flex-wrap items-center gap-x-4 gap-y-1 border-b border-danger/40 bg-[color:color-mix(in_srgb,var(--danger)_8%,var(--surface))] px-3 py-1.5 text-[11px]" aria-label="Delete Check mode">
       <span className="inline-flex items-center gap-1.5 font-semibold uppercase tracking-[0.05em] text-danger">
@@ -313,22 +314,24 @@ export default function FileExplorer(props) {
       </span>
       <span className="text-muted-strong tabular-nums">
         {dcFolders.length} {dcFolders.length === 1 ? 'folder' : 'folders'} · {dcFiles.length} {dcFiles.length === 1 ? 'file' : 'files'} staged
-        {deleteCheckSummary ? ` · ${(deleteCheckSummary.file_count || 0).toLocaleString()} files affected` : ''}
+        {dcReady ? ` · ${(deleteCheckSummary.file_count || 0).toLocaleString()} files in set` : ''}
       </span>
-      {deleteCheckValidation && (
-        <span className="inline-flex items-center gap-3 tabular-nums">
-          <span className="text-success">safe to delete {(deleteCheckValidation.safe_to_delete || 0).toLocaleString()}</span>
-          <span className={deleteCheckValidation.would_lose_last_copy > 0 ? 'font-semibold text-danger' : 'text-muted'}>
-            would lose last copy {(deleteCheckValidation.would_lose_last_copy || 0).toLocaleString()}
+      {dcReady ? (
+        <span className="inline-flex items-center gap-3 tabular-nums" title="Classified by what survives deleting the set: safe = exact copy survives (remain-set or another location); partial = only a light-hash survivor; last copy = nothing survives">
+          <span className="text-success">{(deleteCheckSummary.dc_safe || 0).toLocaleString()} safe to delete</span>
+          <span className="text-warning">{(deleteCheckSummary.dc_warn || 0).toLocaleString()} partial</span>
+          <span className={deleteCheckSummary.dc_unsafe > 0 ? 'font-semibold text-danger' : 'text-muted'}>
+            {(deleteCheckSummary.dc_unsafe || 0).toLocaleString()} would lose last copy
           </span>
-          {deleteCheckValidation.stale && <span className="rounded bg-warning-soft px-1.5 text-[10px] font-semibold text-warning">stale — re-validate</span>}
-          {!deleteCheckValidation.cache_ready && <span className="text-[10px] text-warning">cache not ready</span>}
         </span>
+      ) : (
+        deleteCheckSet.length > 0 && (
+          <span className="inline-flex items-center gap-1.5 text-[10px] text-warning">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-warning" /> computing survival…
+          </span>
+        )
       )}
       <span className="ml-auto inline-flex items-center gap-1.5">
-        <button type="button" className={`${ctrlBtn} h-6 border-danger/40 px-2 text-danger`} onClick={onValidateDeleteCheck} disabled={busy || !deleteCheckSet.length}>
-          Validate deletion
-        </button>
         <button type="button" className={`${ctrlBtn} h-6 px-2`} onClick={onClearDeleteCheck} disabled={busy || !deleteCheckSet.length}>
           Clear set
         </button>
@@ -349,6 +352,7 @@ export default function FileExplorer(props) {
           selectable
           deleteCheck
           scope={scope}
+          dcMode={deleteCheckMode}
           selectedPaths={selectedGridPaths}
           stagedPaths={stagedMemberPaths}
           onToggleSelection={onToggleGridSelection}
@@ -393,6 +397,7 @@ export default function FileExplorer(props) {
         selectable
         deleteCheck
         scope={scope}
+        dcMode={deleteCheckMode}
         selectedPaths={selectedGridPaths}
         inspectedPath={inspected?.path}
         canBuildThumbnails={canBuildThumbnails}

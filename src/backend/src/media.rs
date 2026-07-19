@@ -688,6 +688,7 @@ mod tests {
     fn test_occurrence(scan_id: &str, path: &str, blake3: &str, size: u64) -> FileOccurrence {
         FileOccurrence {
             scan_id: scan_id.to_string(),
+            representative: false,
             scan_started_at: String::new(),
             scan_finished_at: None,
             scan_status: "complete".to_string(),

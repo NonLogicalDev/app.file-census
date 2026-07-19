@@ -367,16 +367,21 @@ async fn handle_rpc_result(
             let outcome = state
                 .db
                 .delete_check_add(&params.scan_id, &params.path, &params.kind)?;
+            if outcome.added {
+                spawn_delete_check_class_rebuild(&state, params.scan_id.clone());
+            }
             Ok(serde_json::to_value(outcome)?)
         }
         "delete_check.remove" => {
             let params: DeleteCheckRemoveParams = decode_params(params)?;
             let members = state.db.delete_check_remove(&params.scan_id, &params.path)?;
+            spawn_delete_check_class_rebuild(&state, params.scan_id);
             Ok(serde_json::to_value(members)?)
         }
         "delete_check.clear" => {
             let params: ScanIdParams = decode_params(params)?;
             state.db.delete_check_clear(&params.scan_id)?;
+            spawn_delete_check_class_rebuild(&state, params.scan_id.clone());
             Ok(serde_json::to_value(state.db.delete_check_set(&params.scan_id)?)?)
         }
         "delete_check.validate" => {
@@ -397,6 +402,11 @@ async fn handle_rpc_result(
         }
         "scans.tree" => {
             let params: TreeRpcParams = decode_params(params)?;
+            // Keep the Delete Check classification pass fresh in the background
+            // while the mode is in use (idempotent; emits an event when ready).
+            if params.delete_check && !state.db.delete_check_class_is_ready(&params.scan_id)? {
+                spawn_delete_check_class_rebuild(&state, params.scan_id.clone());
+            }
             if params.flat {
                 Ok(serde_json::to_value(state.db.scan_flat_page(
                     &params.scan_id,
@@ -440,6 +450,7 @@ async fn handle_rpc_result(
                 params.size,
                 params.limit.unwrap_or(100).max(1),
                 params.offset.unwrap_or(0),
+                params.representative_only.unwrap_or(true),
             )?;
             Ok(serde_json::to_value(page)?)
         }
@@ -608,7 +619,8 @@ fn file_details_page(db: &Database, params: &FileOccurrencesParams) -> Result<Va
         params.size,
         params.limit.unwrap_or(100).max(1),
         params.offset.unwrap_or(0),
-    )?;
+                params.representative_only.unwrap_or(true),
+            )?;
     let details = media::file_details_from_visible_occurrences(db, &page.occurrences)?;
     let mut response = serde_json::to_value(details)?;
     let object = response
@@ -1138,6 +1150,21 @@ async fn scan_tree(
     )?))
 }
 
+/// Rebuilds the Delete Check survival classification off the request path and
+/// announces completion so open UIs refresh their markers/rollups.
+fn spawn_delete_check_class_rebuild(state: &AppState, scan_id: String) {
+    let db = state.db.clone();
+    let events = state.events.clone();
+    std::thread::spawn(move || match db.rebuild_delete_check_class(&scan_id) {
+        Ok(true) => events.emit(
+            "delete_check_class_ready",
+            serde_json::json!({ "scan_id": scan_id }),
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!("delete-check classification rebuild failed: {error:#}"),
+    });
+}
+
 async fn scan_verdicts(
     State(state): State<AppState>,
     Path(scan_id): Path<String>,
@@ -1207,6 +1234,8 @@ struct FileOccurrencesParams {
     size: u64,
     limit: Option<u32>,
     offset: Option<u64>,
+    #[serde(default)]
+    representative_only: Option<bool>,
 }
 
 #[derive(Deserialize)]
