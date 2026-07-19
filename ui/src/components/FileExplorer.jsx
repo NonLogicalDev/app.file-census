@@ -29,6 +29,7 @@ export default function FileExplorer(props) {
     deleteCheck,
     deleteCheckPath,
     folderSummary = null,
+    deleteCheckSummary = null,
     deleteCheckSet = [],
     deleteCheckValidation = null,
     onAddDeleteCheck,
@@ -109,6 +110,8 @@ export default function FileExplorer(props) {
     setInspected(entry);
     setInspectorOpen(true);
   }, []);
+  // Exact staged member paths (for membership-aware row menus).
+  const stagedMemberPaths = useMemo(() => new Set(deleteCheckSet.map((m) => m.path)), [deleteCheckSet]);
   // Backup safety filter over the current listing. This is "Delete Check" in the
   // unified model: markers are always shown; the filter narrows to a tier.
   const [backupFilter, setBackupFilter] = useState('all');
@@ -205,6 +208,13 @@ export default function FileExplorer(props) {
   };
 
   const backupTotals = useMemo(() => {
+    // Delete Check mode: the strip reflects the STAGED SET's tiers (what the
+    // deletion would touch), scope-aware — not the browsed folder.
+    if (deleteCheckMode && deleteCheckSummary) {
+      return scope === 'internal'
+        ? { safe: deleteCheckSummary.int_safe_count || 0, warn: deleteCheckSummary.int_warn_count || 0, unsafe: deleteCheckSummary.int_unsafe_count || 0 }
+        : { safe: deleteCheckSummary.safe_count || 0, warn: deleteCheckSummary.warn_count || 0, unsafe: deleteCheckSummary.unsafe_count || 0 };
+    }
     // Prefer the browsed folder's OWN unique-content rollup (from the backend) so
     // the totals don't double-count content shared across sibling subfolders. It
     // is null at the scan root / when no cache is ready — then fall back to
@@ -223,7 +233,7 @@ export default function FileExplorer(props) {
     }
     return totals;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleGridRows, scope, folderSummary]);
+  }, [visibleGridRows, scope, folderSummary, deleteCheckMode, deleteCheckSummary]);
   const hasBackupData = backupTotals.unsafe + backupTotals.warn + backupTotals.safe > 0;
 
   // Delete Check mode shows the staged-set panel; it does NOT hide rows from the
@@ -279,95 +289,71 @@ export default function FileExplorer(props) {
   // Flat view: reuse the FileGrid with full paths + a "load more" pager.
   const dcFolders = deleteCheckSet.filter((m) => m.kind === 'dir');
   const dcFiles = deleteCheckSet.filter((m) => m.kind === 'file');
-  const deleteCheckPanel = (
-    <aside className="flex min-h-0 min-w-0 flex-col border-l border-danger/30 bg-sidebar-bg" aria-label="Delete Check set">
-      <div className="flex h-8 flex-none items-center justify-between border-b border-sidebar-border px-3 text-[10px] font-semibold uppercase tracking-[0.06em] text-danger">
-        <span>Delete Check set</span>
-        <button type="button" className="text-[10px] text-muted hover:text-text" onClick={onClearDeleteCheck} disabled={!deleteCheckSet.length}>Clear</button>
-      </div>
-      <div className="px-3 py-2 text-[11px] text-muted">
-        {dcFolders.length} {dcFolders.length === 1 ? 'folder' : 'folders'} · {dcFiles.length} {dcFiles.length === 1 ? 'file' : 'files'}
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto">
-        {!deleteCheckSet.length && (
-          <p className="px-3 py-2 text-[11px] leading-relaxed text-text-tertiary">
-            Select files/folders and “Add to Delete Check”, or use the row menu. Nested adds are refused.
-          </p>
-        )}
-        {dcFolders.length > 0 && <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-text-tertiary">Folders</p>}
-        {dcFolders.map((m) => (
-          <div key={m.path} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-            <Icon name="folder" className="h-3.5 w-3.5 flex-none text-accent" />
-            <span className="min-w-0 flex-1 truncate text-muted-strong" title={m.path}>{m.path}</span>
-            <button type="button" onClick={() => onRemoveDeleteCheck(m.path)} className="grid h-4 w-4 flex-none place-items-center text-text-tertiary hover:text-text"><Icon name="close" className="h-3 w-3" /></button>
-          </div>
-        ))}
-        {dcFiles.length > 0 && <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-text-tertiary">Files</p>}
-        {dcFiles.map((m) => (
-          <div key={m.path} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-            <Icon name="file" className="h-3.5 w-3.5 flex-none text-text-tertiary" />
-            <span className="min-w-0 flex-1 truncate text-muted-strong" title={m.path}>{m.path}</span>
-            <button type="button" onClick={() => onRemoveDeleteCheck(m.path)} className="grid h-4 w-4 flex-none place-items-center text-text-tertiary hover:text-text"><Icon name="close" className="h-3 w-3" /></button>
-          </div>
-        ))}
-      </div>
-      <div className="border-t border-sidebar-border p-3">
-        {deleteCheckValidation && (
-          <div className="mb-2 space-y-1 text-[11px]">
-            {deleteCheckValidation.stale && (
-              <p className="rounded bg-warning-soft px-1.5 py-1 text-[10px] font-semibold text-warning">
-                Set changed — numbers below are stale, re-validate.
-              </p>
-            )}
-            <div className="flex justify-between"><span className="text-muted">Affected files</span><span className="tabular-nums text-text">{(deleteCheckValidation.affected_files || 0).toLocaleString()}</span></div>
-            <div className="flex justify-between"><span className="text-muted">Safe to delete</span><span className="tabular-nums text-success">{(deleteCheckValidation.safe_to_delete || 0).toLocaleString()}</span></div>
-            <div className={`flex justify-between rounded px-1.5 py-1 ${deleteCheckValidation.would_lose_last_copy > 0 ? 'bg-[color:color-mix(in_srgb,var(--danger)_12%,var(--surface))] text-danger' : 'text-muted'}`}>
-              <span>Would lose last copy</span><span className="tabular-nums font-semibold">{(deleteCheckValidation.would_lose_last_copy || 0).toLocaleString()}</span>
-            </div>
-            {!deleteCheckValidation.cache_ready && <p className="text-[10px] text-warning">Cache not ready — rebuild for exact counts.</p>}
-          </div>
-        )}
-        <button type="button" className={`${ctrlBtn} w-full justify-center border-danger/40 text-danger`} onClick={onValidateDeleteCheck} disabled={busy || !deleteCheckSet.length}>
-          <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Validate deletion
+  // Delete Check MODE bar: sits above the table (Browse and Flat). Browsing
+  // itself is the membership view (server-scoped to the set); this bar carries
+  // the set summary + deletion-impact validation. No side panel — the Inspector
+  // keeps its column.
+  const deleteCheckBar = (
+    <div className="flex flex-none flex-wrap items-center gap-x-4 gap-y-1 border-b border-danger/40 bg-[color:color-mix(in_srgb,var(--danger)_8%,var(--surface))] px-3 py-1.5 text-[11px]" aria-label="Delete Check mode">
+      <span className="inline-flex items-center gap-1.5 font-semibold uppercase tracking-[0.05em] text-danger">
+        <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Delete Check mode
+      </span>
+      <span className="text-muted-strong tabular-nums">
+        {dcFolders.length} {dcFolders.length === 1 ? 'folder' : 'folders'} · {dcFiles.length} {dcFiles.length === 1 ? 'file' : 'files'} staged
+        {deleteCheckSummary ? ` · ${(deleteCheckSummary.file_count || 0).toLocaleString()} files affected` : ''}
+      </span>
+      {deleteCheckValidation && (
+        <span className="inline-flex items-center gap-3 tabular-nums">
+          <span className="text-success">safe to delete {(deleteCheckValidation.safe_to_delete || 0).toLocaleString()}</span>
+          <span className={deleteCheckValidation.would_lose_last_copy > 0 ? 'font-semibold text-danger' : 'text-muted'}>
+            would lose last copy {(deleteCheckValidation.would_lose_last_copy || 0).toLocaleString()}
+          </span>
+          {deleteCheckValidation.stale && <span className="rounded bg-warning-soft px-1.5 text-[10px] font-semibold text-warning">stale — re-validate</span>}
+          {!deleteCheckValidation.cache_ready && <span className="text-[10px] text-warning">cache not ready</span>}
+        </span>
+      )}
+      <span className="ml-auto inline-flex items-center gap-1.5">
+        <button type="button" className={`${ctrlBtn} h-6 border-danger/40 px-2 text-danger`} onClick={onValidateDeleteCheck} disabled={busy || !deleteCheckSet.length}>
+          Validate deletion
         </button>
-      </div>
-    </aside>
+        <button type="button" className={`${ctrlBtn} h-6 px-2`} onClick={onClearDeleteCheck} disabled={busy || !deleteCheckSet.length}>
+          Clear set
+        </button>
+      </span>
+    </div>
   );
 
   const flatView = (
     <div className="mt-2 flex min-h-[620px] flex-col overflow-hidden border border-sidebar-border bg-bg">
       {breadcrumbBar}
-      <div
-        className="grid min-h-0 flex-1"
-        style={{ gridTemplateColumns: deleteCheckMode ? 'minmax(0,1fr) 320px' : 'minmax(0,1fr)' }}
-      >
-        <div className="relative min-h-0 overflow-auto">
-          <FileGrid
-            storageKey="locations-flat"
-            rows={flatRows}
-            visibleColumns={gridVisibleColumns}
-            fullPathName
-            selectable
-            deleteCheck
-            scope={scope}
-            selectedPaths={selectedGridPaths}
-            onToggleSelection={onToggleGridSelection}
-            onSetSelection={onSetGridSelection}
-            onAddDeleteCheck={onAddDeleteCheck}
-            onInspect={onInspectFile}
-            onInspectRow={handleInspectRow}
-          />
-          {!flatRows.length && (
-            <p className="pointer-events-none absolute inset-x-0 top-[52px] p-[18px] text-center text-[11px] text-muted">
-              {flatLoading
-                ? 'Loading files…'
-                : deleteCheckMode
-                  ? 'No Delete Check paths under this folder. Toggle Delete Check off to browse everything.'
-                  : 'No files match this filter.'}
-            </p>
-          )}
-        </div>
-        {deleteCheckMode && deleteCheckPanel}
+      {deleteCheckMode && deleteCheckBar}
+      <div className="relative min-h-0 flex-1 overflow-auto">
+        <FileGrid
+          storageKey="locations-flat"
+          rows={flatRows}
+          visibleColumns={gridVisibleColumns}
+          fullPathName
+          selectable
+          deleteCheck
+          scope={scope}
+          selectedPaths={selectedGridPaths}
+          stagedPaths={stagedMemberPaths}
+          onToggleSelection={onToggleGridSelection}
+          onSetSelection={onSetGridSelection}
+          onAddDeleteCheck={onAddDeleteCheck}
+          onRemoveDeleteCheck={onRemoveDeleteCheck}
+          onInspect={onInspectFile}
+          onInspectRow={handleInspectRow}
+        />
+        {!flatRows.length && (
+          <p className="pointer-events-none absolute inset-x-0 top-[52px] p-[18px] text-center text-[11px] text-muted">
+            {flatLoading
+              ? 'Loading files…'
+              : deleteCheckMode
+                ? 'No Delete Check paths under this folder. Toggle Delete Check off to browse everything.'
+                : 'No files match this filter.'}
+          </p>
+        )}
       </div>
       {flatRows.length < flatTotal && (
         <div className="flex flex-none items-center justify-center gap-3 border-t border-sidebar-border bg-sidebar-bg px-3 py-2 text-[11px] text-muted">
@@ -406,6 +392,8 @@ export default function FileExplorer(props) {
         onExclude={onRequestExcludePath}
         onDelete={onRequestDeletePath}
         onAddDeleteCheck={onAddDeleteCheck}
+        onRemoveDeleteCheck={onRemoveDeleteCheck}
+        stagedPaths={stagedMemberPaths}
       />
       {!filteredGridRows.length && (
         <p className="pointer-events-none absolute inset-x-0 top-[52px] z-[1] p-[18px] text-center text-[11px] text-muted">
@@ -578,13 +566,13 @@ export default function FileExplorer(props) {
           )}
           <button
             type="button"
-            className={`${ctrlBtn} ${deleteCheckMode ? 'border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger' : ''}`}
+            className={`${ctrlBtn} ${deleteCheckMode ? '!border-danger !bg-danger !text-white shadow-[0_0_0_1px_var(--danger)]' : ''}`}
             onClick={() => onSetDeleteCheckMode?.(!deleteCheckMode)}
             aria-pressed={deleteCheckMode}
-            title="Filter Browse/Flat to the staged set and show the deletion-impact panel"
+            title={deleteCheckMode ? 'Delete Check mode is ON — browsing is scoped to the staged set. Click to exit.' : 'Enter Delete Check mode: scope Browse/Flat to the staged set and show deletion impact'}
           >
             <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Delete Check
-            <span className={`ml-1 rounded-full px-1.5 text-[10px] ${deleteCheckMode ? 'bg-danger/20' : 'bg-surface-muted'}`}>{deleteCheckSet.length}</span>
+            <span className={`ml-1 rounded-full px-1.5 text-[10px] ${deleteCheckMode ? 'bg-white/25 text-white' : 'bg-surface-muted'}`}>{deleteCheckSet.length}</span>
           </button>
         </div>
       </div>
@@ -721,7 +709,7 @@ export default function FileExplorer(props) {
           {breadcrumbBar}
           <div
             className="grid min-h-0 flex-1"
-            style={{ gridTemplateColumns: (deleteCheckMode || inspectorOpen) ? `${foldersWidth}px minmax(0,1fr) 320px` : `${foldersWidth}px minmax(0,1fr)` }}
+            style={{ gridTemplateColumns: inspectorOpen ? `${foldersWidth}px minmax(0,1fr) 320px` : `${foldersWidth}px minmax(0,1fr)` }}
           >
             <div className="relative flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
               <DirectoryTree
@@ -745,9 +733,10 @@ export default function FileExplorer(props) {
               </div>
             </div>
             <section className="flex min-w-0 flex-col">
+              {deleteCheckMode && deleteCheckBar}
               {resultsTable}
             </section>
-            {deleteCheckMode ? deleteCheckPanel : (inspectorOpen && inspectorPane)}
+            {inspectorOpen && inspectorPane}
           </div>
         </div>
       )}

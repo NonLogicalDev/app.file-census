@@ -74,6 +74,9 @@ export default function App() {
   // backup-filter counts so they don't double-count content shared across
   // sibling folders. Null at root / no cache.
   const [folderSummary, setFolderSummary] = useState(null);
+  // Tier totals over the Delete Check SET (present while the mode is on); the
+  // Backup strip switches to these so it reflects what deletion would touch.
+  const [deleteCheckSummary, setDeleteCheckSummary] = useState(null);
   const [directoryTreeNodes, setDirectoryTreeNodes] = useState({});
   const [directoryTreeScope, setDirectoryTreeScope] = useState('');
   const [directoryTreeExpandedPaths, setDirectoryTreeExpandedPaths] = useState(['']);
@@ -607,6 +610,7 @@ export default function App() {
     if (requestId !== treeRequestId.current || latest.current.selectedScanId !== requestedScanId || latest.current.selectedPath !== requestedPath) return;
     setTreeEntries(treePage.entries);
     setFolderSummary(treePage.folder_summary || null);
+    setDeleteCheckSummary(treePage.delete_check_summary || null);
   }, [rpc, routeTo]);
   loadTreeRef.current = loadTree;
 
@@ -2064,6 +2068,7 @@ export default function App() {
   const commonLocationProps = {
     onLoadFlat: loadFlatPage,
     folderSummary,
+    deleteCheckSummary,
     deleteCheckMode,
     onSetDeleteCheckMode: setDeleteCheckMode,
     deleteCheckSet,

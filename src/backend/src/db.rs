@@ -281,6 +281,30 @@ pub struct TreePage {
     /// folders). `None` at the scan root or when no cache is ready.
     #[serde(default)]
     pub folder_summary: Option<FolderBackupSummary>,
+    /// Tier totals for the scan's Delete Check SET (staged members), present
+    /// only when the page was requested with `delete_check`. Drives the Backup
+    /// strip while the mode is on.
+    #[serde(default)]
+    pub delete_check_summary: Option<DeleteCheckSummary>,
+}
+
+/// Unique-content tier totals over the Delete Check set's members (summed from
+/// each member's own cache row; members are an antichain so nothing nests, but
+/// content shared BETWEEN members counts once per member — same caveat as
+/// sibling folder chips).
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DeleteCheckSummary {
+    pub folder_members: u64,
+    pub file_members: u64,
+    /// Staged file instances (files under staged folders + staged files).
+    pub file_count: u64,
+    pub safe_count: u64,
+    pub warn_count: u64,
+    pub unsafe_count: u64,
+    pub int_safe_count: u64,
+    pub int_warn_count: u64,
+    pub int_unsafe_count: u64,
+    pub cache_ready: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -2105,11 +2129,15 @@ impl Database {
         };
         // Delete Check scope filter: applied before counting/pagination so the
         // reported total and page windows reflect the filtered set.
-        let entries = if delete_check {
-            let members = delete_check_members_conn(&tx, scan_id)?;
+        let dc_members = if delete_check {
+            Some(delete_check_members_conn(&tx, scan_id)?)
+        } else {
+            None
+        };
+        let entries = if let Some(members) = dc_members.as_deref() {
             entries
                 .into_iter()
-                .filter(|entry| entry_in_delete_check_scope(&entry.path, &members))
+                .filter(|entry| entry_in_delete_check_scope(&entry.path, members))
                 .collect()
         } else {
             entries
@@ -2125,6 +2153,15 @@ impl Database {
         let has_more = end < entries.len();
         let next_offset = has_more.then(|| u32::try_from(end).unwrap_or(u32::MAX));
         let folder_summary = folder_summary_from_cache(&tx, ready_run_id, scan_id, &normalized)?;
+        let delete_check_summary = match dc_members.as_deref() {
+            Some(members) => Some(delete_check_summary_from_cache(
+                &tx,
+                ready_run_id,
+                scan_id,
+                members,
+            )?),
+            None => None,
+        };
         let page = TreePage {
             entries: entries.into_iter().skip(start).take(end - start).collect(),
             limit,
@@ -2134,6 +2171,7 @@ impl Database {
             next_offset,
             duplicate_cache,
             folder_summary,
+            delete_check_summary,
         };
         tx.commit()?;
         Ok(page)
@@ -2329,6 +2367,12 @@ impl Database {
                     scan_id,
                     &normalized,
                 )?,
+                delete_check_summary: Some(delete_check_summary_from_cache(
+                    &tx,
+                    ready_run_id.as_deref(),
+                    scan_id,
+                    &members,
+                )?),
             };
             tx.commit()?;
             return Ok(page);
@@ -2505,6 +2549,16 @@ impl Database {
         let next_offset = has_more.then(|| end as u32);
         let folder_summary =
             folder_summary_from_cache(&tx, ready_run_id.as_deref(), scan_id, &normalized)?;
+        let delete_check_summary = if delete_check {
+            Some(delete_check_summary_from_cache(
+                &tx,
+                ready_run_id.as_deref(),
+                scan_id,
+                &members,
+            )?)
+        } else {
+            None
+        };
         let page = TreePage {
             entries,
             limit,
@@ -2514,6 +2568,7 @@ impl Database {
             next_offset,
             duplicate_cache,
             folder_summary,
+            delete_check_summary,
         };
         tx.commit()?;
         Ok(page)
@@ -3793,6 +3848,57 @@ fn folder_summary_from_cache(
     )
     .optional()
     .map_err(Into::into)
+}
+
+/// Tier totals over the Delete Check set, O(members): each member's own cache
+/// row already carries its unique-content rollup (dir) or one-hot tier (file).
+fn delete_check_summary_from_cache(
+    conn: &Connection,
+    run_id: Option<&str>,
+    scan_id: &str,
+    members: &[DeleteCheckMember],
+) -> Result<DeleteCheckSummary> {
+    let mut summary = DeleteCheckSummary {
+        folder_members: members.iter().filter(|m| m.kind == "dir").count() as u64,
+        file_members: members.iter().filter(|m| m.kind == "file").count() as u64,
+        cache_ready: run_id.is_some(),
+        ..Default::default()
+    };
+    let run_id = match run_id {
+        Some(id) => id,
+        None => return Ok(summary),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT file_count, safe_file_count, warn_file_count, unsafe_file_count, \
+                int_safe_file_count, int_warn_file_count, int_unsafe_file_count \
+         FROM duplicate_cache_path_counts \
+         WHERE run_id = ?1 AND scan_id = ?2 AND path = ?3",
+    )?;
+    for member in members {
+        let row: Option<(i64, i64, i64, i64, i64, i64, i64)> = stmt
+            .query_row(params![run_id, scan_id, member.path], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })
+            .optional()?;
+        if let Some((files, safe, warn, unsafe_, int_safe, int_warn, int_unsafe)) = row {
+            summary.file_count += files.max(0) as u64;
+            summary.safe_count += safe.max(0) as u64;
+            summary.warn_count += warn.max(0) as u64;
+            summary.unsafe_count += unsafe_.max(0) as u64;
+            summary.int_safe_count += int_safe.max(0) as u64;
+            summary.int_warn_count += int_warn.max(0) as u64;
+            summary.int_unsafe_count += int_unsafe.max(0) as u64;
+        }
+    }
+    Ok(summary)
 }
 
 /// True when the ready cache run has materialized rows for this scan, so the
@@ -5805,6 +5911,14 @@ mod tests {
         db.delete_check_remove(&s1, "dir2/d.jpg").unwrap();
         let root2 = db.scan_tree_page(&s1, "", Some(50), 0, 1, None, true).unwrap();
         assert_eq!(names(&root2), vec!["dir1"]);
+        // Set summary = dir1's own cache rollup (ext: A safe, B+C unsafe;
+        // int: B+C have same-disk twins, A doesn't).
+        let summary = root2.delete_check_summary.as_ref().expect("summary in dc mode");
+        assert!(summary.cache_ready);
+        assert_eq!(summary.folder_members, 1);
+        assert_eq!(summary.file_count, 4, "staged instances");
+        assert_eq!((summary.safe_count, summary.warn_count, summary.unsafe_count), (1, 0, 2));
+        assert_eq!((summary.int_safe_count, summary.int_unsafe_count), (2, 1));
         let flat2 = db.scan_flat_page(&s1, "", "all", "external", true, Some(50), 0).unwrap();
         assert_eq!(flat2.total, 4, "only dir1's files remain in scope");
         // Empty set + filter on -> honest empty page, not everything.

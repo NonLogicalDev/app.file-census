@@ -329,6 +329,31 @@ Durable direction the user gave while this plan was built:
 - Deferred (recorded, not hidden): panel/inspector coexistence, URL-persisted
   scope/mode, CLI `--delete-check` flag for `scans tree`.
 
+## Delete Check as a browsing MODE (user refinement 2026-07-19 ~14:00)
+
+Steering: (1) delete-check view must also show safe/partial files, not only
+unsafe; (2) Delete Check is a mode of BROWSING — do not shove it into the
+inspector slot; (3) entering the mode must update the Backup status strip;
+(4) the Delete Check button must clearly light up while in the mode.
+
+Decisions:
+- Kill the side panel (it hijacked the Inspector column). Replace with a slim
+  **Delete Check bar** directly above the results table (Browse AND Flat):
+  member counts, Validate button + results inline (safe-to-delete / would-lose-
+  last-copy, stale hint), Clear. The scoped browse itself IS the membership
+  view; the Inspector works normally again.
+- Backend computes a **delete_check_summary** on TreePage whenever
+  delete_check=true: tier totals (external + internal, unique-content) summed
+  O(members) from the members' own cache rows (dir rollup rows / file one-hot
+  rows) + staged instance counts. Same sibling-dedup caveat as folder chips.
+- The Backup strip uses delete_check_summary while the mode is on (scope-aware),
+  so it shows the SET's safe/partial/unsafe — and the existing chips filter
+  within the mode (Flat server-side tier+set predicates; Browse client-side over
+  the server-scoped rows). That satisfies (1)+(3).
+- Toggle active state becomes solid danger (unmissable), not a subtle tint.
+- Row menu becomes membership-aware: staged member rows offer "Remove from
+  Delete Check", others "Add to Delete Check".
+
 ## Burn-down work log 2026-07-19 (~13:30) — all CDP-verified live
 
 - [x] Two-row nav shipped: Row 1 view+commands; Row 2 Backup filter + Scope +

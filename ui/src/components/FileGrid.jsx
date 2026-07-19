@@ -246,14 +246,16 @@ function FileGridInner({
   onBuildThumbnails,
   onExclude,
   onDelete,
-  onAddDeleteCheck
+  onAddDeleteCheck,
+  onRemoveDeleteCheck,
+  stagedPaths = null
 }) {
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const selectableRows = useMemo(() => rows.filter(isSelectableRow), [rows]);
   const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedSet.has(row.path));
   const columns = useMemo(
-    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, scope, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete, onAddDeleteCheck }),
-    [allSelected, canBuildThumbnails, deleteCheck, scope, fullPathName, onAddDeleteCheck, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
+    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, scope, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths }),
+    [allSelected, canBuildThumbnails, deleteCheck, scope, fullPathName, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
   );
   const columnVisibility = useMemo(() => {
     return Object.fromEntries(columns.map((column) => {
@@ -494,7 +496,9 @@ function baseColumns(options) {
     onBuildThumbnails,
     onExclude,
     onDelete,
-    onAddDeleteCheck
+    onAddDeleteCheck,
+    onRemoveDeleteCheck,
+    stagedPaths
   } = options;
   const columns = [];
 
@@ -525,14 +529,23 @@ function baseColumns(options) {
               icon={<Icon name="rowActions" />}
             />
             <MenuContent align="start" className={fileGridRowActionPanelClassName}>
-              {onAddDeleteCheck && isSelectableRow(row.original) && (
-                <MenuItem
-                  icon={<Icon name="add" />}
-                  onClick={() => onAddDeleteCheck([row.original])}
-                >
-                  Add to Delete Check
-                </MenuItem>
-              )}
+              {isSelectableRow(row.original) &&
+                (stagedPaths?.has(row.original.path) && onRemoveDeleteCheck ? (
+                  <MenuItem
+                    variant="warning"
+                    icon={<Icon name="close" />}
+                    onClick={() => onRemoveDeleteCheck(row.original.path)}
+                  >
+                    Remove from Delete Check
+                  </MenuItem>
+                ) : onAddDeleteCheck ? (
+                  <MenuItem
+                    icon={<Icon name="add" />}
+                    onClick={() => onAddDeleteCheck([row.original])}
+                  >
+                    Add to Delete Check
+                  </MenuItem>
+                ) : null)}
               {onBuildThumbnails && (
                 <MenuItem
                   disabled={!canBuildThumbnails}

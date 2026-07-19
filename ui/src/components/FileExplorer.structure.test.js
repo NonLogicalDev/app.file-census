@@ -19,12 +19,15 @@ test('backup filter is always-on, and the Delete Check SET is a distinct staged 
   // callout and the subview tab switch).
   assert.doesNotMatch(fileExplorerSource, /Check current folder/);
   assert.doesNotMatch(fileExplorerSource, /onSetScanSubview/);
-  // The restored Delete Check set: App-owned mode toggle (server-side filter),
-  // membership panel, validation.
+  // Delete Check is a browsing MODE: App-owned toggle (server-side scoping), a
+  // bar above the table (not a side panel hijacking the Inspector), validation.
   assert.match(fileExplorerSource, /onSetDeleteCheckMode/);
-  assert.match(fileExplorerSource, /deleteCheckPanel/);
+  assert.match(fileExplorerSource, /deleteCheckBar/);
+  assert.doesNotMatch(fileExplorerSource, /deleteCheckPanel/);
   assert.match(fileExplorerSource, /onValidateDeleteCheck/);
   assert.match(fileExplorerSource, /onAddDeleteCheck/);
+  // The Inspector keeps its column even while the mode is on.
+  assert.match(fileExplorerSource, /\{inspectorOpen && inspectorPane\}/);
 });
 
 test('file explorer does not advertise unavailable EXIF enrichment controls', () => {
