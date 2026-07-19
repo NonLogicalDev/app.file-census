@@ -232,7 +232,7 @@ fn perf_gate_scan_tree_root_page_stays_under_budget() {
     let started = Instant::now();
     let page = fixture
         .db
-        .scan_tree_page(&fixture.source_scan_id, "", Some(500), 0, 1, None)
+        .scan_tree_page(&fixture.source_scan_id, "", Some(500), 0, 1, None, false)
         .unwrap();
     let elapsed = started.elapsed();
 
@@ -266,7 +266,7 @@ fn perf_gate_scan_tree_filtered_page_stays_under_budget() {
     let started = Instant::now();
     let page = fixture
         .db
-        .scan_tree_page(&fixture.source_scan_id, "", Some(500), 0, 0, Some(&query))
+        .scan_tree_page(&fixture.source_scan_id, "", Some(500), 0, 0, Some(&query), false)
         .unwrap();
     let elapsed = started.elapsed();
 
@@ -316,7 +316,7 @@ fn perf_gate_file_extra_info_does_not_block_tree_or_delete_check_reads() {
     let started = Instant::now();
     let page = fixture
         .db
-        .scan_tree_page(&read_scan_id, "", Some(500), 0, 1, None)
+        .scan_tree_page(&read_scan_id, "", Some(500), 0, 1, None, false)
         .unwrap();
     let delete_check = fixture.db.delete_check(&read_scan_id, "folder-001").unwrap();
     let elapsed = started.elapsed();

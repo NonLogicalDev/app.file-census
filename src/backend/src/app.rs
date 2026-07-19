@@ -267,6 +267,33 @@ impl AppCore {
                     };
                 Ok(serde_json::to_value(result)?)
             }
+            "delete_check.list" => {
+                let params: ScanIdParams = decode_params(params)?;
+                Ok(serde_json::to_value(self.db.delete_check_set(&params.scan_id)?)?)
+            }
+            "delete_check.add" => {
+                let params: DeleteCheckAddRpcParams = decode_params(params)?;
+                Ok(serde_json::to_value(self.db.delete_check_add(
+                    &params.scan_id,
+                    &params.path,
+                    &params.kind,
+                )?)?)
+            }
+            "delete_check.remove" => {
+                let params: DeleteCheckRemoveRpcParams = decode_params(params)?;
+                Ok(serde_json::to_value(
+                    self.db.delete_check_remove(&params.scan_id, &params.path)?,
+                )?)
+            }
+            "delete_check.clear" => {
+                let params: ScanIdParams = decode_params(params)?;
+                self.db.delete_check_clear(&params.scan_id)?;
+                Ok(serde_json::to_value(self.db.delete_check_set(&params.scan_id)?)?)
+            }
+            "delete_check.validate" => {
+                let params: ScanIdParams = decode_params(params)?;
+                Ok(serde_json::to_value(self.db.delete_check_validate(&params.scan_id)?)?)
+            }
             "scans.tree" => {
                 let params: TreeRpcParams = decode_params(params)?;
                 if params.flat {
@@ -274,6 +301,8 @@ impl AppCore {
                         &params.scan_id,
                         params.path.as_deref().unwrap_or(""),
                         params.backup.as_deref().unwrap_or("all"),
+                        params.scope.as_deref().unwrap_or("external"),
+                        params.delete_check,
                         params.limit,
                         params.offset.unwrap_or(0),
                     )?)?)
@@ -285,6 +314,7 @@ impl AppCore {
                         params.offset.unwrap_or(0),
                         params.depth.unwrap_or(1),
                         params.query.as_ref(),
+                        params.delete_check,
                     )?)?)
                 }
             }
@@ -758,6 +788,17 @@ struct DeleteCheckParams {
     paths: Option<Vec<String>>,
 }
 #[derive(Deserialize)]
+struct DeleteCheckAddRpcParams {
+    scan_id: String,
+    path: String,
+    kind: String,
+}
+#[derive(Deserialize)]
+struct DeleteCheckRemoveRpcParams {
+    scan_id: String,
+    path: String,
+}
+#[derive(Deserialize)]
 struct TreeRpcParams {
     scan_id: String,
     path: Option<String>,
@@ -771,6 +812,11 @@ struct TreeRpcParams {
     flat: bool,
     /// Backup tier filter for the flat view: "unsafe" | "warn" | "safe" | "all".
     backup: Option<String>,
+    /// Tier scope for the flat filter: "external" (default) | "internal".
+    scope: Option<String>,
+    /// When true, restrict results to the scan's Delete Check set.
+    #[serde(default)]
+    delete_check: bool,
 }
 #[derive(Deserialize)]
 struct FindQuery {

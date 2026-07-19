@@ -309,6 +309,12 @@ struct TreeArgs {
     /// Backup tier filter for --flat: all (default), unsafe, warn, or safe.
     #[arg(long, default_value = "all")]
     backup: String,
+    /// Tier scope for --backup: external (default) or internal (same-disk).
+    #[arg(long, default_value = "external")]
+    scope: String,
+    /// Restrict results to the scan's Delete Check set.
+    #[arg(long)]
+    delete_check: bool,
 }
 
 #[derive(Args)]
@@ -319,6 +325,9 @@ struct ExportVerdictsArgs {
     /// Backup tier filter: all (default), unsafe, warn, or safe.
     #[arg(long, default_value = "all")]
     backup: String,
+    /// Verdict scope: external (default, cross-location) or internal (same-disk).
+    #[arg(long, default_value = "external")]
+    scope: String,
     /// Write TSV to this file. Defaults to stdout.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -1008,6 +1017,8 @@ fn run_scans(
                     &args.scan_id,
                     &path,
                     &args.backup,
+                    &args.scope,
+                    args.delete_check,
                     Some(args.limit.max(1)),
                     args.offset,
                 )?
@@ -1019,6 +1030,7 @@ fn run_scans(
                     args.offset,
                     args.depth,
                     None,
+                    args.delete_check,
                 )?
             };
             // JSON consumers get the entries array (a list-shaped command, like
@@ -1047,7 +1059,7 @@ fn run_scans(
         ScanSubcommand::ExportVerdicts(args) => {
             let db = Database::open(db_path)?;
             let path = normalized_tree_path(&args.path)?;
-            let tsv = db.export_verdicts_tsv(&args.scan_id, &path, &args.backup)?;
+            let tsv = db.export_verdicts_tsv(&args.scan_id, &path, &args.backup, &args.scope)?;
             match &args.out {
                 Some(out) => {
                     std::fs::write(out, tsv.as_bytes())?;

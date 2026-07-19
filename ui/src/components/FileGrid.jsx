@@ -411,7 +411,13 @@ function FileGridInner({
                         onDragStart={reorderable ? (event) => handleHeaderDragStart(event, columnId) : undefined}
                         onDragEnd={reorderable ? handleHeaderDragEnd : undefined}
                         onClick={header.column.getToggleSortingHandler()}
-                        title={reorderable ? 'Drag to reorder · click to sort' : undefined}
+                        title={
+                          header.column.columnDef.meta?.tooltip
+                            ? `${header.column.columnDef.meta.tooltip}${reorderable ? ' · drag to reorder · click to sort' : ''}`
+                            : reorderable
+                              ? 'Drag to reorder · click to sort'
+                              : undefined
+                        }
                       >
                         {flexRender(header.column.columnDef.header, header.getContext())}
                         <span className={fileGridSortClassName}>{sortIndicator(header.column.getIsSorted())}</span>
@@ -615,7 +621,11 @@ function baseColumns(options) {
       header: 'Backup',
       size: 200,
       minSize: 130,
-      meta: { contentOverflowVisible: true },
+      meta: {
+        contentOverflowVisible: true,
+        tooltip:
+          'Backup status in the selected scope. Folder chips count UNIQUE contents (deduped), so sibling folders sharing content do not sum to the parent.'
+      },
       accessorFn: (row) => deleteCheckRank(scope === 'internal' ? row.internal_status : row.backup_status),
       sortingFn: 'basic',
       cell: ({ row }) =>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import FileGrid from './FileGrid.jsx';
 import DirectoryTree from './DirectoryTree.jsx';
 import { Icon } from './Icon.jsx';
@@ -97,18 +97,24 @@ export default function FileExplorer(props) {
     onRequestDeletePath
   } = props;
 
+  // Delete Check mode is App-owned (the server filters Browse/Flat to the
+  // staged set when it is on); this component only toggles + renders it.
+  const deleteCheckMode = Boolean(props.deleteCheckMode);
+  const onSetDeleteCheckMode = props.onSetDeleteCheckMode;
   const [inspected, setInspected] = useState(null);
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  // Stable handler so the memoized FileGrid isn't re-rendered by a fresh
+  // function identity on every FileExplorer render.
+  const handleInspectRow = useCallback((entry) => {
+    setInspected(entry);
+    setInspectorOpen(true);
+  }, []);
   // Backup safety filter over the current listing. This is "Delete Check" in the
   // unified model: markers are always shown; the filter narrows to a tier.
   const [backupFilter, setBackupFilter] = useState('all');
   // Backup scope: 'external' = backed up on ANOTHER location; 'internal' = a
   // duplicate exists on THIS same disk.
   const [scope, setScope] = useState('external');
-  // Delete Check mode: reveal the staged-set panel (membership + validation).
-  // It does not filter the browse — that stranded the view in non-staged folders
-  // and broke the paginated Flat list; the panel is the set's source of truth.
-  const [deleteCheckMode, setDeleteCheckMode] = useState(false);
   // Browse (immediate-children tree, default) vs Flat (paginated all-descendants).
   const [viewMode, setViewMode] = useState(props.defaultViewMode || 'browse');
   // User-resizable Folders (directory-tree) pane width, persisted.
@@ -145,7 +151,7 @@ export default function FileExplorer(props) {
   const [flatLoading, setFlatLoading] = useState(false);
   const [flatOffset, setFlatOffset] = useState(0);
   const FLAT_LIMIT = 500;
-  const flatKey = `${activeScan?.id}|${selectedPath}|${backupFilter}`;
+  const flatKey = `${activeScan?.id}|${selectedPath}|${backupFilter}|${scope}|${deleteCheckMode}`;
 
   // Reset paging whenever the flat query inputs change.
   useEffect(() => {
@@ -156,7 +162,7 @@ export default function FileExplorer(props) {
     if (viewMode !== 'flat' || typeof onLoadFlat !== 'function' || !activeScan) return undefined;
     let cancelled = false;
     setFlatLoading(true);
-    onLoadFlat(selectedPath, backupFilter, flatOffset, FLAT_LIMIT)
+    onLoadFlat(selectedPath, backupFilter, flatOffset, FLAT_LIMIT, { scope, deleteCheck: deleteCheckMode })
       .then((page) => {
         if (cancelled) return;
         setFlatTotal(page.total || 0);
@@ -169,7 +175,7 @@ export default function FileExplorer(props) {
     return () => {
       cancelled = true;
     };
-  }, [viewMode, flatKey, flatOffset, onLoadFlat, activeScan, selectedPath, backupFilter]);
+  }, [viewMode, flatKey, flatOffset, onLoadFlat, activeScan, selectedPath, backupFilter, scope, deleteCheckMode]);
 
   if (!activeScan) return <p className={emptyTextClassName}>Select or run a scan to browse this location.</p>;
   const selectedCount = selectedGridEntries.length;
@@ -271,79 +277,6 @@ export default function FileExplorer(props) {
   );
 
   // Flat view: reuse the FileGrid with full paths + a "load more" pager.
-  const flatView = (
-    <div className="mt-2 flex min-h-[620px] flex-col overflow-hidden border border-sidebar-border bg-bg">
-      {breadcrumbBar}
-      <div className="relative min-h-0 flex-1 overflow-auto">
-        <FileGrid
-          storageKey="locations-flat"
-          rows={flatRows}
-          visibleColumns={gridVisibleColumns}
-          fullPathName
-          selectable={false}
-          deleteCheck
-          scope={scope}
-          onInspect={onInspectFile}
-          onInspectRow={(entry) => { setInspected(entry); setInspectorOpen(true); }}
-        />
-        {!flatRows.length && (
-          <p className="pointer-events-none absolute inset-x-0 top-[52px] p-[18px] text-center text-[11px] text-muted">
-            {flatLoading ? 'Loading files…' : 'No files match this filter.'}
-          </p>
-        )}
-      </div>
-      {flatRows.length < flatTotal && (
-        <div className="flex flex-none items-center justify-center gap-3 border-t border-sidebar-border bg-sidebar-bg px-3 py-2 text-[11px] text-muted">
-          <span>Showing {flatRows.length.toLocaleString()} of {flatTotal.toLocaleString()}</span>
-          <button
-            type="button"
-            className={ctrlBtn}
-            disabled={flatLoading}
-            onClick={() => setFlatOffset(flatRows.length)}
-          >
-            {flatLoading ? 'Loading…' : 'Load more'}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-
-  const resultsTable = (
-    <div className="relative block min-h-[420px] flex-1 overflow-auto bg-bg">
-      <FileGrid
-        storageKey="locations-files"
-        rows={filteredGridRows}
-        visibleColumns={gridVisibleColumns}
-        selectable
-        deleteCheck
-        scope={scope}
-        selectedPaths={selectedGridPaths}
-        inspectedPath={inspected?.path}
-        canBuildThumbnails={canBuildThumbnails}
-        onOpen={onOpenGridEntry}
-        onInspect={onInspectFile}
-        onInspectRow={(entry) => { setInspected(entry); setInspectorOpen(true); }}
-        onToggleSelection={onToggleGridSelection}
-        onSetSelection={onSetGridSelection}
-        onBuildThumbnails={onRequestBuildThumbnailsForEntry}
-        onExclude={onRequestExcludePath}
-        onDelete={onRequestDeletePath}
-        onAddDeleteCheck={onAddDeleteCheck}
-      />
-      {!filteredGridRows.length && (
-        <p className="pointer-events-none absolute inset-x-0 top-[52px] z-[1] p-[18px] text-center text-[11px] text-muted">
-          {filesLoading
-            ? 'Loading files…'
-            : backupFilter !== 'all'
-              ? `No ${backupFilter} files in this folder.`
-              : activeScanStatus
-                ? 'Waiting for the first flushed files...'
-                : 'No files discovered at this path yet.'}
-        </p>
-      )}
-    </div>
-  );
-
   const dcFolders = deleteCheckSet.filter((m) => m.kind === 'dir');
   const dcFiles = deleteCheckSet.filter((m) => m.kind === 'file');
   const deleteCheckPanel = (
@@ -381,6 +314,11 @@ export default function FileExplorer(props) {
       <div className="border-t border-sidebar-border p-3">
         {deleteCheckValidation && (
           <div className="mb-2 space-y-1 text-[11px]">
+            {deleteCheckValidation.stale && (
+              <p className="rounded bg-warning-soft px-1.5 py-1 text-[10px] font-semibold text-warning">
+                Set changed — numbers below are stale, re-validate.
+              </p>
+            )}
             <div className="flex justify-between"><span className="text-muted">Affected files</span><span className="tabular-nums text-text">{(deleteCheckValidation.affected_files || 0).toLocaleString()}</span></div>
             <div className="flex justify-between"><span className="text-muted">Safe to delete</span><span className="tabular-nums text-success">{(deleteCheckValidation.safe_to_delete || 0).toLocaleString()}</span></div>
             <div className={`flex justify-between rounded px-1.5 py-1 ${deleteCheckValidation.would_lose_last_copy > 0 ? 'bg-[color:color-mix(in_srgb,var(--danger)_12%,var(--surface))] text-danger' : 'text-muted'}`}>
@@ -395,6 +333,96 @@ export default function FileExplorer(props) {
       </div>
     </aside>
   );
+
+  const flatView = (
+    <div className="mt-2 flex min-h-[620px] flex-col overflow-hidden border border-sidebar-border bg-bg">
+      {breadcrumbBar}
+      <div
+        className="grid min-h-0 flex-1"
+        style={{ gridTemplateColumns: deleteCheckMode ? 'minmax(0,1fr) 320px' : 'minmax(0,1fr)' }}
+      >
+        <div className="relative min-h-0 overflow-auto">
+          <FileGrid
+            storageKey="locations-flat"
+            rows={flatRows}
+            visibleColumns={gridVisibleColumns}
+            fullPathName
+            selectable
+            deleteCheck
+            scope={scope}
+            selectedPaths={selectedGridPaths}
+            onToggleSelection={onToggleGridSelection}
+            onSetSelection={onSetGridSelection}
+            onAddDeleteCheck={onAddDeleteCheck}
+            onInspect={onInspectFile}
+            onInspectRow={handleInspectRow}
+          />
+          {!flatRows.length && (
+            <p className="pointer-events-none absolute inset-x-0 top-[52px] p-[18px] text-center text-[11px] text-muted">
+              {flatLoading
+                ? 'Loading files…'
+                : deleteCheckMode
+                  ? 'No Delete Check paths under this folder. Toggle Delete Check off to browse everything.'
+                  : 'No files match this filter.'}
+            </p>
+          )}
+        </div>
+        {deleteCheckMode && deleteCheckPanel}
+      </div>
+      {flatRows.length < flatTotal && (
+        <div className="flex flex-none items-center justify-center gap-3 border-t border-sidebar-border bg-sidebar-bg px-3 py-2 text-[11px] text-muted">
+          <span>Showing {flatRows.length.toLocaleString()} of {flatTotal.toLocaleString()}</span>
+          <button
+            type="button"
+            className={ctrlBtn}
+            disabled={flatLoading}
+            onClick={() => setFlatOffset(flatRows.length)}
+          >
+            {flatLoading ? 'Loading…' : 'Load more'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  const resultsTable = (
+    <div className="relative block min-h-[420px] flex-1 overflow-auto bg-bg">
+      <FileGrid
+        storageKey="locations-files"
+        rows={filteredGridRows}
+        visibleColumns={gridVisibleColumns}
+        selectable
+        deleteCheck
+        scope={scope}
+        selectedPaths={selectedGridPaths}
+        inspectedPath={inspected?.path}
+        canBuildThumbnails={canBuildThumbnails}
+        onOpen={onOpenGridEntry}
+        onInspect={onInspectFile}
+        onInspectRow={handleInspectRow}
+        onToggleSelection={onToggleGridSelection}
+        onSetSelection={onSetGridSelection}
+        onBuildThumbnails={onRequestBuildThumbnailsForEntry}
+        onExclude={onRequestExcludePath}
+        onDelete={onRequestDeletePath}
+        onAddDeleteCheck={onAddDeleteCheck}
+      />
+      {!filteredGridRows.length && (
+        <p className="pointer-events-none absolute inset-x-0 top-[52px] z-[1] p-[18px] text-center text-[11px] text-muted">
+          {filesLoading
+            ? 'Loading files…'
+            : deleteCheckMode
+              ? 'No Delete Check paths under this folder. Toggle Delete Check off to browse everything.'
+              : backupFilter !== 'all'
+                ? `No ${backupFilter} files in this folder.`
+                : activeScanStatus
+                  ? 'Waiting for the first flushed files...'
+                  : 'No files discovered at this path yet.'}
+        </p>
+      )}
+    </div>
+  );
+
 
   const inspectorPane = (
     <aside className="flex min-h-0 min-w-0 flex-col border-l border-sidebar-border bg-sidebar-bg" aria-label="File inspector">
@@ -464,53 +492,14 @@ export default function FileExplorer(props) {
         </div>
       </header>
 
-      {/* Workspace row: Browse/Flat view switch + backup filter + command actions */}
+      {/* Nav row 1: view switch + command actions */}
       <div className="flex flex-wrap items-center gap-2 border-b border-sidebar-border py-2">
         <div className="inline-flex h-[30px] flex-none items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5" role="tablist" aria-label="Scan views">
           <BackupFilterChip label="Browse" active={viewMode === 'browse'} onClick={() => setViewMode('browse')} />
           <BackupFilterChip label="Flat" active={viewMode === 'flat'} onClick={() => setViewMode('flat')} />
         </div>
 
-        <div className="flex items-center gap-1.5">
-          <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Backup</span>
-          <div className="inline-flex h-[30px] items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5">
-            <BackupFilterChip label="All" active={backupFilter === 'all'} onClick={() => setBackupFilter('all')} />
-            <BackupFilterChip label="Unsafe" count={hasBackupData ? backupTotals.unsafe : undefined} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
-            <BackupFilterChip label="Warn" count={hasBackupData ? backupTotals.warn : undefined} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
-            <BackupFilterChip label="Safe" count={hasBackupData ? backupTotals.safe : undefined} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Scope</span>
-          <div className="inline-flex h-[30px] items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5">
-            <BackupFilterChip label="External" active={scope === 'external'} onClick={() => setScope('external')} />
-            <BackupFilterChip label="Internal" active={scope === 'internal'} onClick={() => setScope('internal')} />
-          </div>
-        </div>
-
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          {selectedCount > 0 && typeof onAddDeleteCheck === 'function' && (
-            <button
-              type="button"
-              className={ctrlBtn}
-              onClick={() => onAddDeleteCheck(selectedGridEntries)}
-              disabled={busy}
-              title="Add the selected files/folders to the Delete Check set"
-            >
-              <Icon name="add" className="h-3.5 w-3.5" /> Add to Delete Check
-            </button>
-          )}
-          <button
-            type="button"
-            className={`${ctrlBtn} ${deleteCheckMode ? 'border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger' : ''}`}
-            onClick={() => setDeleteCheckMode((on) => !on)}
-            aria-pressed={deleteCheckMode}
-            title="Show the Delete Check set panel (staged paths + deletion-impact validation)"
-          >
-            <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Delete Check
-            <span className={`ml-1 rounded-full px-1.5 text-[10px] ${deleteCheckMode ? 'bg-danger/20' : 'bg-surface-muted'}`}>{deleteCheckSet.length}</span>
-          </button>
           <button
             type="button"
             className={ctrlBtn}
@@ -533,10 +522,10 @@ export default function FileExplorer(props) {
             type="button"
             className={ctrlBtn}
             onClick={() => {
-              const params = new URLSearchParams({ path: selectedPath || '', backup: backupFilter });
+              const params = new URLSearchParams({ path: selectedPath || '', backup: backupFilter, scope });
               window.open(`/api/scans/${activeScan.id}/verdicts?${params.toString()}`, '_blank');
             }}
-            title="Download a TSV of every file here with its backup verdict and copy counts"
+            title={`Download a TSV of every file here with its ${scope} backup verdict and copy counts`}
           >
             <Icon name="download" className="h-3.5 w-3.5" /> Export TSV
           </button>
@@ -550,6 +539,52 @@ export default function FileExplorer(props) {
             aria-pressed={inspectorOpen}
           >
             <Icon name="sidebarOpen" className="h-3.5 w-3.5" /> Inspector
+          </button>
+        </div>
+      </div>
+
+      {/* Nav row 2: analysis — backup filter + scope + Delete Check set */}
+      <div className="flex flex-wrap items-center gap-3 border-b border-sidebar-border py-2" aria-label="Backup analysis">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Backup</span>
+          <div className="inline-flex h-[30px] items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5">
+            <BackupFilterChip label="All" active={backupFilter === 'all'} onClick={() => setBackupFilter('all')} />
+            <BackupFilterChip label="Unsafe" count={hasBackupData ? backupTotals.unsafe : undefined} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
+            <BackupFilterChip label="Warn" count={hasBackupData ? backupTotals.warn : undefined} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
+            <BackupFilterChip label="Safe" count={hasBackupData ? backupTotals.safe : undefined} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Scope</span>
+          <div className="inline-flex h-[30px] items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5">
+            <BackupFilterChip label="External" active={scope === 'external'} onClick={() => setScope('external')} />
+            <BackupFilterChip label="Internal" active={scope === 'internal'} onClick={() => setScope('internal')} />
+          </div>
+        </div>
+
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          {typeof onAddDeleteCheck === 'function' && (
+            <button
+              type="button"
+              className={ctrlBtn}
+              onClick={() => onAddDeleteCheck(selectedGridEntries)}
+              disabled={busy || !selectedCount}
+              title={selectedCount ? 'Add the selected files/folders to the Delete Check set' : 'Select rows to add them to the Delete Check set'}
+            >
+              <Icon name="add" className="h-3.5 w-3.5" />
+              {selectedCount ? `Add to Delete Check (${selectedCount})` : 'Add to Delete Check'}
+            </button>
+          )}
+          <button
+            type="button"
+            className={`${ctrlBtn} ${deleteCheckMode ? 'border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger' : ''}`}
+            onClick={() => onSetDeleteCheckMode?.(!deleteCheckMode)}
+            aria-pressed={deleteCheckMode}
+            title="Filter Browse/Flat to the staged set and show the deletion-impact panel"
+          >
+            <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Delete Check
+            <span className={`ml-1 rounded-full px-1.5 text-[10px] ${deleteCheckMode ? 'bg-danger/20' : 'bg-surface-muted'}`}>{deleteCheckSet.length}</span>
           </button>
         </div>
       </div>

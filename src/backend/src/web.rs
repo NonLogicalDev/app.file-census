@@ -402,6 +402,8 @@ async fn handle_rpc_result(
                     &params.scan_id,
                     params.path.as_deref().unwrap_or(""),
                     params.backup.as_deref().unwrap_or("all"),
+                    params.scope.as_deref().unwrap_or("external"),
+                    params.delete_check,
                     params.limit,
                     params.offset.unwrap_or(0),
                 )?)?)
@@ -413,6 +415,7 @@ async fn handle_rpc_result(
                     params.offset.unwrap_or(0),
                     params.depth.unwrap_or(1),
                     params.query.as_ref(),
+                    params.delete_check,
                 )?)?)
             }
         }
@@ -884,6 +887,12 @@ struct TreeRpcParams {
     flat: bool,
     /// Backup tier filter for the flat list: "all" | "unsafe" | "warn" | "safe".
     backup: Option<String>,
+    /// Tier scope for the flat filter: "external" (default) | "internal".
+    scope: Option<String>,
+    /// When true, restrict results to the scan's Delete Check set (staged
+    /// members, their descendants, and — in the tree — their ancestors).
+    #[serde(default)]
+    delete_check: bool,
 }
 
 async fn scan_location(
@@ -1078,6 +1087,7 @@ async fn scan_files(
 struct VerdictsQuery {
     path: Option<String>,
     backup: Option<String>,
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1124,6 +1134,7 @@ async fn scan_tree(
         query.offset.unwrap_or(0),
         query.depth.unwrap_or(1),
         file_query.as_ref(),
+        false,
     )?))
 }
 
@@ -1136,6 +1147,7 @@ async fn scan_verdicts(
         &scan_id,
         query.path.as_deref().unwrap_or(""),
         query.backup.as_deref().unwrap_or("all"),
+        query.scope.as_deref().unwrap_or("external"),
     )?;
     let filename = format!("file-census-verdicts-{scan_id}.tsv");
     Ok((

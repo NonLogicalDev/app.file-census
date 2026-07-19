@@ -2052,7 +2052,10 @@ impl Database {
     /// Reads a persisted scan tree page from one SQLite snapshot. Excluded rows
     /// are materialized before matching, directory aggregation, counting, and
     /// pagination. `query.limit` and `query.offset` are intentionally ignored:
-    /// this endpoint owns its own page window.
+    /// this endpoint owns its own page window. When `delete_check` is set, the
+    /// page is filtered (BEFORE pagination, so totals stay correct) to rows that
+    /// are staged in the scan's Delete Check set, live under a staged folder, or
+    /// are an ancestor of a staged member (keeping the chain navigable).
     pub fn scan_tree_page(
         &self,
         scan_id: &str,
@@ -2061,6 +2064,7 @@ impl Database {
         offset: u32,
         depth: u32,
         query: Option<&FileSearchQuery>,
+        delete_check: bool,
     ) -> Result<TreePage> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
@@ -2099,6 +2103,17 @@ impl Database {
             let rows = scan_tree_source_rows(&tx, scan_id, &normalized, ready_run_id)?;
             build_tree_page_entries(rows, &normalized, depth, filter)?
         };
+        // Delete Check scope filter: applied before counting/pagination so the
+        // reported total and page windows reflect the filtered set.
+        let entries = if delete_check {
+            let members = delete_check_members_conn(&tx, scan_id)?;
+            entries
+                .into_iter()
+                .filter(|entry| entry_in_delete_check_scope(&entry.path, &members))
+                .collect()
+        } else {
+            entries
+        };
         let total = entries.len() as u64;
         let limit = limit.unwrap_or(DEFAULT_TREE_PAGE_LIMIT).max(1);
         let start = usize::try_from(offset)
@@ -2127,8 +2142,15 @@ impl Database {
     /// Exports every descendant file under `prefix` as a tab-separated verdict
     /// table (header + one row per file), for acting on the dedup analysis with
     /// external tools. `backup` filters to a tier ("unsafe" | "warn" | "safe") or
-    /// "all". `verdict` uses plain words; hashes are included for exact matching.
-    pub fn export_verdicts_tsv(&self, scan_id: &str, prefix: &str, backup: &str) -> Result<String> {
+    /// "all"; `scope` selects the External (cross-location, default) or Internal
+    /// (same-disk) classification for BOTH the filter and the verdict words.
+    pub fn export_verdicts_tsv(
+        &self,
+        scan_id: &str,
+        prefix: &str,
+        backup: &str,
+        scope: &str,
+    ) -> Result<String> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         ensure_scan_exists(&tx, scan_id)?;
@@ -2146,16 +2168,26 @@ impl Database {
         } else {
             format!("{}%", normalized.replace('%', "\\%").replace('_', "\\_"))
         };
-        let backup_where = match backup {
-            "unsafe" => " AND COALESCE(dc.unsafe_file_count, 0) > 0",
-            "warn" => " AND COALESCE(dc.warn_file_count, 0) > 0",
-            "safe" => " AND COALESCE(dc.safe_file_count, 0) > 0",
+        let internal = scope == "internal";
+        let backup_where = match (backup, internal) {
+            ("unsafe", false) => " AND COALESCE(dc.unsafe_file_count, 0) > 0",
+            ("warn", false) => " AND COALESCE(dc.warn_file_count, 0) > 0",
+            ("safe", false) => " AND COALESCE(dc.safe_file_count, 0) > 0",
+            ("unsafe", true) => " AND COALESCE(dc.int_unsafe_file_count, 0) > 0",
+            ("warn", true) => " AND COALESCE(dc.int_warn_file_count, 0) > 0",
+            ("safe", true) => " AND COALESCE(dc.int_safe_file_count, 0) > 0",
             _ => "",
+        };
+        let tier_cols = if internal {
+            "COALESCE(dc.int_safe_file_count, 0), COALESCE(dc.int_warn_file_count, 0), \
+             COALESCE(dc.int_unsafe_file_count, 0)"
+        } else {
+            "COALESCE(dc.safe_file_count, 0), COALESCE(dc.warn_file_count, 0), \
+             COALESCE(dc.unsafe_file_count, 0)"
         };
         let sql = format!(
             "SELECT f.path, f.size, f.blake3, f.blake3_light, f.mtime, \
-                    COALESCE(dc.safe_file_count, 0), COALESCE(dc.warn_file_count, 0), \
-                    COALESCE(dc.unsafe_file_count, 0), COALESCE(dc.copies_here, 0), \
+                    {tier_cols}, COALESCE(dc.copies_here, 0), \
                     COALESCE(dc.copies_away, 0) \
              FROM files f \
              LEFT JOIN scan_excluded_files excluded_f \
@@ -2176,13 +2208,26 @@ impl Database {
             let blake3: String = row.get(2)?;
             let blake3_light: String = row.get(3)?;
             let mtime: Option<String> = row.get(4)?;
-            // Column 5 (safe_file_count) is implied by the else branch below.
+            // Column 5 (safe tier) is implied by the else branch below.
             let warn: i64 = row.get(6)?;
             let unsafe_: i64 = row.get(7)?;
             let here: i64 = row.get(8)?;
             let away: i64 = row.get(9)?;
             let verdict = if ready_run_id.is_none() {
                 "unknown"
+            } else if internal {
+                // Internal scope: is there another copy on THIS disk?
+                if unsafe_ > 0 {
+                    if away > 0 {
+                        "unique_on_disk_has_offdisk"
+                    } else {
+                        "unique_on_disk"
+                    }
+                } else if warn > 0 {
+                    "similar_on_disk"
+                } else {
+                    "dup_on_disk"
+                }
             } else if unsafe_ > 0 {
                 if here > 0 {
                     "unsafe_no_offdisk_backup"
@@ -2217,13 +2262,18 @@ impl Database {
 
     /// Paginated flat list of every descendant file under `prefix`, each carrying
     /// its backup safety status from the cache. Powers the Flat view. `backup`
-    /// filters to a tier ("unsafe" | "warn" | "safe") or "all". Filtering happens
-    /// in SQL so pagination stays correct over the filtered set.
+    /// filters to a tier ("unsafe" | "warn" | "safe") or "all", evaluated against
+    /// the External tiers by default or the Internal (same-disk) tiers when
+    /// `scope` is "internal". When `delete_check` is set, results are further
+    /// restricted (in SQL, before LIMIT/OFFSET, so pagination and totals stay
+    /// correct) to files staged in the scan's Delete Check set.
     pub fn scan_flat_page(
         &self,
         scan_id: &str,
         prefix: &str,
         backup: &str,
+        scope: &str,
+        delete_check: bool,
         limit: Option<u32>,
         offset: u32,
     ) -> Result<TreePage> {
@@ -2244,13 +2294,64 @@ impl Database {
         } else {
             format!("{}%", normalized.replace('%', "\\%").replace('_', "\\_"))
         };
-        // Fixed set → safe to inline into the SQL.
-        let backup_where = match backup {
-            "unsafe" => " AND COALESCE(dc.unsafe_file_count, 0) > 0",
-            "warn" => " AND COALESCE(dc.warn_file_count, 0) > 0",
-            "safe" => " AND COALESCE(dc.safe_file_count, 0) > 0",
+        // Fixed sets → safe to inline into the SQL. Internal scope filters on the
+        // same-disk tier columns; External (default) on the cross-location ones.
+        let internal = scope == "internal";
+        let backup_where = match (backup, internal) {
+            ("unsafe", false) => " AND COALESCE(dc.unsafe_file_count, 0) > 0",
+            ("warn", false) => " AND COALESCE(dc.warn_file_count, 0) > 0",
+            ("safe", false) => " AND COALESCE(dc.safe_file_count, 0) > 0",
+            ("unsafe", true) => " AND COALESCE(dc.int_unsafe_file_count, 0) > 0",
+            ("warn", true) => " AND COALESCE(dc.int_warn_file_count, 0) > 0",
+            ("safe", true) => " AND COALESCE(dc.int_safe_file_count, 0) > 0",
             _ => "",
         };
+
+        // Delete Check scope: (f.path = staged_file OR f.path under staged_dir …).
+        // Empty set with the flag on -> empty page (honest zero, not "everything").
+        let members = if delete_check {
+            delete_check_members_conn(&tx, scan_id)?
+        } else {
+            Vec::new()
+        };
+        if delete_check && members.is_empty() {
+            let page = TreePage {
+                entries: Vec::new(),
+                limit: limit.unwrap_or(DEFAULT_TREE_PAGE_LIMIT).max(1),
+                offset: 0,
+                total: 0,
+                has_more: false,
+                next_offset: None,
+                duplicate_cache,
+                folder_summary: folder_summary_from_cache(
+                    &tx,
+                    ready_run_id.as_deref(),
+                    scan_id,
+                    &normalized,
+                )?,
+            };
+            tx.commit()?;
+            return Ok(page);
+        }
+        let mut dc_where = String::new();
+        let mut dc_binds: Vec<rusqlite::types::Value> = Vec::new();
+        if delete_check {
+            let mut clauses = Vec::new();
+            for member in &members {
+                if member.kind == "dir" {
+                    clauses.push("f.path LIKE ? ESCAPE '\\'".to_string());
+                    dc_binds.push(
+                        format!("{}/%", member.path.replace('%', "\\%").replace('_', "\\_"))
+                            .into(),
+                    );
+                } else {
+                    clauses.push("f.path = ?".to_string());
+                    dc_binds.push(member.path.clone().into());
+                }
+            }
+            dc_where = format!(" AND ({})", clauses.join(" OR "));
+        }
+
         let limit = limit.unwrap_or(DEFAULT_TREE_PAGE_LIMIT).max(1);
         let base_from = format!(
             "FROM files f \
@@ -2259,26 +2360,43 @@ impl Database {
              LEFT JOIN duplicate_cache_path_counts dc \
                     ON dc.run_id = ?3 AND dc.scan_id = f.scan_id AND dc.path = f.path \
              WHERE excluded_f.file_id IS NULL AND f.scan_id = ?1 AND f.error IS NULL \
-               AND f.kind = 'file' AND f.path LIKE ?2 ESCAPE '\\'{backup_where}"
+               AND f.kind = 'file' AND f.path LIKE ?2 ESCAPE '\\'{backup_where}{dc_where}"
         );
+        let base_params = |extra: &[rusqlite::types::Value]| -> Vec<rusqlite::types::Value> {
+            let mut values: Vec<rusqlite::types::Value> = vec![
+                scan_id.to_string().into(),
+                like.clone().into(),
+                ready_run_id.clone().into(),
+            ];
+            values.extend(dc_binds.iter().cloned());
+            values.extend(extra.iter().cloned());
+            values
+        };
 
         // The total drives pagination. Counting `files` joined to the cache over
         // every descendant is O(subtree) (~18s on the default DB's 133k-file
-        // scan). Instead read it from the pre-rolled cache: summing the
-        // per-child rollup columns over `parent_path = prefix` yields the subtree
-        // total (files or a backup tier) in O(children) via the parent_path index.
+        // scan). Prefer the pre-rolled cache shortcut (O(children) via the
+        // parent_path index) — but only when no Delete Check restriction applies
+        // and the filter matches the shortcut's columns.
         let covers_cache = match ready_run_id.as_deref() {
             Some(run_id) => duplicate_cache_covers_scan(&tx, run_id, scan_id)?,
             None => false,
         };
-        let total = if covers_cache {
+        let total = if covers_cache && !delete_check {
             let run_id = ready_run_id.as_deref().expect("covered implies ready run");
             let parent_path = normalized.strip_suffix('/').unwrap_or(&normalized);
+            let tier_cols = if internal {
+                "COALESCE(SUM(file_count), 0), COALESCE(SUM(int_unsafe_file_count), 0), \
+                 COALESCE(SUM(int_warn_file_count), 0), COALESCE(SUM(int_safe_file_count), 0)"
+            } else {
+                "COALESCE(SUM(file_count), 0), COALESCE(SUM(unsafe_file_count), 0), \
+                 COALESCE(SUM(warn_file_count), 0), COALESCE(SUM(safe_file_count), 0)"
+            };
             let (files_c, unsafe_c, warn_c, safe_c): (i64, i64, i64, i64) = tx.query_row(
-                "SELECT COALESCE(SUM(file_count), 0), COALESCE(SUM(unsafe_file_count), 0), \
-                        COALESCE(SUM(warn_file_count), 0), COALESCE(SUM(safe_file_count), 0) \
-                 FROM duplicate_cache_path_counts \
-                 WHERE run_id = ?1 AND scan_id = ?2 AND parent_path = ?3",
+                &format!(
+                    "SELECT {tier_cols} FROM duplicate_cache_path_counts \
+                     WHERE run_id = ?1 AND scan_id = ?2 AND parent_path = ?3"
+                ),
                 params![run_id, scan_id, parent_path],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
@@ -2289,18 +2407,34 @@ impl Database {
                 _ => files_c,
             };
             tier.max(0) as u64
-        } else {
-            // No cache yet: backup tiers are unknown, so count all visible files
-            // under the prefix (the filter has nothing to apply against).
+        } else if backup_where.is_empty() {
+            // Delete Check restriction with no tier filter: count WITHOUT the
+            // cache join (it would cost a per-row lookup across the whole
+            // filtered set and the count doesn't need tier columns).
+            let mut lean_params: Vec<rusqlite::types::Value> =
+                vec![scan_id.to_string().into(), like.clone().into()];
+            lean_params.extend(dc_binds.iter().cloned());
             tx.query_row(
-                "SELECT COUNT(*) FROM files f \
-                 LEFT JOIN scan_excluded_files excluded_f \
-                        ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id \
-                 WHERE excluded_f.file_id IS NULL AND f.scan_id = ?1 AND f.error IS NULL \
-                   AND f.kind = 'file' AND f.path LIKE ?2 ESCAPE '\\'",
-                params![scan_id, like],
+                &format!(
+                    "SELECT COUNT(*) FROM files f \
+                     LEFT JOIN scan_excluded_files excluded_f \
+                            ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id \
+                     WHERE excluded_f.file_id IS NULL AND f.scan_id = ?1 AND f.error IS NULL \
+                       AND f.kind = 'file' AND f.path LIKE ?2 ESCAPE '\\'{dc_where}"
+                ),
+                rusqlite::params_from_iter(lean_params.iter()),
                 |row| row.get::<_, i64>(0),
-            )? as u64
+            )?
+            .max(0) as u64
+        } else {
+            // Tier filter + Delete Check (or no cache): count the filtered set
+            // with the same predicate the page uses.
+            tx.query_row(
+                &format!("SELECT COUNT(*) {base_from}"),
+                rusqlite::params_from_iter(base_params(&[]).iter()),
+                |row| row.get::<_, i64>(0),
+            )?
+            .max(0) as u64
         };
 
         let entries = {
@@ -2311,11 +2445,15 @@ impl Database {
                         COALESCE(dc.copies_away, 0), COALESCE(dc.int_safe_file_count, 0), \
                         COALESCE(dc.int_warn_file_count, 0), COALESCE(dc.int_unsafe_file_count, 0), \
                         f.blake3_light \
-                 {base_from} ORDER BY f.path LIMIT ?4 OFFSET ?5"
+                 {base_from} ORDER BY f.path LIMIT ? OFFSET ?"
             );
             let mut stmt = tx.prepare(&sql)?;
+            // Unnumbered LIMIT/OFFSET placeholders bind after ?1..?3 and the
+            // delete-check binds, matching base_params' ordering.
+            let page_params =
+                base_params(&[(limit as i64).into(), (offset as i64).into()]);
             let rows = stmt.query_map(
-                params![scan_id, like, ready_run_id, limit, offset],
+                rusqlite::params_from_iter(page_params.iter()),
                 |row| {
                     let tier_word = |safe: i64, warn: i64, unsafe_: i64| {
                         if unsafe_ > 0 {
@@ -2416,16 +2554,7 @@ impl Database {
     /// Returns the current per-scan Delete Check set, ordered by path.
     pub fn delete_check_set(&self, scan_id: &str) -> Result<Vec<DeleteCheckMember>> {
         let conn = self.connect()?;
-        let mut stmt = conn.prepare(
-            "SELECT path, kind FROM delete_check_members WHERE scan_id = ?1 ORDER BY path",
-        )?;
-        let rows = stmt.query_map([scan_id], |row| {
-            Ok(DeleteCheckMember {
-                path: row.get(0)?,
-                kind: row.get(1)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        delete_check_members_conn(&conn, scan_id)
     }
 
     /// Adds a dir/file to the scan's Delete Check set, keeping it an antichain.
@@ -3248,6 +3377,31 @@ fn normalize_tree_prefix(prefix: &str) -> String {
     } else {
         format!("{trimmed}/")
     }
+}
+
+/// Per-scan Delete Check members, ordered by path (connection-level).
+fn delete_check_members_conn(conn: &Connection, scan_id: &str) -> Result<Vec<DeleteCheckMember>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, kind FROM delete_check_members WHERE scan_id = ?1 ORDER BY path",
+    )?;
+    let rows = stmt.query_map([scan_id], |row| {
+        Ok(DeleteCheckMember {
+            path: row.get(0)?,
+            kind: row.get(1)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+/// True when a browse row at `path` belongs in the Delete Check scope: it is a
+/// staged member, lives under a staged folder, or is an ancestor of a staged
+/// member (ancestors stay visible so the chain to staged paths is navigable).
+fn entry_in_delete_check_scope(path: &str, members: &[DeleteCheckMember]) -> bool {
+    members.iter().any(|member| {
+        path == member.path
+            || (member.kind == "dir" && path_encloses(&member.path, path))
+            || path_encloses(path, &member.path)
+    })
 }
 
 /// True when `ancestor` is a strict ancestor directory of `descendant` (both
@@ -5627,6 +5781,37 @@ mod tests {
         assert_eq!(v2.affected_files, 5);
         assert_eq!(v2.would_lose_last_copy, 4, "HASH_B (2) + HASH_C (2)");
         assert_eq!(v2.safe_to_delete, 1, "only HASH_A survives");
+
+        // Server-side Delete Check FILTER. Set = {dir1, dir2/d.jpg}.
+        // Tree root: dir1 is staged; dir2 is an ANCESTOR of a staged file -> both
+        // visible (chain stays navigable), with correct filtered totals.
+        let names = |page: &TreePage| {
+            page.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>()
+        };
+        let root = db.scan_tree_page(&s1, "", Some(50), 0, 1, None, true).unwrap();
+        assert_eq!(names(&root), vec!["dir1", "dir2"]);
+        assert_eq!(root.total, 2);
+        // Inside dir2 only the staged file shows.
+        let dir2 = db.scan_tree_page(&s1, "dir2", Some(50), 0, 1, None, true).unwrap();
+        assert_eq!(names(&dir2), vec!["d.jpg"]);
+        // Flat: exactly the affected files, paginated over the filtered set.
+        let flat = db.scan_flat_page(&s1, "", "all", "external", true, Some(50), 0).unwrap();
+        assert_eq!(flat.total, 5);
+        assert_eq!(flat.entries.len(), 5);
+        let flat_page = db.scan_flat_page(&s1, "", "all", "external", true, Some(2), 2).unwrap();
+        assert_eq!(flat_page.total, 5);
+        assert_eq!(flat_page.entries.len(), 2, "windowed over the FILTERED set");
+        // Removing the staged file drops dir2 from the tree scope entirely.
+        db.delete_check_remove(&s1, "dir2/d.jpg").unwrap();
+        let root2 = db.scan_tree_page(&s1, "", Some(50), 0, 1, None, true).unwrap();
+        assert_eq!(names(&root2), vec!["dir1"]);
+        let flat2 = db.scan_flat_page(&s1, "", "all", "external", true, Some(50), 0).unwrap();
+        assert_eq!(flat2.total, 4, "only dir1's files remain in scope");
+        // Empty set + filter on -> honest empty page, not everything.
+        db.delete_check_clear(&s1).unwrap();
+        let flat3 = db.scan_flat_page(&s1, "", "all", "external", true, Some(50), 0).unwrap();
+        assert_eq!(flat3.total, 0);
+        assert!(flat3.entries.is_empty());
     }
 
     #[test]
@@ -5695,7 +5880,7 @@ mod tests {
         crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &crate::events::EventHub::default());
         assert_eq!(db.current_duplicate_cache_status().unwrap().status, "ready");
 
-        let page = db.scan_tree_page(&src_scan, "dir", Some(50), 0, 1, None).unwrap();
+        let page = db.scan_tree_page(&src_scan, "dir", Some(50), 0, 1, None, false).unwrap();
         let status = |name: &str| {
             page.entries
                 .iter()
@@ -5709,18 +5894,18 @@ mod tests {
         assert_eq!(status("similar.jpg"), "warn");
 
         // The parent folder rolls up 1 unsafe + 1 warn.
-        let root_page = db.scan_tree_page(&src_scan, "", Some(50), 0, 1, None).unwrap();
+        let root_page = db.scan_tree_page(&src_scan, "", Some(50), 0, 1, None, false).unwrap();
         let folder = root_page.entries.iter().find(|e| e.name == "dir").unwrap();
         assert_eq!(folder.unsafe_count, 1);
         assert_eq!(folder.warn_count, 1);
 
         // Flat view: all three descendant files, each with its backup status.
-        let flat = db.scan_flat_page(&src_scan, "", "all", Some(50), 0).unwrap();
+        let flat = db.scan_flat_page(&src_scan, "", "all", "external", false, Some(50), 0).unwrap();
         assert_eq!(flat.total, 3);
         assert!(flat.entries.iter().all(|e| e.kind == "file"));
         assert_eq!(flat.entries.iter().find(|e| e.name == "exact.jpg").unwrap().backup_status, "safe");
         // Flat view filtered to the unsafe tier returns just the blocker.
-        let flat_unsafe = db.scan_flat_page(&src_scan, "", "unsafe", Some(50), 0).unwrap();
+        let flat_unsafe = db.scan_flat_page(&src_scan, "", "unsafe", "external", false, Some(50), 0).unwrap();
         assert_eq!(flat_unsafe.total, 1);
         assert_eq!(flat_unsafe.entries[0].name, "only.raw");
     }
@@ -6597,7 +6782,7 @@ mod tests {
         // scan_tree_duplicate_counts_come_from_cache_not_inline); here we assert
         // the visibility boundary through the production paged tree path.
         let tree = db
-            .scan_tree_page(&source_scan_id, "", Some(50), 0, 1, None)
+            .scan_tree_page(&source_scan_id, "", Some(50), 0, 1, None, false)
             .unwrap();
         assert_eq!(
             tree.entries.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
@@ -6712,7 +6897,7 @@ mod tests {
             .unwrap();
 
         let page = db
-            .scan_tree_page(&scan_id, "", Some(20), 0, 1, None)
+            .scan_tree_page(&scan_id, "", Some(20), 0, 1, None, false)
             .unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.entries[0].path, "folder");
@@ -6889,7 +7074,7 @@ mod tests {
         db.set_representative_scan(&scan_id).unwrap();
 
         // Before any cache run the tree reports backup status as unknown ("").
-        let page = db.scan_tree_page(&scan_id, "folder", Some(20), 0, 1, None).unwrap();
+        let page = db.scan_tree_page(&scan_id, "folder", Some(20), 0, 1, None, false).unwrap();
         let file_a = page.entries.iter().find(|e| e.path == "folder/a.txt").unwrap();
         assert_eq!(file_a.backup_status, "");
 
@@ -6900,7 +7085,7 @@ mod tests {
 
         // Both files share content in the ONLY location, so cross-location they
         // are unsafe, each with one same-location copy (⌂ here = 1).
-        let file_page = db.scan_tree_page(&scan_id, "folder", Some(20), 0, 1, None).unwrap();
+        let file_page = db.scan_tree_page(&scan_id, "folder", Some(20), 0, 1, None, false).unwrap();
         for name in ["folder/a.txt", "folder/b.txt"] {
             let entry = file_page.entries.iter().find(|e| e.path == name).unwrap();
             assert_eq!(entry.backup_status, "unsafe", "{name}");
@@ -6910,7 +7095,7 @@ mod tests {
 
         // The directory row: 2 file instances but 1 UNIQUE content, which is
         // unsafe (no cross-location copy).
-        let root_page = db.scan_tree_page(&scan_id, "", Some(20), 0, 1, None).unwrap();
+        let root_page = db.scan_tree_page(&scan_id, "", Some(20), 0, 1, None, false).unwrap();
         let folder = root_page.entries.iter().find(|e| e.path == "folder").unwrap();
         assert_eq!(folder.kind, "dir");
         assert_eq!(folder.file_count, 2, "instances");

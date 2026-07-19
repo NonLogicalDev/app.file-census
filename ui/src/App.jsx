@@ -590,6 +590,7 @@ export default function App() {
         depth: 1,
         limit: 500,
         offset: 0,
+        delete_check: Boolean(latest.current.deleteCheckMode),
         ...(latest.current.query?.trim() || latest.current.searchFilters?.length
           ? { query: buildFileSearchQuery(latest.current.query, latest.current.searchFilters) }
           : {})
@@ -1982,13 +1983,15 @@ export default function App() {
   }
 
   const loadFlatPage = useCallback(
-    async (path, backup, offset, limit = 500) =>
+    async (path, backup, offset, limit = 500, options = {}) =>
       requireTreePage(
         await rpc('scans.tree', {
           scan_id: latest.current.selectedScanId,
           path: path || '',
           flat: true,
           backup: backup || 'all',
+          scope: options.scope || 'external',
+          delete_check: Boolean(options.deleteCheck ?? latest.current.deleteCheckMode),
           limit,
           offset: offset || 0
         })
@@ -1999,6 +2002,15 @@ export default function App() {
   // Per-scan Delete Check set (dirs/files staged for deletion) + validation.
   const [deleteCheckSet, setDeleteCheckSet] = useState([]);
   const [deleteCheckValidation, setDeleteCheckValidation] = useState(null);
+  // Delete Check mode: server-side filter of Browse/Flat to the staged set.
+  // Lives in App so tree/flat fetches carry the flag.
+  const [deleteCheckMode, setDeleteCheckModeState] = useState(false);
+  const setDeleteCheckMode = useCallback((on) => {
+    latest.current.deleteCheckMode = on;
+    setDeleteCheckModeState(on);
+    // Refetch the current folder under the new mode.
+    void loadTreeRef.current?.(latest.current.selectedPath, { updateHistory: false });
+  }, []);
   const refreshDeleteCheckSet = useCallback(async (scanId = latest.current.selectedScanId) => {
     if (!scanId) { setDeleteCheckSet([]); return; }
     try {
@@ -2022,7 +2034,7 @@ export default function App() {
       }
     }
     if (members) setDeleteCheckSet(members);
-    setDeleteCheckValidation(null);
+    setDeleteCheckValidation((prev) => (prev ? { ...prev, stale: true } : prev));
     if (refusals.length) setMessage(refusals.join('\n'));
   }, [rpc]);
   const removeFromDeleteCheck = useCallback(async (path) => {
@@ -2030,14 +2042,14 @@ export default function App() {
     if (!scanId) return;
     const members = await rpc('delete_check.remove', { scan_id: scanId, path });
     setDeleteCheckSet(members || []);
-    setDeleteCheckValidation(null);
+    setDeleteCheckValidation((prev) => (prev ? { ...prev, stale: true } : prev));
   }, [rpc]);
   const clearDeleteCheck = useCallback(async () => {
     const scanId = latest.current.selectedScanId;
     if (!scanId) return;
     const members = await rpc('delete_check.clear', { scan_id: scanId });
     setDeleteCheckSet(members || []);
-    setDeleteCheckValidation(null);
+    setDeleteCheckValidation((prev) => (prev ? { ...prev, stale: true } : prev));
   }, [rpc]);
   const validateDeleteCheck = useCallback(async () => {
     const scanId = latest.current.selectedScanId;
@@ -2052,6 +2064,8 @@ export default function App() {
   const commonLocationProps = {
     onLoadFlat: loadFlatPage,
     folderSummary,
+    deleteCheckMode,
+    onSetDeleteCheckMode: setDeleteCheckMode,
     deleteCheckSet,
     deleteCheckValidation,
     onAddDeleteCheck: addToDeleteCheck,

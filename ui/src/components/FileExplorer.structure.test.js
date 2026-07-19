@@ -19,8 +19,9 @@ test('backup filter is always-on, and the Delete Check SET is a distinct staged 
   // callout and the subview tab switch).
   assert.doesNotMatch(fileExplorerSource, /Check current folder/);
   assert.doesNotMatch(fileExplorerSource, /onSetScanSubview/);
-  // The restored Delete Check set: toggle, membership panel, validation.
-  assert.match(fileExplorerSource, /setDeleteCheckMode/);
+  // The restored Delete Check set: App-owned mode toggle (server-side filter),
+  // membership panel, validation.
+  assert.match(fileExplorerSource, /onSetDeleteCheckMode/);
   assert.match(fileExplorerSource, /deleteCheckPanel/);
   assert.match(fileExplorerSource, /onValidateDeleteCheck/);
   assert.match(fileExplorerSource, /onAddDeleteCheck/);
