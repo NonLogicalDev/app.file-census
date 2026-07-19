@@ -366,6 +366,70 @@ toggle too (default open, persisted `locations-folders-open`); collapsed, the
 left column disappears entirely. Grid columns are built dynamically from the
 two toggles, so with both closed the table spans the full width.
 
+## Additional steering (2026-07-19 ~17:30)
+
+- In Delete Check mode, the Folders sidebar tree must GREY OUT folders that are
+  only in the remain-set (not staged / not an ancestor or descendant of a staged
+  member) and refuse selecting them — avoids the confusing empty-folder jumps.
+  Client-side: the set is small; reuse the staged/ancestor/descendant predicate.
+- Perf fix landed alongside: visible_file_occurrences_page dropped the temp
+  exclusion-table copy (file-info hung for content present in many scans);
+  now anti-joins the persistent scan_excluded_files per visibility scan.
+
+## AGREED Delete Check model (2026-07-19 ~16:10) — supersedes prior DC marker semantics
+
+The set splits the scan into **delete-set** and **remain-set**. Delete Check ON
+browses the delete-set (both views, server-scoped as built), and the Backup
+markers RE-CLASSIFY each staged file against what survives the deletion:
+safe = exact copy survives in the remain-set (same scan/disk) OR on an external
+location; partial = only a light-hash survivor; unsafe = nothing survives (last
+copy). Two staged twins are unsafe if nothing else survives. The markers ARE
+the validation — the Validate button is removed; "would lose last copy" = the
+mode's Unsafe total. Scope toggle in the mode: combined survivor universe
+(option (a)); chips filter by survival tier. Strip in the mode = browsed
+folder's delete-set FILE counts (sums to files shown); set totals live in the
+DC bar.
+Implementation: per-file classification is page-local (bounded GROUP BY queries
+for inside-set exact/light counts + scan light totals; exact totals come from
+cached copies_here/away). Folder rollups + totals come from a persisted
+`delete_check_class` table built by a background pass (fingerprint = member
+paths + cache run id), rebuilt on set mutations, `ready` flag + event
+(`delete_check_class_ready`) so the UI shows "computing…" then refreshes.
+Residual noted honestly: outside DC mode the strip still shows unique-content
+counts (instance-count strip needs cache v8 per-dir instance tiers — queued).
+
+## Strip semantics correction (user steering 2026-07-19 ~15:50, screenshot)
+
+Steering: in Delete Check mode, browsing a 6,638-file folder showed
+"Unsafe 0 / Warn 0 / Safe 1" (the SET totals) — unrelated to the folder on
+screen. The strip numbers "should add up to the number of files in the folder";
+delete check must let the user inspect ALL files of a folder classified by
+safety.
+Decisions: revert the strip=set-totals override. The Backup strip ALWAYS
+describes the BROWSED FOLDER, and switches from unique-content counts to FILE
+(instance) counts so safe+partial+unsafe sums to the folder's file count
+(row chips keep unique-content counts per the earlier steering; strip tooltip
+explains). While DC mode is on, the strip shows the folder∩set intersection
+(folder's own counts when it lies inside a staged member; sum of staged members
+under it otherwise; zeros when disjoint). Set-wide tier totals move into the
+DC bar. Requires cache v8: per-dir instance-tier columns (ext+int).
+
+## File Info modal rework (user steering 2026-07-19 ~15:40)
+
+Steering: (1) convert the modal's tab selector to the segmented-chip form used
+everywhere else (Browse|Flat / scope chips); (2) the Locations tab must show
+only occurrences from REPRESENTATIVE scans (the per-location effective scan:
+representative else latest complete full-hash) unless an "All scans" toggle is
+selected, and the list must be grouped by location -> scan.
+Decisions: extract the chip into a shared ui `SegmentedChip` (FileExplorer's
+BackupFilterChip becomes a thin wrapper) so modal + explorer share one form.
+Representative filtering is SERVER-side (a `representative_only` param on
+files.details / files.occurrences filtering to the scope's effective scan ids)
+so pagination totals stay correct; grouping is client-side presentation over
+the loaded page (location header -> scan header -> compact path rows; drop the
+per-occurrence blake3/sha repetition — occurrences share the content hash by
+definition).
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no

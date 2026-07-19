@@ -215,6 +215,41 @@ function LocationForm({ title, form, setForm, busy, onSubmit, onCancel, submitLa
   );
 }
 
+// Groups a flat occurrence page by location -> scan for the Locations tab.
+// Occurrences share the content hash by definition, so per-row hash/size
+// repetition is dropped; each scan header notes whether it is the location's
+// representative (effective) scan.
+function groupOccurrences(occurrences = []) {
+  const locations = new Map();
+  for (const occurrence of occurrences) {
+    const locationKey = occurrence.location_slug || occurrence.location_name || '?';
+    if (!locations.has(locationKey)) {
+      locations.set(locationKey, {
+        slug: occurrence.location_slug,
+        name: occurrence.location_name,
+        total: 0,
+        scans: new Map()
+      });
+    }
+    const location = locations.get(locationKey);
+    location.total += 1;
+    if (!location.scans.has(occurrence.scan_id)) {
+      location.scans.set(occurrence.scan_id, {
+        scan_id: occurrence.scan_id,
+        started_at: occurrence.scan_started_at,
+        status: occurrence.scan_status,
+        representative: Boolean(occurrence.representative),
+        occurrences: []
+      });
+    }
+    location.scans.get(occurrence.scan_id).occurrences.push(occurrence);
+  }
+  return [...locations.values()].map((location) => ({
+    ...location,
+    scans: [...location.scans.values()]
+  }));
+}
+
 function FileInfoModal(props) {
   const { fileInfo, busy } = props;
   const [tab, setTab] = useState('preview');
@@ -303,10 +338,21 @@ function FileInfoModal(props) {
         {tab === 'locations' && (
           <section className="grid gap-2.5">
             <div className="flex items-center justify-between gap-3 rounded-panel border border-border bg-surface-muted px-3 py-2 max-[720px]:items-stretch max-[720px]:flex-col">
-              <p className="m-0 text-sm text-muted">
-                Showing <strong className="text-ink">{visibleOccurrenceCount}</strong> of <strong className="text-ink">{occurrenceCount}</strong> occurrences.
-                {fileInfo.occurrences_truncated && ' This content appears many times, so occurrences load in pages.'}
-              </p>
+              <div className="flex items-center gap-3">
+                <SegmentedTabs role="tablist" aria-label="Occurrence scope">
+                  <SegmentedTab type="button" role="tab" active={!props.fileOccAllScans} aria-selected={!props.fileOccAllScans} onClick={() => props.onSetFileOccurrenceScope?.(false)}>
+                    Representative
+                  </SegmentedTab>
+                  <SegmentedTab type="button" role="tab" active={Boolean(props.fileOccAllScans)} aria-selected={Boolean(props.fileOccAllScans)} onClick={() => props.onSetFileOccurrenceScope?.(true)}>
+                    All scans
+                  </SegmentedTab>
+                </SegmentedTabs>
+                <p className="m-0 text-sm text-muted">
+                  Showing <strong className="text-ink">{visibleOccurrenceCount}</strong> of <strong className="text-ink">{occurrenceCount}</strong>
+                  {props.fileOccAllScans ? ' occurrences across all scans.' : ' occurrences in representative scans.'}
+                  {fileInfo.occurrences_truncated && ' Loads in pages.'}
+                </p>
+              </div>
               {hasMoreOccurrences && (
                 <Button type="button" variant="secondary" onClick={props.onLoadMoreFileOccurrences} disabled={busy}>
                   Load more
@@ -314,28 +360,37 @@ function FileInfoModal(props) {
               )}
             </div>
             <div className={occurrenceListClassName}>
-              {fileInfo.occurrences.map((occurrence) => (
-                <article className={occurrenceCardClassName} key={`${occurrence.scan_id}-${occurrence.path}`}>
+              {groupOccurrences(fileInfo.occurrences).map((location) => (
+                <article className={occurrenceCardClassName} key={location.slug}>
                   <div className={occurrenceHeaderClassName}>
-                    <strong>{occurrence.location_slug} <span className={occurrenceLocationNameClassName}>{occurrence.location_name}</span></strong>
-                    <span className={occurrenceHeaderMetaClassName}>{statusLabel(occurrence.scan_status)} - {when(occurrence.scan_started_at)}</span>
+                    <strong>{location.slug} <span className={occurrenceLocationNameClassName}>{location.name}</span></strong>
+                    <span className={occurrenceHeaderMetaClassName}>
+                      {location.total} {location.total === 1 ? 'copy' : 'copies'} · {location.scans.length} {location.scans.length === 1 ? 'scan' : 'scans'}
+                    </span>
                   </div>
-                  <div className={occurrencePathRowClassName}>
-                    <code className={occurrencePathTextClassName}>{occurrence.path}</code>
-                    <Toolbar className={actionToolbarClassName}>
-                      <Button type="button" variant="secondary" onClick={() => props.onOpenOccurrence(occurrence)} disabled={busy} icon={<Icon name="openFile" />}>Open File</Button>
-                      <Button type="button" variant="secondary" onClick={() => props.onRevealOccurrence(occurrence)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal File</Button>
-                    </Toolbar>
-                  </div>
-                  <div className={metadataGridClassName({ compact: true })}>
-                    <div className={metadataItemClassName({ compact: true })}><span className={metadataLabelClassName}>Scan</span><code className={metadataValueClassName}>{occurrence.scan_id}</code></div>
-                    <div className={metadataItemClassName({ compact: true })}><span className={metadataLabelClassName}>Size</span><strong className={metadataValueClassName}>{bytes(occurrence.size)}</strong></div>
-                    <div className={metadataItemClassName({ compact: true })}><span className={metadataLabelClassName}>CTime</span><strong className={metadataValueClassName}>{when(occurrence.ctime)}</strong></div>
-                    <div className={metadataItemClassName({ compact: true })}><span className={metadataLabelClassName}>Modified</span><strong className={metadataValueClassName}>{when(occurrence.mtime)}</strong></div>
-                    <div className={metadataItemClassName({ compact: true })}><span className={metadataLabelClassName}>Mode</span><strong className={metadataValueClassName}>{occurrence.mode || ''}</strong></div>
-                    <div className={metadataItemClassName({ compact: true })}><span className={metadataLabelClassName}>BLAKE3</span><code className={metadataValueClassName}>{occurrence.blake3}</code></div>
-                    <div className={metadataItemClassName({ compact: true })}><span className={metadataLabelClassName}>SHA-256</span><code className={metadataValueClassName}>{occurrence.sha256}</code></div>
-                  </div>
+                  {location.scans.map((scan) => (
+                    <div key={scan.scan_id} className="mt-2 first:mt-0">
+                      <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+                        <Icon name="scan" className="h-3.5 w-3.5" />
+                        <span>{when(scan.started_at)}</span>
+                        <span>· {statusLabel(scan.status)}</span>
+                        {scan.representative && (
+                          <span className="rounded-full border border-accent-line px-1.5 text-[10px] font-semibold text-accent">representative</span>
+                        )}
+                        <code className="text-[10px] text-text-tertiary">{scan.scan_id.slice(0, 8)}</code>
+                      </div>
+                      {scan.occurrences.map((occurrence) => (
+                        <div className={occurrencePathRowClassName} key={occurrence.path}>
+                          <code className={occurrencePathTextClassName}>{occurrence.path}</code>
+                          <span className="whitespace-nowrap text-[11px] text-text-tertiary">{when(occurrence.mtime)}</span>
+                          <Toolbar className={actionToolbarClassName}>
+                            <Button type="button" variant="secondary" onClick={() => props.onOpenOccurrence(occurrence)} disabled={busy} icon={<Icon name="openFile" />}>Open</Button>
+                            <Button type="button" variant="secondary" onClick={() => props.onRevealOccurrence(occurrence)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal</Button>
+                          </Toolbar>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
                 </article>
               ))}
             </div>

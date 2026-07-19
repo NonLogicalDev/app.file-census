@@ -3163,19 +3163,25 @@ impl Database {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         ensure_scan_exists(&tx, scan_id)?;
+        // Anti-join the persistent per-scan exclusion sets instead of copying
+        // every excluded id of every scan containing this content into a temp
+        // table (that made file-info hang for content present in many scans).
         let mut visibility_scan_ids = scan_ids_with_file_occurrence(&tx, blake3, size)?;
         if !visibility_scan_ids.iter().any(|candidate| candidate == scan_id) {
             visibility_scan_ids.push(scan_id.to_string());
         }
-        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
+        for visible_scan in &visibility_scan_ids {
+            ensure_scan_exclusion_cache_ready(&tx, visible_scan)?;
+        }
 
         let origin = tx
             .query_row(
                 r#"
                 SELECT f.kind, f.blake3, f.size
                 FROM files f
-                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
-                WHERE excluded_f.id IS NULL
+                LEFT JOIN scan_excluded_files excluded_f
+                  ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id
+                WHERE excluded_f.file_id IS NULL
                   AND f.scan_id = ?1
                   AND f.path = ?2
                   AND f.error IS NULL
@@ -3204,10 +3210,11 @@ impl Database {
                 SELECT f.scan_id, s.started_at, s.finished_at, s.status, l.slug, l.name,
                        f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
                 FROM files f
-                LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+                LEFT JOIN scan_excluded_files excluded_f
+                  ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id
                 JOIN scans s ON s.id = f.scan_id
                 JOIN locations l ON l.id = s.location_id
-                WHERE excluded_f.id IS NULL
+                WHERE excluded_f.file_id IS NULL
                   AND f.kind = 'file'
                   AND f.error IS NULL
                   AND f.blake3 = ?1

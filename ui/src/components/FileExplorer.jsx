@@ -755,6 +755,8 @@ export default function FileExplorer(props) {
                   expandedPaths={directoryTreeExpandedPaths}
                   loadingPaths={directoryTreeLoadingPaths}
                   selectedPath={selectedPath}
+                  deleteCheckMode={deleteCheckMode}
+                  deleteCheckSet={deleteCheckSet}
                   onToggle={onToggleDirectoryTree}
                   onSelect={onLoadTree}
                   onLoadMore={onLoadMoreDirectoryTree}

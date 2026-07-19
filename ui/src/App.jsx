@@ -1874,7 +1874,7 @@ export default function App() {
     if (entry.kind === 'parent' || entry.kind === 'dir') loadTree(entry.path);
   }
 
-  async function inspectFile(entry) {
+  async function inspectFile(entry, { allScans = latest.current.fileOccAllScans } = {}) {
     const scanId = entry?.scan_id || latest.current.selectedScanId;
     if (!scanId || !entry?.path || entry.kind !== 'file' || !entry.blake3 || entry.size == null) return;
     setBusy(true);
@@ -1883,7 +1883,8 @@ export default function App() {
         scan_id: scanId,
         path: entry.path,
         blake3: entry.blake3,
-        size: entry.size
+        size: entry.size,
+        representative_only: !allScans
       });
       const nextFileInfo = { ...details, file: { ...entry, scan_id: scanId } };
       setFileInfo(nextFileInfo);
@@ -1894,6 +1895,15 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Locations tab scope: representative scans only (default) vs all scans.
+  const [fileOccAllScans, setFileOccAllScans] = useState(false);
+  latest.current.fileOccAllScans = fileOccAllScans;
+  async function setFileOccurrenceScope(allScans) {
+    setFileOccAllScans(allScans);
+    const current = latest.current.fileInfo;
+    if (current?.file) await inspectFile(current.file, { allScans });
   }
 
   async function loadMoreFileOccurrences() {
@@ -1911,7 +1921,8 @@ export default function App() {
         blake3,
         size,
         limit: current.occurrence_limit || 100,
-        offset: current.occurrence_next_offset
+        offset: current.occurrence_next_offset,
+        representative_only: !latest.current.fileOccAllScans
       });
       setFileInfo((latestInfo) => {
         if (!latestInfo || latestInfo.file.scan_id !== scanId || latestInfo.file.path !== path || latestInfo.file.blake3 !== blake3 || latestInfo.file.size !== size) {
@@ -2659,6 +2670,8 @@ export default function App() {
         onRevealOccurrence={revealOccurrence}
         onRevealFileInScan={revealOccurrence}
         onLoadMoreFileOccurrences={loadMoreFileOccurrences}
+        fileOccAllScans={fileOccAllScans}
+        onSetFileOccurrenceScope={setFileOccurrenceScope}
         onBuildThumbnails={buildThumbnails}
       />
     </Shell>

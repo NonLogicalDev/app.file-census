@@ -1,17 +1,33 @@
 import { useMemo } from 'react';
 import { Icon } from './Icon.jsx';
 
+// While Delete Check mode is on, folders that exist only in the REMAIN-set
+// (unrelated to any staged member) are greyed out and not selectable — the
+// scoped browse would show nothing there. In scope: staged members, their
+// descendants, and their ancestors (the navigable chain). Root always is.
+function pathInDeleteCheckScope(path, members) {
+  if (!path) return true;
+  return members.some((member) => {
+    if (path === member.path) return true;
+    if (member.kind === 'dir' && path.startsWith(`${member.path}/`)) return true;
+    return member.path.startsWith(`${path}/`);
+  });
+}
+
 export default function DirectoryTree({
   nodes = {},
   expandedPaths = [],
   loadingPaths = [],
   selectedPath = '',
+  deleteCheckMode = false,
+  deleteCheckSet = [],
   onToggle,
   onSelect,
   onLoadMore
 }) {
   const expanded = useMemo(() => new Set(expandedPaths), [expandedPaths]);
   const loading = useMemo(() => new Set(loadingPaths), [loadingPaths]);
+  const scopeMembers = deleteCheckMode ? deleteCheckSet : null;
   const root = { name: 'Scan root', path: '', kind: 'dir', file_count: 0 };
 
   return (
@@ -28,6 +44,7 @@ export default function DirectoryTree({
           expanded={expanded}
           loading={loading}
           selectedPath={selectedPath}
+          scopeMembers={scopeMembers}
           onToggle={onToggle}
           onSelect={onSelect}
           onLoadMore={onLoadMore}
@@ -45,6 +62,7 @@ function DirectoryBranch({
   expanded,
   loading,
   selectedPath,
+  scopeMembers = null,
   onToggle,
   onSelect,
   onLoadMore,
@@ -56,6 +74,8 @@ function DirectoryBranch({
   const isLoading = loading.has(entry.path);
   const hasPotentialChildren = root || !page || isLoading || children.length > 0 || page.hasMore;
   const isSelected = selectedPath === entry.path;
+  // Delete Check mode: remain-set-only folders are visible but inert.
+  const outOfScope = scopeMembers !== null && !pathInDeleteCheckScope(entry.path, scopeMembers);
   // Match the indentation the node's own children get (rendered at depth + 1),
   // including the 24px chevron gutter so placeholders align under child labels.
   const childIndent = 4 + (depth + 1) * 14 + 24;
@@ -65,7 +85,11 @@ function DirectoryBranch({
       <div
         className={[
           'group flex h-7 min-w-0 items-center rounded-ui',
-          isSelected ? 'bg-surface-muted text-text' : 'text-muted hover:bg-surface-subtle hover:text-muted-strong'
+          outOfScope
+            ? 'text-border-strong opacity-50'
+            : isSelected
+              ? 'bg-surface-muted text-text'
+              : 'text-muted hover:bg-surface-subtle hover:text-muted-strong'
         ].join(' ')}
         style={{ paddingInlineStart: `${4 + depth * 14}px` }}
       >
@@ -83,9 +107,10 @@ function DirectoryBranch({
         )}
         <button
           type="button"
-          className="flex h-full min-w-0 flex-1 items-center gap-1.5 border-0 bg-transparent px-0 pr-1.5 text-left text-[11px] text-inherit focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-line"
-          onClick={() => onSelect?.(entry.path)}
-          title={entry.path || 'Scan root'}
+          className={`flex h-full min-w-0 flex-1 items-center gap-1.5 border-0 bg-transparent px-0 pr-1.5 text-left text-[11px] text-inherit focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-line ${outOfScope ? 'cursor-not-allowed' : ''}`}
+          onClick={() => { if (!outOfScope) onSelect?.(entry.path); }}
+          disabled={outOfScope}
+          title={outOfScope ? `${entry.path} — not in the Delete Check set` : entry.path || 'Scan root'}
         >
           <Icon name="folder" size={14} className="shrink-0 text-muted group-hover:text-muted-strong" />
           <span className="min-w-0 flex-1 truncate">{entry.name}</span>
@@ -105,6 +130,7 @@ function DirectoryBranch({
               expanded={expanded}
               loading={loading}
               selectedPath={selectedPath}
+              scopeMembers={scopeMembers}
               onToggle={onToggle}
               onSelect={onSelect}
               onLoadMore={onLoadMore}

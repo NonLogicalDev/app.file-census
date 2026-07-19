@@ -17,17 +17,21 @@ test('file details modal pages high-cardinality occurrence lists', () => {
   assert.match(modalSource, /Load more/);
 });
 
-test('file details occurrence rows expose direct compact actions', () => {
-  assert.match(modalSource, /onOpenOccurrence\(occurrence\)[\s\S]*?>Open File<\/Button>/);
-  assert.match(modalSource, /onRevealOccurrence\(occurrence\)[\s\S]*?>Reveal File<\/Button>/);
+test('file details occurrences are grouped by location/scan with compact actions', () => {
+  // Grouped rendering: location -> scan (with a representative badge) -> paths.
+  assert.match(modalSource, /function groupOccurrences/);
+  assert.match(modalSource, /representative/);
+  assert.match(modalSource, /onOpenOccurrence\(occurrence\)[\s\S]*?>Open<\/Button>/);
+  assert.match(modalSource, /onRevealOccurrence\(occurrence\)[\s\S]*?>Reveal<\/Button>/);
   assert.match(modalSource, /Reveal in scan/);
+  // Scope toggle: representative scans only (default) vs all scans.
+  assert.match(modalSource, /onSetFileOccurrenceScope/);
+  assert.match(modalSource, /All scans/);
   assert.doesNotMatch(modalSource, /function OccurrenceActionMenu/);
 });
 
 test('file details metadata and EXIF use the current compact data primitives', () => {
   assert.match(modalSource, /<section className=\{metadataGridClassName\(\)\}>/);
-  assert.match(modalSource, /metadataGridClassName\(\{ compact: true \}\)/);
-  assert.match(modalSource, /metadataItemClassName\(\{ compact: true \}\)/);
   assert.match(modalSource, /exifPanelClassName/);
   assert.match(modalSource, /exifGridClassName/);
   assert.doesNotMatch(modalSource, /metadataRows\.map/);
