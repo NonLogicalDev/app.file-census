@@ -326,6 +326,7 @@ export default function FileExplorer(props) {
         onBuildThumbnails={onRequestBuildThumbnailsForEntry}
         onExclude={onRequestExcludePath}
         onDelete={onRequestDeletePath}
+        onAddDeleteCheck={onAddDeleteCheck}
       />
       {!filteredGridRows.length && (
         <p className="pointer-events-none absolute inset-x-0 top-[52px] z-[1] p-[18px] text-center text-[11px] text-muted">

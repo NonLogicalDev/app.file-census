@@ -32,7 +32,7 @@ test('file grid numeric columns align headers with numeric cell values', () => {
 });
 
 test('file grid keeps normal scan actions out of the explicit Delete Check workflow', () => {
-  assert.match(fileGridSource, /if \(onDelete \|\| onBuildThumbnails \|\| onExclude\)/);
+  assert.match(fileGridSource, /if \(onDelete \|\| onBuildThumbnails \|\| onExclude \|\| onAddDeleteCheck\)/);
   assert.match(fileGridSource, /columns\.push\(\{\s*id: 'actions'/);
   assert.match(fileGridSource, /Build thumbnails/);
   assert.match(fileGridSource, /Remove from scan/);
