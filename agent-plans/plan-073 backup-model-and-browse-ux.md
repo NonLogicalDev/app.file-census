@@ -559,6 +559,29 @@ Five AddTasks from the user, all shipped:
 5. Tree-in-table indent 16→48px per depth level (3x).
 Tests: 146 UI. Screenshots: shot-rail-peek.png.
 
+## Desktop parity pass 2026-07-20 (~02:00) — (`e78c55d`..`370f7e1`)
+
+User: "lets do a pass to ensure that desktop app is fully equivalent superset
+of webapp." Audit: RPC method names already matched 1:1 (38 each), but
+BEHAVIOR did not. Gaps found + ported to app.rs:
+1. spawn_delete_check_class_rebuild never existed natively — desktop DC mode
+   would compute survival NEVER (stuck "computing survival…"). Ported thread +
+   delete_check_class_ready emission at the same 4 call sites as web.
+2. set/clear_representative + excludes.set/append_exact_path didn't spawn
+   duplicate_cache::spawn_rebuild_if_stale natively → stale browse markers.
+3. Export TSV was window.open('/api/…') — dead under Tauri. Native path:
+   AppCore::export_verdicts_tsv + `verdicts_export` Tauri command (rfd save
+   dialog, writes file, returns path) + UI branch in App.exportVerdicts.
+Regression guard: app.rs test `native_app_handles_every_web_rpc` diffs the
+`"x.y" =>` match arms of web.rs vs app.rs at test time — any web-only RPC now
+fails the build. Native crate compile-verified (runtime click-through on the
+Tauri shell still pending — needs a windowed session).
+Also user steering in this pass: tree indent 48→22px/level (chevron centers
+under parent icon, 137 vs 138 live) and non-expandable rows reserve the 16px
+chevron slot (dir icon x=129 == file icon x=129). Learned + memorized: never
+pkill file-census by name — the user runs their own CLI processes; kill only
+port 3944.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
