@@ -58,8 +58,14 @@ test('file grid header helpers preserve sticky sortable columns and resize affor
   assert.match(fileGridSortClassName, /text-\[0\.72rem\]/);
   assert.match(fileGridResizableHeaderClassName, /relative/);
   assert.match(fileGridResizerClassName({ resizing: false }), /cursor-col-resize/);
-  assert.match(fileGridResizerClassName({ resizing: false }), /after:bg-transparent/);
-  assert.match(fileGridResizerClassName({ resizing: true }), /after:bg-accent/);
+  // The divider bar is visible by default (discoverable) and accents while resizing.
+  assert.match(fileGridResizerClassName({ resizing: false }), /after:bg-border-strong/);
+  assert.match(fileGridResizerClassName({ resizing: true }), /after:!bg-accent/);
+});
+
+test('file grid cells and headers carry column dividers', () => {
+  assert.match(fileGridHeaderCellClassName(), /border-r/);
+  assert.match(fileGridCellClassName(), /border-r/);
 });
 
 test('file grid row helpers preserve alternating rows, actions, and selection', () => {

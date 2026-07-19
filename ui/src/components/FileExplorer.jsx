@@ -98,6 +98,35 @@ export default function FileExplorer(props) {
   const [backupFilter, setBackupFilter] = useState('all');
   // Browse (immediate-children tree, default) vs Flat (paginated all-descendants).
   const [viewMode, setViewMode] = useState(props.defaultViewMode || 'browse');
+  // User-resizable Folders (directory-tree) pane width, persisted.
+  const FOLDERS_MIN = 160;
+  const FOLDERS_MAX = 520;
+  const [foldersWidth, setFoldersWidth] = useState(() => {
+    const stored = Number(globalThis.localStorage?.getItem('locations-folders-width'));
+    return Number.isFinite(stored) && stored >= FOLDERS_MIN ? Math.min(stored, FOLDERS_MAX) : 224;
+  });
+  useEffect(() => {
+    globalThis.localStorage?.setItem('locations-folders-width', String(foldersWidth));
+  }, [foldersWidth]);
+  const startFoldersResize = (event) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = foldersWidth;
+    const onMove = (moveEvent) => {
+      const next = Math.min(FOLDERS_MAX, Math.max(FOLDERS_MIN, startWidth + (moveEvent.clientX - startX)));
+      setFoldersWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
   const [flatRows, setFlatRows] = useState([]);
   const [flatTotal, setFlatTotal] = useState(0);
   const [flatLoading, setFlatLoading] = useState(false);
@@ -533,9 +562,9 @@ export default function FileExplorer(props) {
           {breadcrumbBar}
           <div
             className="grid min-h-0 flex-1"
-            style={{ gridTemplateColumns: inspectorOpen ? 'minmax(190px,248px) minmax(0,1fr) 320px' : 'minmax(190px,248px) minmax(0,1fr)' }}
+            style={{ gridTemplateColumns: inspectorOpen ? `${foldersWidth}px minmax(0,1fr) 320px` : `${foldersWidth}px minmax(0,1fr)` }}
           >
-            <div className="flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
+            <div className="relative flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
               <DirectoryTree
                 nodes={directoryTreeNodes}
                 expandedPaths={directoryTreeExpandedPaths}
@@ -545,6 +574,16 @@ export default function FileExplorer(props) {
                 onSelect={onLoadTree}
                 onLoadMore={onLoadMoreDirectoryTree}
               />
+              {/* Drag handle to resize the Folders pane. */}
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize folders pane"
+                onMouseDown={startFoldersResize}
+                className="group absolute -right-1 top-0 z-[3] h-full w-2 cursor-col-resize select-none"
+              >
+                <span className="absolute right-[3px] top-0 h-full w-px bg-border-strong transition-colors group-hover:w-[2px] group-hover:bg-accent" />
+              </div>
             </div>
             <section className="flex min-w-0 flex-col">
               {resultsTable}

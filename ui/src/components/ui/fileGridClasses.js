@@ -14,7 +14,9 @@ export const fileGridResizableHeaderClassName = 'relative';
 
 export function fileGridHeaderCellClassName({ sortable = false, className } = {}) {
   return cn(
-    'sticky top-0 z-[2] border-b border-border bg-surface-muted px-[9px] py-1.5 text-left text-[0.72rem] font-semibold text-muted whitespace-nowrap',
+    // A prominent right divider on every header makes the column boundaries —
+    // and therefore the resize handles that sit on them — easy to see and grab.
+    'sticky top-0 z-[2] border-b border-r border-border-strong bg-surface-muted px-[9px] py-1.5 text-left text-[0.72rem] font-semibold text-muted whitespace-nowrap',
     fileGridResizableHeaderClassName,
     sortable && 'cursor-pointer select-none',
     className
@@ -39,10 +41,13 @@ export const fileGridSortClassName = 'text-[0.72rem] text-muted';
 
 export function fileGridResizerClassName({ resizing = false } = {}) {
   return cn(
-    'absolute -right-1 top-0 z-[3] block h-full w-2 cursor-col-resize select-none touch-none',
-    'after:absolute after:right-[3px] after:top-[20%] after:h-[60%] after:w-px after:rounded-full after:bg-transparent',
-    'hover:after:bg-accent',
-    resizing && 'after:bg-accent'
+    // Wide, always-grabbable hit area sitting on the column boundary. The visible
+    // bar is shown by default (not only on hover) so the resize affordance is
+    // discoverable, and it thickens/accents while hovering or actively resizing.
+    'absolute -right-1.5 top-0 z-[3] block h-full w-3 cursor-col-resize select-none touch-none',
+    'after:absolute after:right-[5px] after:top-[15%] after:h-[70%] after:w-[2px] after:rounded-full after:bg-border-strong after:transition-colors',
+    'hover:after:bg-accent hover:after:w-[3px]',
+    resizing && 'after:!bg-accent after:!w-[3px]'
   );
 }
 
@@ -58,7 +63,8 @@ export function fileGridRowClassName({ index = 0, kind, actionable = false, sele
 
 export function fileGridCellClassName({ className } = {}) {
   return cn(
-    'border-b border-border px-[9px] py-1 align-middle whitespace-nowrap',
+    // Right border gives full-height column dividers to match the header.
+    'border-b border-r border-border px-[9px] py-1 align-middle whitespace-nowrap',
     className
   );
 }
