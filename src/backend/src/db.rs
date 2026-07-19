@@ -3911,9 +3911,10 @@ struct DuplicatePathCounts {
     duplicate_file_count: u64,
     original_file_count: u64,
     same_scan_duplicate_file_count: u64,
-    // Backup classification (refcount model): a file is `safe` if an exact
-    // full-hash copy exists elsewhere in scope, `warn` if only a light-hash copy
-    // does, `unsafe` otherwise. Folders roll up their descendant file counts.
+    // Cross-location backup classification: `safe` if an exact full-hash copy
+    // exists in ANOTHER location, `warn` (likely) if only a light-hash copy in
+    // another location does, `unsafe` otherwise. Same-location duplicates do not
+    // count. Folders roll up their descendant file counts.
     safe_file_count: u64,
     warn_file_count: u64,
     unsafe_file_count: u64,
@@ -4035,8 +4036,9 @@ fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> 
         // treated as stale and rebuilt. v3 added the backup classification
         // columns (safe/warn/unsafe + copies_here/copies_away). v4 added
         // parent_path + per-dir file_count/total_size rollups for O(children)
-        // folder browsing.
-        version: 4,
+        // folder browsing. v5 made the safe/warn/unsafe classification
+        // cross-location only (same-location duplicates no longer count as safe).
+        version: 5,
         locations,
     })?;
     let fingerprint = blake3::hash(payload_json.as_bytes()).to_hex().to_string();
@@ -4142,9 +4144,11 @@ fn duplicate_cache_path_counts(
     // report ⌂ same-location and ↗ other-location copy counts, and classify the
     // backup status via the refcount model.
     let mut exact_counts_by_location = HashMap::<(String, u64), HashMap<String, u64>>::new();
-    // Per light (blake3_light,size): total copies (non-empty light only). A
-    // light-only survivor is the "warn" tier.
-    let mut light_totals = HashMap::<(String, u64), u64>::new();
+    // Per light (blake3_light,size): copies in each location (non-empty light
+    // only). A light copy in ANOTHER location is the cross-location "likely"
+    // (warn) tier. Same size is required (plan-064): matching light hash with a
+    // different size is a false positive and never keyed together here.
+    let mut light_counts_by_location = HashMap::<(String, u64), HashMap<String, u64>>::new();
     for file in files {
         locations_by_hash
             .entry((file.blake3.clone(), file.size))
@@ -4159,8 +4163,10 @@ fn duplicate_cache_path_counts(
             .entry(file.location_id.clone())
             .or_default() += 1;
         if !file.blake3_light.is_empty() {
-            *light_totals
+            *light_counts_by_location
                 .entry((file.blake3_light.clone(), file.size))
+                .or_default()
+                .entry(file.location_id.clone())
                 .or_default() += 1;
         }
     }
@@ -4182,7 +4188,10 @@ fn duplicate_cache_path_counts(
                 > 1,
         );
 
-        // Backup classification (refcount model). Copies of this exact content:
+        // Ambient backup classification is CROSS-LOCATION only: the marker
+        // answers "is this content backed up on another disk?", not "is there a
+        // second copy somewhere". Same-location duplicates are surfaced as the
+        // `copies_here` metadata (and drive the dup counters), never as safety.
         let per_location = exact_counts_by_location.get(&hash_key);
         let here = per_location
             .and_then(|counts| counts.get(&file.location_id))
@@ -4198,16 +4207,25 @@ fn duplicate_cache_path_counts(
                     .sum()
             })
             .unwrap_or(0);
-        let has_exact_elsewhere = here > 0 || away > 0;
-        let has_light_elsewhere = !file.blake3_light.is_empty()
-            && light_totals
+        // Light (heuristic) copies on OTHER locations. Kept strictly separate
+        // from exact `safe` (plan-064): a light-only match is "likely", not proof.
+        let light_away: u64 = if file.blake3_light.is_empty() {
+            0
+        } else {
+            light_counts_by_location
                 .get(&(file.blake3_light.clone(), file.size))
-                .copied()
+                .map(|counts| {
+                    counts
+                        .iter()
+                        .filter(|(location_id, _)| *location_id != &file.location_id)
+                        .map(|(_, count)| *count)
+                        .sum()
+                })
                 .unwrap_or(0)
-                > 1;
-        let (safe, warn, unsafe_) = if has_exact_elsewhere {
+        };
+        let (safe, warn, unsafe_) = if away > 0 {
             (1, 0, 0)
-        } else if has_light_elsewhere {
+        } else if light_away > 0 {
             (0, 1, 0)
         } else {
             (0, 0, 1)
@@ -5117,9 +5135,14 @@ mod tests {
             f("s2", "locB", "backup/similar.jpg", "HASH_SIM_B", "LIGHT_SIM", 200),
             // unsafe: only copy anywhere
             f("s1", "locA", "dir/only.raw", "HASH_ONLY", "LIGHT_ONLY", 300),
-            // same-location duplicate: exact copy in the SAME location (⌂ here)
+            // same-location-only duplicate: a second exact copy in the SAME
+            // location. This is NOT a cross-location backup, so it is `unsafe`
+            // even though it has a ⌂ here copy.
             f("s1", "locA", "dir/dup1.png", "HASH_DUP", "LIGHT_DUP", 400),
             f("s1", "locA", "dir/dup2.png", "HASH_DUP", "LIGHT_DUP", 400),
+            // light match but only within the SAME location -> not likely-safe.
+            f("s1", "locA", "dir/lite1.png", "HASH_L1", "LIGHT_LOCAL", 500),
+            f("s1", "locA", "dir/lite2.png", "HASH_L2", "LIGHT_LOCAL", 500),
         ];
         let counts = duplicate_cache_path_counts(&files);
 
@@ -5135,13 +5158,25 @@ mod tests {
         assert_eq!((only.safe_file_count, only.warn_file_count, only.unsafe_file_count), (0, 0, 1));
 
         let dup1 = get("dir/dup1.png");
-        assert_eq!((dup1.safe_file_count, dup1.warn_file_count, dup1.unsafe_file_count), (1, 0, 0));
-        assert_eq!((dup1.copies_here, dup1.copies_away), (1, 0), "same-location duplicate counts as ⌂ here");
+        assert_eq!(
+            (dup1.safe_file_count, dup1.warn_file_count, dup1.unsafe_file_count),
+            (0, 0, 1),
+            "same-location-only duplicate is not a cross-location backup"
+        );
+        assert_eq!((dup1.copies_here, dup1.copies_away), (1, 0), "same-location duplicate still counts as ⌂ here");
 
-        // The `dir` folder rolls up its descendants: 3 safe (exact + dup1 + dup2), 1 warn, 1 unsafe.
+        let lite1 = get("dir/lite1.png");
+        assert_eq!(
+            (lite1.safe_file_count, lite1.warn_file_count, lite1.unsafe_file_count),
+            (0, 0, 1),
+            "same-location-only light match is not likely-safe"
+        );
+
+        // The `dir` folder rolls up its descendants: 1 safe (exact), 1 warn
+        // (similar), 5 unsafe (only + dup1 + dup2 + lite1 + lite2).
         let dir = get("dir");
         assert_eq!(dir.kind, "dir");
-        assert_eq!((dir.safe_file_count, dir.warn_file_count, dir.unsafe_file_count), (3, 1, 1));
+        assert_eq!((dir.safe_file_count, dir.warn_file_count, dir.unsafe_file_count), (1, 1, 5));
     }
 
     #[test]

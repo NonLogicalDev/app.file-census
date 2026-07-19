@@ -308,12 +308,16 @@ async fn handle_rpc_result(
             let params: ScanIdParams = decode_params(params)?;
             let scan = state.db.set_representative_scan(&params.scan_id)?;
             state.events.emit("scan_representative_set", &scan);
+            // The representative set defines the duplicate scope; changing it
+            // invalidates the cache, so rebuild it (as a background Task).
+            crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
             Ok(serde_json::to_value(scan)?)
         }
         "scans.clear_representative" => {
             let params: ScanIdParams = decode_params(params)?;
             let scan = state.db.clear_representative_scan(&params.scan_id)?;
             state.events.emit("scan_representative_set", &scan);
+            crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
             Ok(serde_json::to_value(scan)?)
         }
         "scans.update_notes" => {
@@ -335,6 +339,10 @@ async fn handle_rpc_result(
                 "scan_excludes_updated",
                 serde_json::json!({ "scan_id": params.scan_id }),
             );
+            // Excludes change which files are in scope, so the duplicate cache is
+            // invalidated; rebuild it (background Task) instead of leaving the
+            // Backup column blank until the next scan/reconnect.
+            crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
             Ok(serde_json::to_value(excludes)?)
         }
         "scans.excludes.append_exact_path" => {
@@ -346,6 +354,7 @@ async fn handle_rpc_result(
                 "scan_excludes_updated",
                 serde_json::json!({ "scan_id": params.scan_id }),
             );
+            crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
             Ok(serde_json::to_value(excludes)?)
         }
         "scans.delete_check" => {
