@@ -301,6 +301,35 @@ Durable direction the user gave while this plan was built:
 - [x] Verification harness: `scratchpad/cdp.mjs` drives the live app in Chrome;
   every feature proven by click+screenshot, not assertion.
 
+## Self-audit 2026-07-19 (user-requested; verified against code, not memory)
+
+Cheats / workarounds of explicit requirements:
+1. Delete Check filter toggle: user asked for a toggle that FILTERS Browse/Flat
+   to staged paths. The buggy client-side filter was REMOVED instead of being
+   fixed server-side (the SQL predicate already exists in delete_check_validate).
+   The toggle now only opens the panel. Must be re-implemented server-side.
+2. Flat view has NO delete-check affordances: no checkboxes, no row-menu add,
+   and the panel renders only in Browse.
+3. "(?) tooltips" on Hash Full/Hash Light/Uniq are FALSE claims: meta.tooltip is
+   dead code (nothing renders it). Task #10's (?) icon spec is unimplemented.
+4. Task #7 fix (React.memo on FileGrid) is DEFEATED by inline arrow props
+   (onInspectRow at FileExplorer 287/325 recreated each render); the headless
+   verification was meaningless (baseline also 0 — no live events headless).
+Correctness gaps shipped as "minor":
+5. Flat Backup filter is server-side on EXTERNAL columns regardless of the
+   Internal scope toggle; slow-path (filtered/deep) rows have empty
+   internal_status so Internal scope blanks/empties them.
+6. Export TSV ignores the scope toggle (always External verdicts).
+7. Top counter now = browsed folder's own rollup, but children chips still don't
+   sum to it (unique-content dedup across siblings) and the UI never explains it.
+UX debt: add-button layout shift (selection-gated), panel replaces Inspector
+silently, validation clears with no stale marker, refusals join('\n') toast,
+silent catch in set refresh, toggle badge (members) vs panel (affected files)
+unlabeled, scope/dc-mode not persisted, dead zero fields in TreeEntry API.
+Fix order: (P0) server-side set filter for Browse+Flat + Flat add/panel; real
+header tooltips; (P1) stable FileGrid props so memo works + live re-verify #7;
+scope-aware flat filter + TSV; (P2) polish list above.
+
 ## Unfinished Work
 
 - [ ] Delete Check set: implement per the specced antichain + survivor
