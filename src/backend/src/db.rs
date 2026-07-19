@@ -275,6 +275,35 @@ pub struct DeleteCheckResult {
     pub missing_files: Vec<TreeEntry>,
 }
 
+/// One member of a scan's Delete Check set: a dir or file staged for deletion.
+#[derive(Clone, Debug, Serialize)]
+pub struct DeleteCheckMember {
+    pub path: String,
+    pub kind: String,
+}
+
+/// Outcome of trying to add a member to the Delete Check set.
+#[derive(Clone, Debug, Serialize)]
+pub struct DeleteCheckAddOutcome {
+    pub added: bool,
+    /// Present when the add was refused (e.g. nested inside an existing member).
+    pub reason: Option<String>,
+    pub members: Vec<DeleteCheckMember>,
+}
+
+/// What deleting the whole Delete Check set would do.
+#[derive(Clone, Debug, Serialize)]
+pub struct DeleteCheckValidation {
+    pub member_count: u64,
+    pub affected_files: u64,
+    pub affected_contents: u64,
+    /// Files whose content would have NO surviving copy after the deletion.
+    pub would_lose_last_copy: u64,
+    /// Files that have a surviving copy outside the set (safe to delete).
+    pub safe_to_delete: u64,
+    pub cache_ready: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct StoredThumbnail {
     pub blake3: String,
@@ -520,6 +549,17 @@ impl Database {
                 pattern TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE(scan_id, pattern)
+            );
+
+            -- Per-scan Delete Check set: dirs/files the user is planning to
+            -- delete, assembled iteratively across folders. Kept as an antichain
+            -- (no member encloses another) so validation is unambiguous.
+            CREATE TABLE IF NOT EXISTS delete_check_members (
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('file', 'dir')),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (scan_id, path)
             );
 
             CREATE TABLE IF NOT EXISTS duplicate_cache_runs (
@@ -2091,7 +2131,7 @@ impl Database {
             let blake3: String = row.get(2)?;
             let blake3_light: String = row.get(3)?;
             let mtime: Option<String> = row.get(4)?;
-            let safe: i64 = row.get(5)?;
+            // Column 5 (safe_file_count) is implied by the else branch below.
             let warn: i64 = row.get(6)?;
             let unsafe_: i64 = row.get(7)?;
             let here: i64 = row.get(8)?;
@@ -2315,6 +2355,223 @@ impl Database {
         let result = delete_check_for_selection(&tx, scan_id, false, true)?;
         tx.commit()?;
         Ok(result)
+    }
+
+    /// Returns the current per-scan Delete Check set, ordered by path.
+    pub fn delete_check_set(&self, scan_id: &str) -> Result<Vec<DeleteCheckMember>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT path, kind FROM delete_check_members WHERE scan_id = ?1 ORDER BY path",
+        )?;
+        let rows = stmt.query_map([scan_id], |row| {
+            Ok(DeleteCheckMember {
+                path: row.get(0)?,
+                kind: row.get(1)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Adds a dir/file to the scan's Delete Check set, keeping it an antichain.
+    /// Refuses (with a reason) if the path is already present, is enclosed by an
+    /// existing member, or would enclose one. Returns the outcome; on success the
+    /// full updated set is included.
+    pub fn delete_check_add(
+        &self,
+        scan_id: &str,
+        path: &str,
+        kind: &str,
+    ) -> Result<DeleteCheckAddOutcome> {
+        let normalized = normalize_file_path(path);
+        if normalized.is_empty() {
+            return Ok(DeleteCheckAddOutcome {
+                added: false,
+                reason: Some("Cannot add the scan root to the Delete Check set.".to_string()),
+                members: self.delete_check_set(scan_id)?,
+            });
+        }
+        if kind != "file" && kind != "dir" {
+            anyhow::bail!("delete-check member kind must be 'file' or 'dir'");
+        }
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        ensure_scan_exists(&tx, scan_id)?;
+
+        let existing: Vec<(String, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT path, kind FROM delete_check_members WHERE scan_id = ?1")?;
+            let rows = stmt.query_map([scan_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (member_path, _member_kind) in &existing {
+            if member_path == &normalized {
+                return Ok(DeleteCheckAddOutcome {
+                    added: false,
+                    reason: Some("Already in the Delete Check set.".to_string()),
+                    members: self.delete_check_set(scan_id)?,
+                });
+            }
+            if path_encloses(member_path, &normalized) {
+                return Ok(DeleteCheckAddOutcome {
+                    added: false,
+                    reason: Some(format!("Already covered by \u{201c}{member_path}\u{201d}.")),
+                    members: self.delete_check_set(scan_id)?,
+                });
+            }
+            if path_encloses(&normalized, member_path) {
+                return Ok(DeleteCheckAddOutcome {
+                    added: false,
+                    reason: Some(format!(
+                        "Would enclose \u{201c}{member_path}\u{201d} — remove it first."
+                    )),
+                    members: self.delete_check_set(scan_id)?,
+                });
+            }
+        }
+        tx.execute(
+            "INSERT INTO delete_check_members (scan_id, path, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![scan_id, normalized, kind, Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(DeleteCheckAddOutcome {
+            added: true,
+            reason: None,
+            members: self.delete_check_set(scan_id)?,
+        })
+    }
+
+    /// Removes a member from the scan's Delete Check set. Returns the updated set.
+    pub fn delete_check_remove(&self, scan_id: &str, path: &str) -> Result<Vec<DeleteCheckMember>> {
+        let normalized = normalize_file_path(path);
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM delete_check_members WHERE scan_id = ?1 AND path = ?2",
+            params![scan_id, normalized],
+        )?;
+        self.delete_check_set(scan_id)
+    }
+
+    /// Clears the scan's Delete Check set.
+    pub fn delete_check_clear(&self, scan_id: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM delete_check_members WHERE scan_id = ?1",
+            [scan_id],
+        )?;
+        Ok(())
+    }
+
+    /// Validates what deleting the whole set would do. For each affected file's
+    /// content, a copy "survives outside the set" when either an exact copy
+    /// exists on another location (copies_away > 0) or a same-location copy is
+    /// NOT staged. A file's content is destroyed only when every copy is inside
+    /// the set. Requires a ready duplicate cache for the copy counts.
+    pub fn delete_check_validate(&self, scan_id: &str) -> Result<DeleteCheckValidation> {
+        let members = self.delete_check_set(scan_id)?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        ensure_scan_exists(&tx, scan_id)?;
+        ensure_scan_exclusion_cache_ready(&tx, scan_id)?;
+        let cache = Self::current_duplicate_cache_status_for_conn(&tx)?;
+        let ready_run_id = if cache.status == "ready" {
+            cache.run_id.clone()
+        } else {
+            None
+        };
+
+        if members.is_empty() {
+            return Ok(DeleteCheckValidation {
+                member_count: 0,
+                affected_files: 0,
+                affected_contents: 0,
+                would_lose_last_copy: 0,
+                safe_to_delete: 0,
+                cache_ready: ready_run_id.is_some(),
+            });
+        }
+
+        // Build the affected-file predicate from the members (files match exactly;
+        // dirs match all descendants). Antichain, so no double counting.
+        let mut clauses = Vec::new();
+        let mut binds: Vec<String> = Vec::new();
+        for member in &members {
+            if member.kind == "dir" {
+                clauses.push("f.path LIKE ? ESCAPE '\\'".to_string());
+                binds.push(format!(
+                    "{}/%",
+                    member.path.replace('%', "\\%").replace('_', "\\_")
+                ));
+            } else {
+                clauses.push("f.path = ?".to_string());
+                binds.push(member.path.clone());
+            }
+        }
+        let predicate = clauses.join(" OR ");
+        let sql = format!(
+            "SELECT f.blake3, f.size, COALESCE(dc.copies_here, 0), COALESCE(dc.copies_away, 0) \
+             FROM files f \
+             LEFT JOIN scan_excluded_files ex ON ex.scan_id = f.scan_id AND ex.file_id = f.id \
+             LEFT JOIN duplicate_cache_path_counts dc \
+                    ON dc.run_id = ? AND dc.scan_id = f.scan_id AND dc.path = f.path \
+             WHERE ex.file_id IS NULL AND f.scan_id = ? AND f.kind = 'file' AND f.error IS NULL \
+               AND ({predicate})"
+        );
+        // Params: run_id, scan_id, then the member binds.
+        let mut param_values: Vec<rusqlite::types::Value> = Vec::new();
+        param_values.push(ready_run_id.clone().into());
+        param_values.push(scan_id.to_string().into());
+        for bind in &binds {
+            param_values.push(bind.clone().into());
+        }
+
+        // Per content: staged instance count + the (consistent) copy counts.
+        struct Group {
+            inside: u64,
+            copies_here: u64,
+            copies_away: u64,
+        }
+        let mut groups: HashMap<(String, u64), Group> = HashMap::new();
+        let mut affected_files: u64 = 0;
+        {
+            let mut stmt = tx.prepare(&sql)?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(param_values.iter()))?;
+            while let Some(row) = rows.next()? {
+                let blake3: String = row.get(0)?;
+                let size: i64 = row.get(1)?;
+                let here: i64 = row.get(2)?;
+                let away: i64 = row.get(3)?;
+                affected_files += 1;
+                let entry = groups.entry((blake3, size as u64)).or_insert(Group {
+                    inside: 0,
+                    copies_here: here.max(0) as u64,
+                    copies_away: away.max(0) as u64,
+                });
+                entry.inside += 1;
+            }
+        }
+        tx.commit()?;
+
+        let affected_contents = groups.len() as u64;
+        let mut would_lose_last_copy: u64 = 0;
+        for group in groups.values() {
+            // Total same-location instances of this content = copies_here + 1.
+            let same_location_total = group.copies_here + 1;
+            let destroyed = group.copies_away == 0 && group.inside >= same_location_total;
+            if destroyed {
+                would_lose_last_copy += group.inside;
+            }
+        }
+
+        Ok(DeleteCheckValidation {
+            member_count: members.len() as u64,
+            affected_files,
+            affected_contents,
+            would_lose_last_copy,
+            safe_to_delete: affected_files.saturating_sub(would_lose_last_copy),
+            cache_ready: ready_run_id.is_some(),
+        })
     }
 
     pub fn find_files(&self, query: &str, limit: u32) -> Result<Vec<FileRow>> {
@@ -2935,6 +3192,16 @@ fn normalize_tree_prefix(prefix: &str) -> String {
     } else {
         format!("{trimmed}/")
     }
+}
+
+/// True when `ancestor` is a strict ancestor directory of `descendant` (both
+/// normalized, no leading/trailing slash). "a/b" encloses "a/b/c" but not
+/// "a/bc" and not itself.
+fn path_encloses(ancestor: &str, descendant: &str) -> bool {
+    if ancestor.is_empty() || ancestor == descendant {
+        return false;
+    }
+    descendant.starts_with(ancestor) && descendant.as_bytes().get(ancestor.len()) == Some(&b'/')
 }
 
 fn normalize_file_path(path: &str) -> String {
