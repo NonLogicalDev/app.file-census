@@ -1972,7 +1972,23 @@ export default function App() {
     }
   }
 
+  const loadFlatPage = useCallback(
+    async (path, backup, offset, limit = 500) =>
+      requireTreePage(
+        await rpc('scans.tree', {
+          scan_id: latest.current.selectedScanId,
+          path: path || '',
+          flat: true,
+          backup: backup || 'all',
+          limit,
+          offset: offset || 0
+        })
+      ),
+    [rpc]
+  );
+
   const commonLocationProps = {
+    onLoadFlat: loadFlatPage,
     locationList,
     selectedLocationSlug,
     selectedLocationView,

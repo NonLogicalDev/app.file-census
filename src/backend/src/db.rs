@@ -1976,6 +1976,126 @@ impl Database {
         Ok(page)
     }
 
+    /// Paginated flat list of every descendant file under `prefix`, each carrying
+    /// its backup safety status from the cache. Powers the Flat view. `backup`
+    /// filters to a tier ("unsafe" | "warn" | "safe") or "all". Filtering happens
+    /// in SQL so pagination stays correct over the filtered set.
+    pub fn scan_flat_page(
+        &self,
+        scan_id: &str,
+        prefix: &str,
+        backup: &str,
+        limit: Option<u32>,
+        offset: u32,
+    ) -> Result<TreePage> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        ensure_scan_exists(&tx, scan_id)?;
+        let duplicate_cache = Self::current_duplicate_cache_status_for_conn(&tx)?;
+        let selected_location_id = scan_location_id(&tx, scan_id)?;
+        let mut visibility_scan_ids = vec![scan_id.to_string()];
+        visibility_scan_ids.extend(duplicate_scope_scan_ids(&tx, selected_location_id.as_deref())?);
+        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
+
+        let normalized = normalize_tree_prefix(prefix);
+        let ready_run_id = if duplicate_cache.status == "ready" {
+            duplicate_cache.run_id.clone()
+        } else {
+            None
+        };
+        let like = if normalized.is_empty() {
+            "%".to_string()
+        } else {
+            format!("{}%", normalized.replace('%', "\\%").replace('_', "\\_"))
+        };
+        // Fixed set → safe to inline into the SQL.
+        let backup_where = match backup {
+            "unsafe" => " AND COALESCE(dc.unsafe_file_count, 0) > 0",
+            "warn" => " AND COALESCE(dc.warn_file_count, 0) > 0",
+            "safe" => " AND COALESCE(dc.safe_file_count, 0) > 0",
+            _ => "",
+        };
+        let limit = limit.unwrap_or(DEFAULT_TREE_PAGE_LIMIT).max(1);
+        let base_from = format!(
+            "FROM files f \
+             LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id \
+             LEFT JOIN duplicate_cache_path_counts dc \
+                    ON dc.run_id = ?3 AND dc.scan_id = f.scan_id AND dc.path = f.path \
+             WHERE excluded_f.id IS NULL AND f.scan_id = ?1 AND f.error IS NULL \
+               AND f.kind = 'file' AND f.path LIKE ?2 ESCAPE '\\'{backup_where}"
+        );
+
+        let total = tx.query_row(
+            &format!("SELECT COUNT(*) {base_from}"),
+            params![scan_id, like, ready_run_id],
+            |row| row.get::<_, i64>(0),
+        )? as u64;
+
+        let entries = {
+            let sql = format!(
+                "SELECT f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, \
+                        COALESCE(dc.safe_file_count, 0), COALESCE(dc.warn_file_count, 0), \
+                        COALESCE(dc.unsafe_file_count, 0), COALESCE(dc.copies_here, 0), \
+                        COALESCE(dc.copies_away, 0) \
+                 {base_from} ORDER BY f.path LIMIT ?4 OFFSET ?5"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params![scan_id, like, ready_run_id, limit, offset],
+                |row| {
+                    let safe: i64 = row.get(8)?;
+                    let warn: i64 = row.get(9)?;
+                    let unsafe_: i64 = row.get(10)?;
+                    let backup_status = if unsafe_ > 0 {
+                        "unsafe"
+                    } else if warn > 0 {
+                        "warn"
+                    } else if safe > 0 {
+                        "safe"
+                    } else {
+                        ""
+                    };
+                    Ok(TreeEntry {
+                        name: row.get(1)?,
+                        path: row.get(0)?,
+                        kind: "file".to_string(),
+                        size: row.get::<_, i64>(2)?.max(0) as u64,
+                        file_count: 1,
+                        blake3: Some(row.get(3)?),
+                        sha256: Some(row.get(4)?),
+                        ctime: row.get(5)?,
+                        mtime: row.get(6)?,
+                        mode: row.get(7)?,
+                        duplicate_file_count: 0,
+                        original_file_count: 0,
+                        same_scan_duplicate_file_count: 0,
+                        backup_status: backup_status.to_string(),
+                        unsafe_count: 0,
+                        warn_count: 0,
+                        copies_here: row.get::<_, i64>(11)?.max(0) as u64,
+                        copies_away: row.get::<_, i64>(12)?.max(0) as u64,
+                    })
+                },
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let end = offset as usize + entries.len();
+        let has_more = (end as u64) < total;
+        let next_offset = has_more.then(|| end as u32);
+        let page = TreePage {
+            entries,
+            limit,
+            offset,
+            total,
+            has_more,
+            next_offset,
+            duplicate_cache,
+        };
+        tx.commit()?;
+        Ok(page)
+    }
+
     pub fn delete_check(&self, scan_id: &str, prefix: &str) -> Result<DeleteCheckResult> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
@@ -4666,6 +4786,16 @@ mod tests {
         let folder = root_page.entries.iter().find(|e| e.name == "dir").unwrap();
         assert_eq!(folder.unsafe_count, 1);
         assert_eq!(folder.warn_count, 1);
+
+        // Flat view: all three descendant files, each with its backup status.
+        let flat = db.scan_flat_page(&src_scan, "", "all", Some(50), 0).unwrap();
+        assert_eq!(flat.total, 3);
+        assert!(flat.entries.iter().all(|e| e.kind == "file"));
+        assert_eq!(flat.entries.iter().find(|e| e.name == "exact.jpg").unwrap().backup_status, "safe");
+        // Flat view filtered to the unsafe tier returns just the blocker.
+        let flat_unsafe = db.scan_flat_page(&src_scan, "", "unsafe", Some(50), 0).unwrap();
+        assert_eq!(flat_unsafe.total, 1);
+        assert_eq!(flat_unsafe.entries[0].name, "only.raw");
     }
 
     #[test]

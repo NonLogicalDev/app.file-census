@@ -269,14 +269,24 @@ impl AppCore {
             }
             "scans.tree" => {
                 let params: TreeRpcParams = decode_params(params)?;
-                Ok(serde_json::to_value(self.db.scan_tree_page(
-                    &params.scan_id,
-                    params.path.as_deref().unwrap_or(""),
-                    params.limit,
-                    params.offset.unwrap_or(0),
-                    params.depth.unwrap_or(1),
-                    params.query.as_ref(),
-                )?)?)
+                if params.flat {
+                    Ok(serde_json::to_value(self.db.scan_flat_page(
+                        &params.scan_id,
+                        params.path.as_deref().unwrap_or(""),
+                        params.backup.as_deref().unwrap_or("all"),
+                        params.limit,
+                        params.offset.unwrap_or(0),
+                    )?)?)
+                } else {
+                    Ok(serde_json::to_value(self.db.scan_tree_page(
+                        &params.scan_id,
+                        params.path.as_deref().unwrap_or(""),
+                        params.limit,
+                        params.offset.unwrap_or(0),
+                        params.depth.unwrap_or(1),
+                        params.query.as_ref(),
+                    )?)?)
+                }
             }
             "files.find" => {
                 let params: FindQuery = decode_params(params)?;
@@ -755,6 +765,12 @@ struct TreeRpcParams {
     limit: Option<u32>,
     offset: Option<u32>,
     query: Option<FileSearchQuery>,
+    /// When true, return a flat, paginated list of every descendant file under
+    /// `path` instead of the immediate-children tree.
+    #[serde(default)]
+    flat: bool,
+    /// Backup tier filter for the flat view: "unsafe" | "warn" | "safe" | "all".
+    backup: Option<String>,
 }
 #[derive(Deserialize)]
 struct FindQuery {

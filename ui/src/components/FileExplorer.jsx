@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import FileGrid from './FileGrid.jsx';
 import DirectoryTree from './DirectoryTree.jsx';
 import { Icon } from './Icon.jsx';
@@ -88,6 +88,7 @@ export default function FileExplorer(props) {
     onClearGridSelection,
     onSetScanSubview,
     onLoadTree,
+    onLoadFlat,
     onToggleDirectoryTree,
     onLoadMoreDirectoryTree,
     onOpenGridEntry,
@@ -101,6 +102,38 @@ export default function FileExplorer(props) {
   // Backup safety filter over the current listing. This is "Delete Check" in the
   // unified model: markers are always shown; the filter narrows to a tier.
   const [backupFilter, setBackupFilter] = useState('all');
+  // Browse (immediate-children tree, default) vs Flat (paginated all-descendants).
+  const [viewMode, setViewMode] = useState('browse');
+  const [flatRows, setFlatRows] = useState([]);
+  const [flatTotal, setFlatTotal] = useState(0);
+  const [flatLoading, setFlatLoading] = useState(false);
+  const [flatOffset, setFlatOffset] = useState(0);
+  const FLAT_LIMIT = 500;
+  const flatKey = `${activeScan?.id}|${selectedPath}|${backupFilter}`;
+
+  // Reset paging whenever the flat query inputs change.
+  useEffect(() => {
+    setFlatOffset(0);
+  }, [flatKey, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== 'flat' || typeof onLoadFlat !== 'function' || !activeScan) return undefined;
+    let cancelled = false;
+    setFlatLoading(true);
+    onLoadFlat(selectedPath, backupFilter, flatOffset, FLAT_LIMIT)
+      .then((page) => {
+        if (cancelled) return;
+        setFlatTotal(page.total || 0);
+        setFlatRows((prev) => (flatOffset === 0 ? page.entries : [...prev, ...page.entries]));
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setFlatLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode, flatKey, flatOffset, onLoadFlat, activeScan, selectedPath, backupFilter]);
 
   if (!activeScan) return <p className={emptyTextClassName}>Select or run a scan to browse this location.</p>;
   const showingDeleteCheck = scanSubview === 'delete-check';
@@ -187,21 +220,66 @@ export default function FileExplorer(props) {
           </button>
         </span>
       ))}
-      {hasBackupData && (
-        <div className="ml-auto flex flex-none items-center gap-1.5 pl-3">
-          <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Backup</span>
-          <div className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5">
-            <BackupFilterChip label="All" active={backupFilter === 'all'} onClick={() => setBackupFilter('all')} />
-            <BackupFilterChip label="Unsafe" count={backupTotals.unsafe} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
-            <BackupFilterChip label="Warn" count={backupTotals.warn} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
-            <BackupFilterChip label="Safe" count={backupTotals.safe} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
+      <div className="ml-auto flex flex-none items-center gap-2 pl-3">
+        <div className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5">
+          <BackupFilterChip label="Browse" active={viewMode === 'browse'} onClick={() => setViewMode('browse')} />
+          <BackupFilterChip label="Flat" active={viewMode === 'flat'} onClick={() => setViewMode('flat')} />
+        </div>
+        {hasBackupData && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Backup</span>
+            <div className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5">
+              <BackupFilterChip label="All" active={backupFilter === 'all'} onClick={() => setBackupFilter('all')} />
+              <BackupFilterChip label="Unsafe" count={backupTotals.unsafe} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
+              <BackupFilterChip label="Warn" count={backupTotals.warn} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
+              <BackupFilterChip label="Safe" count={backupTotals.safe} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
+            </div>
           </div>
+        )}
+        {!hasBackupData && (
+          <span className="text-[10px] tabular-nums text-text-tertiary">
+            {viewMode === 'flat' ? `${flatTotal} files` : `${filteredGridRows.length} items`}
+          </span>
+        )}
+      </div>
+    </nav>
+  );
+
+  // Flat view: reuse the FileGrid with full paths + a "load more" pager.
+  const flatView = (
+    <div className="mt-2 flex min-h-[620px] flex-col overflow-hidden border border-sidebar-border bg-bg">
+      {breadcrumbBar}
+      <div className="relative min-h-0 flex-1 overflow-auto">
+        <FileGrid
+          storageKey="locations-flat"
+          rows={flatRows}
+          visibleColumns={gridVisibleColumns}
+          fullPathName
+          selectable={false}
+          deleteCheck
+          onInspect={onInspectFile}
+          onInspectRow={(entry) => { setInspected(entry); setInspectorOpen(true); }}
+        />
+        {!flatRows.length && (
+          <p className="pointer-events-none absolute inset-x-0 top-[52px] p-[18px] text-center text-[11px] text-muted">
+            {flatLoading ? 'Loading files…' : 'No files match this filter.'}
+          </p>
+        )}
+      </div>
+      {flatRows.length < flatTotal && (
+        <div className="flex flex-none items-center justify-center gap-3 border-t border-sidebar-border bg-sidebar-bg px-3 py-2 text-[11px] text-muted">
+          <span>Showing {flatRows.length.toLocaleString()} of {flatTotal.toLocaleString()}</span>
+          <button
+            type="button"
+            className={ctrlBtn}
+            disabled={flatLoading}
+            onClick={() => setFlatOffset(flatRows.length)}
+          >
+            {flatLoading ? 'Loading…' : 'Load more'}
+          </button>
         </div>
       )}
-      {!hasBackupData && (
-        <span className="ml-auto flex-none pl-3 text-[10px] tabular-nums text-text-tertiary">{filteredGridRows.length} items</span>
-      )}
-    </nav>
+    </div>
   );
 
   const resultsTable = (
@@ -519,7 +597,9 @@ export default function FileExplorer(props) {
         </div>
       )}
 
-      {showingDeleteCheck ? (
+      {!showingDeleteCheck && viewMode === 'flat' ? (
+        flatView
+      ) : showingDeleteCheck ? (
         <>
           {deleteCheckStaged.length > 0 && (
             <section className="mb-2.5 mt-2 overflow-hidden border border-sidebar-border bg-sidebar-bg">
