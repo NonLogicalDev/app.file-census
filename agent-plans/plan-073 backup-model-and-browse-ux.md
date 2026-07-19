@@ -126,6 +126,26 @@ Durable direction the user gave while this plan was built:
   (folders/files) staged for deletion. Deletion validation (refcount survivor
   check) layers on top later.
 
+## Design decisions confirmed 2026-07-19 (from prototype review)
+
+- **Unifying model — "survives outside boundary B?"** A file's backup verdict is
+  computed relative to a boundary: `safe` = an exact copy exists outside B;
+  `partial` = only a blake3_light+same-size copy exists outside B; `last copy` =
+  nothing outside B. The three modes just change B:
+  - **External** (default): B = this location. Outside = other locations.
+  - **Internal**: B = this file. Outside = the rest of this location.
+  - **Delete Check**: B = the staged set. Outside = everything not in the set
+    (this location's non-staged files AND other locations). "Everything else is
+    considered external." This IS the refcount survivor check.
+- **Folder chips count UNIQUE content**, not file instances: distinct
+  (blake3,size) per folder per tier. 5 copies of one unsafe file = 1 unsafe.
+  Requires the cache to roll up distinct-content-per-tier per directory.
+- **"[X copies exist]"**: X = total instances of this content within the current
+  scope (itself + its copies), e.g. "[3 copies exist]" = 3 total.
+- **Delete Check toggle** acts as an advanced filter: the browse shows only the
+  staged directories/files, and the Backup column recomputes with B = the set,
+  so it directly shows what deletion would destroy.
+
 ## Implementation Steps
 
 1. [x] Cross-location classification in `duplicate_cache_path_counts` (+ per-
@@ -141,6 +161,20 @@ Durable direction the user gave while this plan was built:
        consistent with the cross-location classification.
 6. [x] FileGrid: more prominent column dividers + easier-to-grab resize handles.
 7. [x] Make the Folders (directory-tree) pane resizable (persisted width).
+8. [x] Prototype the backup-display + delete-check UX; get decisions (done —
+       `ui/src/prototypes/DeleteCheckPrototype.jsx`, routes
+       `/prototype/backup-and-delete-check`, `/prototype/delete-check-active`).
+9. [ ] Backend: store per-file exact_here/exact_away/light_here/light_away and
+       roll up UNIQUE-content-per-tier per directory, so Internal/External and
+       the folder chips derive without extra passes. Cache shape bump.
+10. [ ] Backend: Delete-check scope — given a staged path set, compute each
+        member's verdict with B = the set (copy survives outside the set?), and
+        the roll-up "N would lose last copy". Reuse plan-030 include-set infra.
+11. [ ] UI: folder cell = [N safe][N partial][N unsafe]; file cell = "Last copy"
+        or verdict + "[X copies exist]"; rename warn->partial.
+12. [ ] UI: Internal/External scope toggle wired to the two verdict sets.
+13. [ ] UI: restore Add-to-Delete-Check actions + membership panel + a Delete
+        Check toggle (filters to staged paths, recomputes verdicts vs the set).
 
 ## Learning Log
 
