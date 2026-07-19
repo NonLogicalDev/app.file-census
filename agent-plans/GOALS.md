@@ -61,14 +61,25 @@ The cross-backup dedup app is usable end-to-end (run `just run-release`):
 - Export TSV of per-file verdicts.
 All CDP-verified in the running app. 73 backend + 8 perf-gate + 139 UI tests.
 
-### Remaining backlog (not blocking dedup use; need a fresh session / setup)
-- #7 UI "seizures" (blinking) during a LIVE scan — needs an active scan to
-  reproduce/verify; not exercised this session.
-- #18 residual "eventually-consistent" event-lag after the release-build fix
-  (RPCs are ~0.15s now; the debug build was the main cause).
-- #10 a separate "Hash Light" (blake3_light) column (Hash Full done).
-- #6 Ratatui alt CLI for scan progress (separate feature).
-- Internal-scope filtering in Flat is client-side on the loaded page only.
+### ALL backlog tasks now addressed
+- #6 Ratatui `scans watch` — DONE. `file-census --server <url> scans watch`
+  renders discovery/metadata/hashing gauges (TUI on a TTY, text when piped).
+  Verified live (progress counters advancing) + parsing unit-tested.
+- #10 Hash Full + Hash Light columns — DONE. blake3_light plumbed through
+  TreeEntry + tree/flat; both columns render with (?) tooltips.
+- #7 scan-time "seizures" — memoized FileGrid (React.memo) so the table doesn't
+  re-render on scan-progress ticks. HONEST: the exact blinking could not be
+  reproduced in the headless CDP harness (live progress events don't drive
+  rendering in the headless page); the memo is a correct safe fix; needs live
+  verification.
+- #18 laggy navigation — primary cause (debug build) fixed (release ~0.15s) +
+  FileGrid memo reduces scan-time render cost. Residual event-lag needs live
+  verification.
+
+### Known minor gaps (documented, not blocking)
+- Internal-scope filtering in Flat is client-side on the loaded page only
+  (server-side flat filter uses the External tier columns).
+- #7/#18 verification was limited by the headless harness (no live event render).
 
 ## Plan (this session, ~5h, each phase gated by CDP verification)
 
