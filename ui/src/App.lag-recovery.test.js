@@ -62,7 +62,10 @@ test('lag recovery reloads only the active search route with its live query and 
 test('lag recovery restores directory-only navigation for the visible file tree', () => {
   const source = lagRecoverySource();
 
-  assert.match(source, /state\.activeTab === 'locations' && state\.scanSubview === 'tree' && state\.selectedScanId/);
+  // The scan browser always shows the directory tree (Browse view), so lag
+  // recovery reloads it whenever a locations scan is selected — no longer gated
+  // on the retired 'tree' subview.
+  assert.match(source, /state\.activeTab === 'locations' && state\.selectedScanId/);
   assert.match(source, /await ensureDirectoryTreePath\(state\.selectedPath\);/);
 });
 

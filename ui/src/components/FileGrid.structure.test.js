@@ -34,9 +34,12 @@ test('file grid keeps normal scan actions out of the explicit Delete Check workf
   assert.match(fileGridSource, /Exclude from scan/);
   assert.match(fileGridSource, /<MenuContent align="start"/);
   assert.doesNotMatch(fileGridSource, /Include in Delete Check|Exclude from Delete Check|deleteCheckPathStateByPath/);
-  assert.match(fileExplorerSource, /onBuildThumbnails=\{showingDeleteCheck \? null : onRequestBuildThumbnailsForEntry\}/);
-  assert.match(fileExplorerSource, /onExclude=\{showingDeleteCheck \? null : onRequestExcludePath\}/);
-  assert.match(fileExplorerSource, /onDelete=\{showingDeleteCheck \? null : onRequestDeletePath\}/);
+  // Row actions are wired directly now that the browse grid is the only surface
+  // (the delete-check subview that suppressed them is retired).
+  assert.match(fileExplorerSource, /onBuildThumbnails=\{onRequestBuildThumbnailsForEntry\}/);
+  assert.match(fileExplorerSource, /onExclude=\{onRequestExcludePath\}/);
+  assert.match(fileExplorerSource, /onDelete=\{onRequestDeletePath\}/);
+  assert.doesNotMatch(fileExplorerSource, /showingDeleteCheck/);
 });
 
 test('file grid remains a flat main workspace beside the directory-only navigation tree', () => {

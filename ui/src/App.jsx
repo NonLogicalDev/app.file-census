@@ -330,16 +330,21 @@ export default function App() {
   }), [selectedScanId, query, searchFilters]);
   const visibleDirectoryTreeNodes = directoryTreeScope === activeDirectoryTreeScope ? directoryTreeNodes : {};
   const visibleDirectoryTreeLoadingPaths = directoryTreeScope === activeDirectoryTreeScope ? directoryTreeLoadingPaths : [];
-  const showingDeleteCheck = scanSubview === 'delete-check';
+  // The scan browser is now a single [Browse | Flat] surface with an always-on
+  // backup filter; the old "delete-check" subview (which substituted a whole
+  // presence-check result set for the grid rows and hung the app on large
+  // scans) is retired. Rows are always the current folder's tree entries.
   const fileGridRows = useMemo(() => gridRows(treeEntries, selectedPath), [treeEntries, selectedPath]);
-  const deleteCheckRows = useMemo(() => deleteCheck ? (deleteCheck.safe ? deleteCheck.checked_files : deleteCheck.missing_files) : [], [deleteCheck]);
   const hasSearchParams = useMemo(() => Boolean(query.trim() || searchFilters.length), [query, searchFilters]);
-  const visibleGridRows = showingDeleteCheck ? deleteCheckRows : fileGridRows;
+  const visibleGridRows = fileGridRows;
   const selectedGridEntries = useMemo(() => {
     const selected = new Set(selectedGridPaths);
     return fileGridRows.filter((row) => row.kind !== 'parent' && selected.has(row.path));
   }, [fileGridRows, selectedGridPaths]);
-  const gridVisibleColumns = useMemo(() => showingDeleteCheck ? visibleColumns.filter((column) => column !== 'path') : visibleColumns, [showingDeleteCheck, visibleColumns]);
+  const gridVisibleColumns = visibleColumns;
+  // True whenever the locations scan browser is active; the Browse view always
+  // shows the directory tree, so tree data loads independent of any subview.
+  const browsingScan = activeTab === 'locations' && Boolean(selectedScanId);
   const runningProgress = useMemo(() => Object.values(scanProgress).filter((progress) => isActiveStatus(progress.status)), [scanProgress]);
   const filteredDupes = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -712,9 +717,9 @@ export default function App() {
   }, [loadDirectoryTreePage]);
 
   useEffect(() => {
-    if (scanSubview !== 'tree' || !selectedScanId) return;
+    if (!browsingScan) return;
     void ensureDirectoryTreePath(selectedPath);
-  }, [ensureDirectoryTreePath, query, scanSubview, searchFilters, selectedPath, selectedScanId]);
+  }, [ensureDirectoryTreePath, query, browsingScan, searchFilters, selectedPath, selectedScanId]);
 
   const loadDuplicateGroups = useCallback(async (scanIds = latest.current.selectedDuplicateScanIds || []) => {
     setDuplicatesLoading(true);
@@ -920,7 +925,7 @@ export default function App() {
     setTreeEntries([]);
     setTreeLoading(true);
     clearDirectoryTree();
-    if (latest.current.scanSubview === 'tree') {
+    if (latest.current.activeTab === 'locations' && latest.current.selectedScanId) {
       void ensureDirectoryTreePath(latest.current.selectedPath);
     }
   }
@@ -992,7 +997,7 @@ export default function App() {
     const recovery = (async () => {
       await refreshAuthoritativelyAfterEventLag(() => refreshRef.current?.(), refreshPromise);
       const state = latest.current;
-      if (state.activeTab === 'locations' && state.scanSubview === 'tree' && state.selectedScanId) {
+      if (state.activeTab === 'locations' && state.selectedScanId) {
         await ensureDirectoryTreePath(state.selectedPath);
       }
       if (state.activeTab === 'search' && (String(state.query ?? '').trim() || state.searchFilters?.length)) {

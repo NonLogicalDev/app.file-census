@@ -8,13 +8,18 @@ const componentsDir = dirname(fileURLToPath(import.meta.url));
 const fileExplorerSource = readFileSync(join(componentsDir, 'FileExplorer.jsx'), 'utf8');
 const directoryTreeSource = readFileSync(join(componentsDir, 'DirectoryTree.jsx'), 'utf8');
 
-test('delete check remains an explicit scan workflow rather than a folder mutation affordance', () => {
-  assert.match(fileExplorerSource, /Delete Check/);
-  assert.match(fileExplorerSource, /Check current folder/);
-  assert.match(fileExplorerSource, /Safe to delete/);
-  assert.match(fileExplorerSource, /Unsafe to delete/);
-  assert.doesNotMatch(fileExplorerSource, /Include folder/);
-  assert.doesNotMatch(fileExplorerSource, /Exclude folder/);
+test('delete check is a persistent backup filter over browsing, not a separate subview', () => {
+  // The unified model: markers are always shown and the All/Unsafe/Warn/Safe
+  // backup filter is the only "delete check" surface. The old explicit subview
+  // (Check current folder / Safe-to-delete callout / staging list) is retired.
+  assert.match(fileExplorerSource, /label="Unsafe"/);
+  assert.match(fileExplorerSource, /label="Warn"/);
+  assert.match(fileExplorerSource, /label="Safe"/);
+  assert.match(fileExplorerSource, /setBackupFilter/);
+  assert.doesNotMatch(fileExplorerSource, /Check current folder/);
+  assert.doesNotMatch(fileExplorerSource, /Safe to delete/);
+  assert.doesNotMatch(fileExplorerSource, /Delete Check list/);
+  assert.doesNotMatch(fileExplorerSource, /StagedDeleteCheckRow/);
 });
 
 test('file explorer does not advertise unavailable EXIF enrichment controls', () => {
@@ -23,18 +28,20 @@ test('file explorer does not advertise unavailable EXIF enrichment controls', ()
   assert.doesNotMatch(fileExplorerSource, /Scan EXIF/);
 });
 
-test('file explorer uses a separate directory-only tree beside the file workspace', () => {
+test('scan browser is a single [Browse | Flat] surface with a directory-only tree', () => {
   assert.match(fileExplorerSource, /aria-label="Scan views"/);
-  // Mode selector exposes the three scan views, each wired to onSetScanSubview.
-  assert.match(fileExplorerSource, /\['files', 'Files'/);
-  assert.match(fileExplorerSource, /\['tree', 'File tree'/);
-  assert.match(fileExplorerSource, /\['delete-check', 'Delete Check'/);
-  assert.match(fileExplorerSource, /onClick=\{\(\) => onSetScanSubview\(value\)\}/);
-  assert.match(fileExplorerSource, /const showingFileTree = scanSubview === 'tree'/);
+  // The only view switch is Browse (tree table) vs Flat (path+file list).
+  assert.match(fileExplorerSource, /label="Browse" active=\{viewMode === 'browse'\}/);
+  assert.match(fileExplorerSource, /label="Flat" active=\{viewMode === 'flat'\}/);
+  // The retired [Files | File tree | Delete Check] subview tabs are gone.
+  assert.doesNotMatch(fileExplorerSource, /\['files', 'Files'/);
+  assert.doesNotMatch(fileExplorerSource, /\['tree', 'File tree'/);
+  assert.doesNotMatch(fileExplorerSource, /onSetScanSubview\(value\)/);
+  assert.doesNotMatch(fileExplorerSource, /showingDeleteCheck/);
+  // Browse keeps the separate directory-only tree beside the file workspace.
   assert.match(fileExplorerSource, /<DirectoryTree/);
   assert.match(fileExplorerSource, /onToggle=\{onToggleDirectoryTree\}/);
   assert.match(fileExplorerSource, /onLoadMore=\{onLoadMoreDirectoryTree\}/);
-  assert.doesNotMatch(fileExplorerSource, /hierarchical=\{showingFileTree\}/);
   assert.match(directoryTreeSource, /aria-label="Directory navigation"/);
   assert.match(directoryTreeSource, /page\?\.entries \|\| \[\]/);
 });
