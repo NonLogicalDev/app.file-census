@@ -68,8 +68,8 @@ Durable direction the user gave while this plan was built:
   listing down to just the staged folders/files.
 - Table columns need more prominent dividers; otherwise resizing is very hard.
 - Folders pane must be resizable.
-- Delete Check set is built iteratively (add/remove dirs/files over time) and
-  spans MULTIPLE locations.
+- Delete Check set is built iteratively (add/remove dirs/files over time) across
+  multiple FOLDERS within one scan (clarified: not across physical disks).
 - No nested additions for now: if a folder already encloses the item being
   added, refuse (keep the set an antichain per location).
 - Retire Dup / Scan Dup / Uniq columns (the new backup display replaces them);
@@ -151,19 +151,25 @@ Durable direction the user gave while this plan was built:
 - **Delete Check toggle** acts as an advanced filter: the browse shows only the
   staged directories/files, and the Backup column recomputes with B = the set,
   so it directly shows what deletion would destroy.
-- **The set is a cross-location working set built iteratively.** Each member
-  carries its `(scan/location, path, kind)`; the user adds/removes individual
-  dirs/files over many folders and across MULTIPLE locations before validating.
-  It is app-level (not per-scan) so it can span locations. Membership panel
-  groups members by location.
-- **No nested additions (for now): the set is an antichain per location.** When
-  adding path X to the set, refuse if X is equal to, enclosed by, or encloses an
-  existing member within the same location. The primary case the user named:
-  "if a folder already encloses what we are trying to add, refuse." Also refuse
-  the reverse (adding a folder that encloses an existing member) rather than
-  silently absorbing it. Refusals surface a clear reason (e.g. "already covered
-  by <ancestor>"). Nesting checks are per-location: a path in location A never
-  encloses a path in location B.
+- **The set is a PER-SCAN working set built iteratively across many folders.**
+  (Clarified 2026-07-19: "multiple locations" meant multiple FOLDERS within the
+  scan, NOT across physical disks.) Each member is a `(path, kind)` within one
+  scan; the user adds/removes dirs/files from many folders of that scan before
+  validating. Persist per-scan (matches plan-030's per-scan include set).
+- **No nested additions (for now): the set is an antichain.** When adding path X,
+  refuse if X is equal to, enclosed by, or encloses an existing member. The
+  primary case the user named: "if a folder already encloses what we are trying
+  to add, refuse." Also refuse the reverse (adding a folder that encloses an
+  existing member) rather than silently absorbing it. Refusals surface a clear
+  reason (e.g. "already covered by <ancestor>").
+- **Validation algorithm (survivor-outside-set), derived for implementation.**
+  Affected files = files under any staged folder + staged files (within the
+  scan). For each affected file with content C=(blake3,size): total copies of C
+  everywhere = `copies_here + 1 + copies_away` (from the cache); `inside` =
+  count of affected instances of C. C's content is destroyed iff
+  `copies_away == 0` AND every same-location copy is staged (`inside >=
+  copies_here + 1`). "Would lose last copy" = affected files whose content is
+  destroyed. Everything else survives outside the set.
 
 ## Column decisions 2026-07-19 (Dup / Scan Dup / Uniq)
 
@@ -250,10 +256,32 @@ Durable direction the user gave while this plan was built:
 - [ ] 2026-07-19 - Prototype the restored Delete Check set and screenshot before
   wiring (step 4).
 
+## Work Log (2026-07-19 overnight autonomous build)
+
+- [x] 02:20 - Backend step 9: unique-content folder rollups + distinct_count;
+  retired dup/orig/same-scan; cache v6. 72 + perf gates green. Live copy:
+  rebuild 3.5s, browse 0.11s, Photos 1 = 11,956 files / 4,890 unique. (`4cd32ca`)
+- [x] 02:35 - UI steps 11-15: folder [N safe][N partial][N unsafe] chips; file
+  "Last copy" vs "No off-disk backup [X copies exist]" (never mislabels a file
+  with same-disk copies as last-copy); retire Dup/Scan Dup; Uniq = distinct
+  hashes. Screenshot-verified. (`8d59950`)
+- [x] 02:55 - Task #9: per-file verdict TSV export (db + CLI + web + UI button).
+  275,492 rows in 3.1s; splits unsafe_last_copy vs unsafe_no_offdisk_backup.
+  (`a769c80`)
+- [x] 03:05 - Corrected the Delete Check set model to per-scan/multi-folder
+  (not cross-physical-location) in the prototype + plan; derived the survivor
+  validation algorithm.
+- [ ] Delete Check set implementation deliberately deferred: it is a stateful,
+  delete-adjacent feature that cannot be click-validated autonomously overnight.
+  Backend + UI are fully specced above (antichain + survivor algorithm); build
+  with the user present.
+
 ## Unfinished Work
 
-- [ ] Step 4: restore the Delete Check set (plan-030) as a separate surface with
-  refcount survivor validation. Prototype + screenshots first.
-- [ ] Step 5: Browse/Flat folder unique/dup(full+light) counters.
-- [ ] Confirm the live app runs the release build (dev `serve` used debug); the
-  `run-release` recipes now exist.
+- [ ] Delete Check set: implement per the specced antichain + survivor
+  validation (backend is unit-testable; UI needs click validation). Prototype
+  done (`/prototype/backup-and-delete-check`, `/prototype/delete-check-active`).
+- [ ] Internal/External scope toggle (external shipped as the default; internal
+  needs light_here + per-file int tier stored — small backend add).
+- [ ] Confirm the live app runs the release build (`just run-release`); dev
+  `serve` used debug (3-5s vs ~0.15s).
