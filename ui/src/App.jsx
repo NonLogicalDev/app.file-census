@@ -1897,6 +1897,26 @@ export default function App() {
     }
   }
 
+  // Inline Browse-table folder expansion: side-loads a folder's page WITHOUT
+  // changing the selected path (that's loadTree's job). Respects the current
+  // search query and Delete Check mode so expanded children match the table.
+  const loadFolderChildren = useCallback(async (path) => {
+    const state = latest.current;
+    const scanId = state.selectedScanId;
+    if (!scanId) return null;
+    return requireTreePage(await rpc('scans.tree', {
+      scan_id: scanId,
+      path,
+      depth: 1,
+      limit: 500,
+      offset: 0,
+      delete_check: Boolean(state.deleteCheckMode),
+      ...(state.query?.trim() || state.searchFilters?.length
+        ? { query: buildFileSearchQuery(state.query, state.searchFilters) }
+        : {})
+    }));
+  }, [rpc]);
+
   // Inspector Preview/EXIF sections: cheap per-row fetch (no occurrence
   // sweep server-side). Stable identity so FileExplorer effects can depend
   // on it without refiring per render.
@@ -2187,6 +2207,7 @@ export default function App() {
     onOpenGridEntry: openGridEntry,
     onInspectFile: inspectFile,
     onLoadFilePreview: loadFilePreview,
+    onLoadFolderChildren: loadFolderChildren,
     onRequestExcludePath: requestExcludePath,
     onRequestDeletePath: requestDeletePath
   };

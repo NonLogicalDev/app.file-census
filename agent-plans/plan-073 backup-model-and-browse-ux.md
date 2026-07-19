@@ -461,6 +461,23 @@ Not done from the modal spec: the shared `SegmentedChip` extraction (modal uses
 SegmentedTabs directly; FileExplorer's BackupFilterChip still its own) — queued
 as polish.
 
+## Inspector Preview/EXIF work log 2026-07-19 (~20:00) — CDP-verified live (`64193c1`)
+
+AddTask "Add preview and Exif as collapsible sections to the Inspector" done.
+Design: a NEW lightweight `files.preview` RPC (media::file_preview) — cached
+thumbnail + cached EXIF first, falling back to a live read of THIS scan's copy
+only; deliberately no occurrence sweep so it stays cheap on row-click even for
+content with 244k occurrences (files.details stays the heavy modal path).
+Extracted EXIF/thumbnails are cached back, so browsing warms the cache. UI:
+InspectorSection disclosure rows (chevron + uppercase label) under the field
+list; open state persisted (locations-inspector-preview-open / -exif-open);
+fetch gated on inspector open AND ≥1 section expanded; keyed scan:path:blake3
+with stale-guard; selecting a new row while open refetches automatically.
+CDP receipts: map_renditions JPG → 512×512 thumbnail rendered ("freshly
+built"), EXIF honest "No Exif data found in JPEG"; `._` AppleDouble row →
+"not a supported image" / "EXIF is only attempted for common image file
+types". Screenshot: shot-inspector-preview-exif.png. Tests: 140 UI, 74 lib.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no

@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   flexRender,
   getCoreRowModel,
+  getExpandedRowModel,
   getSortedRowModel,
   useReactTable
 } from '@tanstack/react-table';
@@ -271,7 +272,9 @@ function FileGridInner({
   onDelete,
   onAddDeleteCheck,
   onRemoveDeleteCheck,
-  stagedPaths = null
+  stagedPaths = null,
+  expandableFolders = false,
+  onToggleFolderExpand
 }) {
   // Render-count probe: lets automated perf checks assert the React.memo wrap
   // actually skips re-renders (unrelated parent state must not bump this).
@@ -280,8 +283,8 @@ function FileGridInner({
   const selectableRows = useMemo(() => rows.filter(isSelectableRow), [rows]);
   const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedSet.has(row.path));
   const columns = useMemo(
-    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, scope, dcMode, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths }),
-    [allSelected, canBuildThumbnails, deleteCheck, scope, dcMode, fullPathName, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
+    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths }),
+    [allSelected, canBuildThumbnails, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, fullPathName, onAddDeleteCheck, onRemoveDeleteCheck, stagedPaths, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
   );
   const columnVisibility = useMemo(() => {
     return Object.fromEntries(columns.map((column) => {
@@ -361,6 +364,12 @@ function FileGridInner({
     onColumnOrderChange: setColumnOrder,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
+    // Inline folder expansion (Browse mode): dirs carry lazily-loaded subRows.
+    // Expansion state is keyed by path, so it survives async subRow arrival;
+    // autoReset is off so loading a page doesn't collapse everything.
+    getSubRows: (row) => row.subRows,
+    getExpandedRowModel: getExpandedRowModel(),
+    autoResetExpanded: false,
     getRowId: (row) => row.path || row.name
   });
   // Keep the ref current so the folders-first sort can read the live direction.
@@ -518,6 +527,8 @@ function baseColumns(options) {
     deleteCheck,
     scope = 'external',
     dcMode = false,
+    expandableFolders = false,
+    onToggleFolderExpand,
     onToggleSelection,
     onSetSelection,
     onBuildThumbnails,
@@ -649,7 +660,15 @@ function baseColumns(options) {
       header: fullPathName ? 'Path + Name' : 'Name',
       size: fullPathName ? 520 : 360,
       minSize: 220,
-      cell: ({ row, getValue }) => <NameCell fullPathName={fullPathName} row={row} value={getValue()} />
+      cell: ({ row, getValue }) => (
+        <NameCell
+          fullPathName={fullPathName}
+          row={row}
+          value={getValue()}
+          expandableFolders={expandableFolders}
+          onToggleFolderExpand={onToggleFolderExpand}
+        />
+      )
     }
   );
 
@@ -677,13 +696,13 @@ function baseColumns(options) {
             scope={scope}
             dcMode={dcMode}
           />
-        ) : (
+        ) : row.original.kind === 'dir' ? (
           <FolderRollupBadge
             safe={scope === 'internal' ? row.original.int_safe_count : row.original.safe_count}
             warn={scope === 'internal' ? row.original.int_warn_count : row.original.warn_count}
             unsafe={scope === 'internal' ? row.original.int_unsafe_count : row.original.unsafe_count}
           />
-        )
+        ) : ''
     });
   }
 
@@ -694,7 +713,7 @@ function baseColumns(options) {
       size: 96,
       minSize: 72,
       meta: numericColumnMeta,
-      cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : bytes(getValue())
+      cell: ({ row, getValue }) => (row.original.kind === 'parent' || row.original.kind === 'placeholder') ? '' : bytes(getValue())
     },
     {
       accessorKey: 'file_count',
@@ -702,7 +721,7 @@ function baseColumns(options) {
       size: 76,
       minSize: 60,
       meta: numericColumnMeta,
-      cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
+      cell: ({ row, getValue }) => (row.original.kind === 'parent' || row.original.kind === 'placeholder') ? '' : getValue() ?? 0
     },
     {
       accessorKey: 'distinct_count',
@@ -710,7 +729,7 @@ function baseColumns(options) {
       size: 72,
       minSize: 56,
       meta: { ...numericColumnMeta, tooltip: 'Distinct contents (unique hashes) in this folder' },
-      cell: ({ row, getValue }) => (row.original.kind === 'file' || row.original.kind === 'parent') ? '' : (getValue() ?? 0).toLocaleString()
+      cell: ({ row, getValue }) => row.original.kind !== 'dir' ? '' : (getValue() ?? 0).toLocaleString()
     },
     { accessorKey: 'blake3', header: 'Hash Full', size: 126, minSize: 90, meta: { tooltip: 'Full content hash (BLAKE3) — exact identity used for safe backup matching' }, cell: ({ getValue }) => shortHash(getValue()) },
     { accessorKey: 'blake3_light', header: 'Hash Light', size: 126, minSize: 90, meta: { tooltip: 'Sampled light hash (BLAKE3 over file samples) — used for "partial" likely-duplicate matching' }, cell: ({ getValue }) => shortHash(getValue()) },
@@ -724,8 +743,17 @@ function baseColumns(options) {
   return columns;
 }
 
-function NameCell({ fullPathName, row, value }) {
+function NameCell({ fullPathName, row, value, expandableFolders = false, onToggleFolderExpand }) {
   const entry = row.original;
+  // row.depth > 0 = an inline-expanded child; indent it under its folder.
+  const indent = row.depth ? { paddingInlineStart: `${row.depth * 16}px` } : undefined;
+  if (entry.kind === 'placeholder') {
+    return (
+      <span className={fileNameCellClassName({ kind: 'file' })} style={indent}>
+        <span className="text-[11px] italic text-text-tertiary">{entry.name}</span>
+      </span>
+    );
+  }
   const label = entry.kind === 'parent'
     ? '../'
     : fullPathName && entry.path
@@ -734,8 +762,26 @@ function NameCell({ fullPathName, row, value }) {
         ? `${value}/`
         : value;
   const iconName = entry.kind === 'file' ? 'file' : entry.kind === 'parent' ? 'parent' : 'folder';
+  const canExpand = expandableFolders && entry.kind === 'dir' && !fullPathName;
+  const expanded = canExpand && row.getIsExpanded();
   return (
-    <span className={fileNameCellClassName({ kind: entry.kind })}>
+    <span className={fileNameCellClassName({ kind: entry.kind })} style={indent}>
+      {canExpand && (
+        <button
+          type="button"
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${entry.name} inline`}
+          aria-expanded={expanded}
+          className="grid h-4 w-4 flex-none place-items-center rounded-[3px] text-muted transition-colors hover:bg-surface hover:text-text"
+          onClick={(event) => {
+            event.stopPropagation();
+            row.toggleExpanded();
+            onToggleFolderExpand?.(entry.path, !expanded);
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
+        >
+          <Icon name={expanded ? 'chevronDown' : 'chevronRight'} className="h-3 w-3" />
+        </button>
+      )}
       <Icon name={iconName} className={fileKindIconClassName} />
       <span className={fileNameLabelClassName}>{label}</span>
     </span>
@@ -743,7 +789,7 @@ function NameCell({ fullPathName, row, value }) {
 }
 
 function isSelectableRow(row) {
-  return Boolean(row?.path && row.kind !== 'parent');
+  return Boolean(row?.path && (row.kind === 'file' || row.kind === 'dir'));
 }
 
 function isActionableRow(row) {

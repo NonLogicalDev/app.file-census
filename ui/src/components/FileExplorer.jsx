@@ -310,6 +310,75 @@ export default function FileExplorer(props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleGridRows, backupFilter, scope]);
 
+  // Inline folder expansion (Browse table): lazily fetched children per dir
+  // path. Cleared when the browsed folder / scan / mode / search changes so
+  // stale children never render under a fresh listing.
+  const [tableChildNodes, setTableChildNodes] = useState({});
+  const tableChildNodesRef = useRef(tableChildNodes);
+  tableChildNodesRef.current = tableChildNodes;
+  const onLoadFolderChildrenRef = useRef(props.onLoadFolderChildren);
+  onLoadFolderChildrenRef.current = props.onLoadFolderChildren;
+  useEffect(() => {
+    setTableChildNodes({});
+  }, [selectedPath, activeScan?.id, deleteCheckMode, query]);
+  const handleToggleFolderExpand = useCallback((path, expand) => {
+    if (!expand) return;
+    if (typeof onLoadFolderChildrenRef.current !== 'function') return;
+    if (tableChildNodesRef.current[path]) return; // already loaded / in flight
+    setTableChildNodes((nodes) => ({ ...nodes, [path]: { loading: true, entries: [] } }));
+    onLoadFolderChildrenRef.current(path)
+      .then((page) => {
+        setTableChildNodes((nodes) => {
+          if (!nodes[path]) return nodes; // cleared by navigation mid-flight
+          if (!page) {
+            const next = { ...nodes };
+            delete next[path];
+            return next;
+          }
+          return {
+            ...nodes,
+            [path]: {
+              loading: false,
+              entries: page.entries || [],
+              hasMore: Boolean(page.has_more),
+              total: page.total ?? null
+            }
+          };
+        });
+      })
+      .catch(() => {
+        // Drop the node so the next expand retries.
+        setTableChildNodes((nodes) => {
+          const next = { ...nodes };
+          delete next[path];
+          return next;
+        });
+      });
+  }, []);
+  // Attach children as TanStack subRows (recursively — expanded children can
+  // expand their own folders). The backup-tier filter applies at every level.
+  const gridRowsWithChildren = useMemo(() => {
+    if (!Object.keys(tableChildNodes).length) return filteredGridRows;
+    const tierFilter = (rows) =>
+      backupFilter === 'all' ? rows : rows.filter((row) => rowTier(row, backupFilter) > 0);
+    const attach = (rows) => rows.map((row) => {
+      if (row.kind !== 'dir') return row;
+      const node = tableChildNodes[row.path];
+      if (!node) return row;
+      if (node.loading) {
+        return { ...row, subRows: [{ kind: 'placeholder', path: `${row.path}//loading`, name: 'Loading…' }] };
+      }
+      const children = attach(tierFilter(node.entries.filter((entry) => entry.kind !== 'parent')))
+        .sort((a, b) => (a.kind === 'dir' ? 0 : 1) - (b.kind === 'dir' ? 0 : 1));
+      const more = node.hasMore
+        ? [{ kind: 'placeholder', path: `${row.path}//more`, name: `Showing first ${node.entries.length} — open the folder for the rest` }]
+        : [];
+      return { ...row, subRows: [...children, ...more] };
+    });
+    return attach(filteredGridRows);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredGridRows, tableChildNodes, backupFilter, scope]);
+
   const breadcrumbBar = (
     <nav className="flex min-h-8 flex-none items-center gap-1 overflow-x-auto border-b border-sidebar-border bg-sidebar-bg px-2" aria-label="Current path">
       <button type="button" className={navBtn} onClick={onGoBack} disabled={pathHistoryIndex <= 0} aria-label="Back">
@@ -442,12 +511,14 @@ export default function FileExplorer(props) {
     <div className="relative block min-h-[420px] flex-1 overflow-auto bg-bg">
       <FileGrid
         storageKey="locations-files"
-        rows={filteredGridRows}
+        rows={gridRowsWithChildren}
         visibleColumns={gridVisibleColumns}
         selectable
         deleteCheck
         scope={scope}
         dcMode={deleteCheckMode}
+        expandableFolders
+        onToggleFolderExpand={handleToggleFolderExpand}
         selectedPaths={selectedGridPaths}
         inspectedPath={inspected?.path}
         canBuildThumbnails={canBuildThumbnails}

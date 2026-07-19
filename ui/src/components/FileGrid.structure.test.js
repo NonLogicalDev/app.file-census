@@ -15,7 +15,7 @@ test('scan file browser exposes folder descendant file counts as a default Files
   assert.match(appSource, /const defaultColumns = \[[^\]]*'size', 'file_count'/);
   assert.match(fileGridSource, /accessorKey: 'file_count'/);
   assert.match(fileGridSource, /header: 'Files'/);
-  assert.match(fileGridSource, /row\.original\.kind === 'parent' \? '' : getValue\(\) \?\? 0/);
+  assert.match(fileGridSource, /kind === 'parent' \|\| row\.original\.kind === 'placeholder'\) \? '' : getValue\(\) \?\? 0/);
 });
 
 test('file grid numeric columns align headers with numeric cell values', () => {
@@ -47,13 +47,17 @@ test('file grid keeps normal scan actions out of the explicit Delete Check workf
   assert.doesNotMatch(fileExplorerSource, /showingDeleteCheck/);
 });
 
-test('file grid remains a flat main workspace beside the directory-only navigation tree', () => {
-  // Rows are pre-ordered folders-first (parent → dirs → files) but stay a flat,
-  // non-hierarchical row model.
+test('file grid supports inline folder expansion beside the directory-only navigation tree', () => {
+  // Rows are pre-ordered folders-first (parent → dirs → files); Browse-mode
+  // dirs additionally expand IN PLACE via lazily-loaded TanStack subRows
+  // (user request 2026-07-19: "make Browse mode more like tree mode").
   assert.match(fileGridSource, /data: orderedRows/);
   assert.match(fileGridSource, /\[\.\.\.rows\]\.sort\(\(a, b\) => kindRank\(a\) - kindRank\(b\)\)/);
   assert.match(fileGridSource, /getCoreRowModel: getCoreRowModel\(\)/);
-  assert.doesNotMatch(fileGridSource, /getExpandedRowModel|getSubRows|hierarchical/);
+  assert.match(fileGridSource, /getSubRows: \(row\) => row\.subRows/);
+  assert.match(fileGridSource, /getExpandedRowModel: getExpandedRowModel\(\)/);
+  // Expansion is opt-in (Browse table only; the Flat list stays flat).
+  assert.match(fileGridSource, /expandableFolders = false/);
   assert.match(fileExplorerSource, /<DirectoryTree/);
   assert.match(fileExplorerSource, /\{resultsTable\}/);
   assert.match(directoryTreeUtilitiesSource, /entry\.kind !== 'dir'/);

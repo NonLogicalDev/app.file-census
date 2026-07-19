@@ -46,6 +46,22 @@ test('inspector has lazy collapsible Preview and EXIF sections', () => {
   assert.match(fileExplorerSource, /!inspectorOpen \|\| \(!previewOpen && !exifOpen\)/);
 });
 
+test('browse table folders expand inline with lazy children', () => {
+  // Dirs in the Browse table are expandable in place: lazy fetch per folder,
+  // recursive subRows, backup-tier filter applied at every level, cleared on
+  // navigation/mode changes.
+  assert.match(fileExplorerSource, /handleToggleFolderExpand/);
+  assert.match(fileExplorerSource, /gridRowsWithChildren/);
+  assert.match(fileExplorerSource, /onLoadFolderChildren/);
+  assert.match(fileExplorerSource, /expandableFolders/);
+  assert.match(fileExplorerSource, /\[selectedPath, activeScan\?\.id, deleteCheckMode, query\]/);
+  const fileGridSource = readFileSync(join(componentsDir, 'FileGrid.jsx'), 'utf8');
+  assert.match(fileGridSource, /getExpandedRowModel/);
+  assert.match(fileGridSource, /getSubRows: \(row\) => row\.subRows/);
+  assert.match(fileGridSource, /autoResetExpanded: false/);
+  assert.match(fileGridSource, /row\.toggleExpanded\(\)/);
+});
+
 test('file explorer does not advertise unavailable EXIF enrichment controls', () => {
   assert.doesNotMatch(fileExplorerSource, /onRequestScanExif/);
   assert.doesNotMatch(fileExplorerSource, /onRequestScanExifForEntry/);
