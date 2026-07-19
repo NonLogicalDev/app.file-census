@@ -226,6 +226,8 @@ enum ScanSubcommand {
     Progress(ScanIdArgs),
     /// Show the file tree for a scan.
     Tree(TreeArgs),
+    /// Export per-file backup verdicts as TSV (for acting on the dedup analysis).
+    ExportVerdicts(ExportVerdictsArgs),
     /// Check whether selected files/folder are present elsewhere.
     DeleteCheck(DeleteCheckArgs),
     /// Add, update, or clear notes for a scan.
@@ -296,6 +298,19 @@ struct TreeArgs {
     /// Backup tier filter for --flat: all (default), unsafe, warn, or safe.
     #[arg(long, default_value = "all")]
     backup: String,
+}
+
+#[derive(Args)]
+struct ExportVerdictsArgs {
+    scan_id: String,
+    #[arg(long, default_value = "")]
+    path: String,
+    /// Backup tier filter: all (default), unsafe, warn, or safe.
+    #[arg(long, default_value = "all")]
+    backup: String,
+    /// Write TSV to this file. Defaults to stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -711,6 +726,7 @@ fn command_path(command: &Command) -> &'static str {
             ScanSubcommand::Stop(_) => "scans.stop",
             ScanSubcommand::Progress(_) => "scans.progress",
             ScanSubcommand::Tree(_) => "scans.tree",
+            ScanSubcommand::ExportVerdicts(_) => "scans.export-verdicts",
             ScanSubcommand::DeleteCheck(_) => "scans.delete-check",
             ScanSubcommand::Notes(_) => "scans.notes",
             ScanSubcommand::Nickname(_) => "scans.nickname",
@@ -1003,6 +1019,22 @@ fn run_scans(
                         tree.total,
                         tree.next_offset.unwrap_or(tree.offset)
                     );
+                }
+            }
+            Ok(())
+        }
+        ScanSubcommand::ExportVerdicts(args) => {
+            let db = Database::open(db_path)?;
+            let path = normalized_tree_path(&args.path)?;
+            let tsv = db.export_verdicts_tsv(&args.scan_id, &path, &args.backup)?;
+            match &args.out {
+                Some(out) => {
+                    std::fs::write(out, tsv.as_bytes())?;
+                    let rows = tsv.lines().count().saturating_sub(1);
+                    eprintln!("wrote {rows} verdict rows to {}", out.display());
+                }
+                None => {
+                    print!("{tsv}");
                 }
             }
             Ok(())

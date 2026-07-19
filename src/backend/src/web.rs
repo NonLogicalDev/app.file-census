@@ -67,6 +67,7 @@ pub async fn serve_listener(db_path: PathBuf, listener: tokio::net::TcpListener)
         .route("/api/scans/:id/resume", post(resume_scan))
         .route("/api/scans/:id/files", get(scan_files))
         .route("/api/scans/:id/tree", get(scan_tree))
+        .route("/api/scans/:id/verdicts", get(scan_verdicts))
         .route("/api/scans/:id", delete(delete_scan))
         .route("/api/scans", get(scans))
         .route("/api/find", get(find))
@@ -1033,6 +1034,12 @@ async fn scan_files(
 }
 
 #[derive(Deserialize)]
+struct VerdictsQuery {
+    path: Option<String>,
+    backup: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TreeQuery {
     path: Option<String>,
     depth: Option<u32>,
@@ -1064,6 +1071,33 @@ async fn scan_tree(
         query.depth.unwrap_or(1),
         file_query.as_ref(),
     )?))
+}
+
+async fn scan_verdicts(
+    State(state): State<AppState>,
+    Path(scan_id): Path<String>,
+    Query(query): Query<VerdictsQuery>,
+) -> ApiResult<Response> {
+    let tsv = state.db.export_verdicts_tsv(
+        &scan_id,
+        query.path.as_deref().unwrap_or(""),
+        query.backup.as_deref().unwrap_or("all"),
+    )?;
+    let filename = format!("file-census-verdicts-{scan_id}.tsv");
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/tab-separated-values; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        tsv,
+    )
+        .into_response())
 }
 
 async fn delete_scan(

@@ -2039,6 +2039,97 @@ impl Database {
         Ok(page)
     }
 
+    /// Exports every descendant file under `prefix` as a tab-separated verdict
+    /// table (header + one row per file), for acting on the dedup analysis with
+    /// external tools. `backup` filters to a tier ("unsafe" | "warn" | "safe") or
+    /// "all". `verdict` uses plain words; hashes are included for exact matching.
+    pub fn export_verdicts_tsv(&self, scan_id: &str, prefix: &str, backup: &str) -> Result<String> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        ensure_scan_exists(&tx, scan_id)?;
+        let duplicate_cache = Self::current_duplicate_cache_status_for_conn(&tx)?;
+        ensure_scan_exclusion_cache_ready(&tx, scan_id)?;
+
+        let normalized = normalize_tree_prefix(prefix);
+        let ready_run_id = if duplicate_cache.status == "ready" {
+            duplicate_cache.run_id.clone()
+        } else {
+            None
+        };
+        let like = if normalized.is_empty() {
+            "%".to_string()
+        } else {
+            format!("{}%", normalized.replace('%', "\\%").replace('_', "\\_"))
+        };
+        let backup_where = match backup {
+            "unsafe" => " AND COALESCE(dc.unsafe_file_count, 0) > 0",
+            "warn" => " AND COALESCE(dc.warn_file_count, 0) > 0",
+            "safe" => " AND COALESCE(dc.safe_file_count, 0) > 0",
+            _ => "",
+        };
+        let sql = format!(
+            "SELECT f.path, f.size, f.blake3, f.blake3_light, f.mtime, \
+                    COALESCE(dc.safe_file_count, 0), COALESCE(dc.warn_file_count, 0), \
+                    COALESCE(dc.unsafe_file_count, 0), COALESCE(dc.copies_here, 0), \
+                    COALESCE(dc.copies_away, 0) \
+             FROM files f \
+             LEFT JOIN scan_excluded_files excluded_f \
+                    ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id \
+             LEFT JOIN duplicate_cache_path_counts dc \
+                    ON dc.run_id = ?3 AND dc.scan_id = f.scan_id AND dc.path = f.path \
+             WHERE excluded_f.file_id IS NULL AND f.scan_id = ?1 AND f.error IS NULL \
+               AND f.kind = 'file' AND f.path LIKE ?2 ESCAPE '\\'{backup_where} \
+             ORDER BY f.path"
+        );
+        let mut out =
+            String::from("path\tsize\tverdict\tcopies_here\tcopies_away\tblake3\tblake3_light\tmtime\n");
+        let mut stmt = tx.prepare(&sql)?;
+        let mut rows = stmt.query(params![scan_id, like, ready_run_id])?;
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let size: i64 = row.get(1)?;
+            let blake3: String = row.get(2)?;
+            let blake3_light: String = row.get(3)?;
+            let mtime: Option<String> = row.get(4)?;
+            let safe: i64 = row.get(5)?;
+            let warn: i64 = row.get(6)?;
+            let unsafe_: i64 = row.get(7)?;
+            let here: i64 = row.get(8)?;
+            let away: i64 = row.get(9)?;
+            let verdict = if ready_run_id.is_none() {
+                "unknown"
+            } else if unsafe_ > 0 {
+                if here > 0 {
+                    "unsafe_no_offdisk_backup"
+                } else {
+                    "unsafe_last_copy"
+                }
+            } else if warn > 0 {
+                "partial_light_match"
+            } else {
+                "safe_exact_elsewhere"
+            };
+            // Paths/hashes never contain tabs or newlines here, but sanitize
+            // defensively so one row can never break the columnar format.
+            let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+            out.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                clean(&path),
+                size,
+                verdict,
+                here,
+                away,
+                clean(&blake3),
+                clean(&blake3_light),
+                mtime.as_deref().unwrap_or(""),
+            ));
+        }
+        drop(rows);
+        drop(stmt);
+        tx.commit()?;
+        Ok(out)
+    }
+
     /// Paginated flat list of every descendant file under `prefix`, each carrying
     /// its backup safety status from the cache. Powers the Flat view. `backup`
     /// filters to a tier ("unsafe" | "warn" | "safe") or "all". Filtering happens

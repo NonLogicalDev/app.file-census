@@ -416,6 +416,17 @@ export default function FileExplorer(props) {
             <Icon name="thumbnails" className="h-3.5 w-3.5" />
             {selectedCount ? `Build Thumbnails (${selectedCount})` : 'Build Thumbnails'}
           </button>
+          <button
+            type="button"
+            className={ctrlBtn}
+            onClick={() => {
+              const params = new URLSearchParams({ path: selectedPath || '', backup: backupFilter });
+              window.open(`/api/scans/${activeScan.id}/verdicts?${params.toString()}`, '_blank');
+            }}
+            title="Download a TSV of every file here with its backup verdict and copy counts"
+          >
+            <Icon name="download" className="h-3.5 w-3.5" /> Export TSV
+          </button>
           <button type="button" className={`${ctrlBtn} ${showColumns ? 'bg-surface text-text' : ''}`} onClick={onToggleColumns} aria-expanded={showColumns}>
             <Icon name="columns" className="h-3.5 w-3.5" /> Columns
           </button>
