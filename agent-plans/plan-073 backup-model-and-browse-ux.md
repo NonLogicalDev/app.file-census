@@ -519,6 +519,24 @@ modal → Cancel keeps badge at 1; Locations path rows 101→1 (scan collapse)
 Screenshots: shot-context-menu.png / shot-locations-collapsible.png /
 shot-clear-confirm.png.
 
+## Inspector rail work log 2026-07-19 (~23:40) — CDP-verified live (`401776c`)
+
+Steering (three messages): "Clear button needs a less threatening icon"
+(→ eraser, `41ed566`); "Move inspector panel to right rail like sidebar";
+"Allow resizing sidebar and inspector in hover mode".
+Shipped: Inspector extracted to InspectorPanel.jsx and docked as a Shell-level
+right rail column [sidebar | main | rail] — full viewport height, sidebar-bg
+chrome, persisted width (file-census.inspector.width, 240–560, default 320)
+with a left-edge pointer+keyboard resize handle. App owns inspected +
+inspectorOpen (same persisted key); FileExplorer keeps only the toggle and the
+row highlight, and its browse grid is back to [folders?, table]. Sidebar
+resizing now also works in the hover/peek overlay (was desktop-docked only);
+the peek holds open while a drag is in flight. Bug found by receipt: rail
+opened at 240 not 320 — Number(null)=0 clamped to min; clampRailWidth now
+treats missing storage as default. CDP receipts: rail h=757 flush right,
+populates on row click, drag 320→440 persisted; peek handle display=block +
+aria-disabled=false, peek-drag 292→370 persisted. Tests: 144 UI.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
