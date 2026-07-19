@@ -582,6 +582,24 @@ chevron slot (dir icon x=129 == file icon x=129). Learned + memorized: never
 pkill file-census by name — the user runs their own CLI processes; kill only
 port 3944.
 
+## Actions/modal batch 2026-07-20 (~03:30) — CDP-verified live (`9bbdf57`)
+
+Five rapid user asks, all shipped: (1) resizable Inspector preview height —
+drag handle under the image, 96–640px persisted, keyboard arrows; verified
+192→312. (2) Reveal File + Open File buttons beside Open File Info in the
+Inspector (system reveal/open of THIS scan's copy; new stable
+openFileInSystem/revealFileInSystem in App via files.open/files.reveal).
+(3) Same actions + File Info at the top of the table context menu (both
+Browse and Flat grids). (4) File Info modal "Reveal in scan" → "Reveal File"
+(it reveals in the system explorer); ALL modals now close on Escape (Modal
+gained an onClose prop, wired to all 7 instances). (5) EXIF cutoff fix (user
+screenshot): exifStatusClassName now min-w-0 + flex-wrap + [&_code]:break-all
+so long source paths wrap inside the modal instead of stretching it.
+Receipts: ctx menu [File Info, Open File, Reveal File, +4 existing]; inspector
+[Open File Info, Reveal File, Open File]; docWidth==vw on EXIF tab; Esc closes.
+Tests: 146 UI. Screenshots: shot-preview-resize / shot-ctx-fileinfo /
+shot-exif-wrap.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
