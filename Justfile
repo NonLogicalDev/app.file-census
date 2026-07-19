@@ -31,6 +31,20 @@ run-no-open: build
 release:
     {{dev}} /bin/sh -c 'npm --prefix ui run build && cargo build -p file-census-backend --release'
 
+# Build (release) and run a fresh optimized web instance. USE THIS FOR BROWSING:
+# debug SQLite is ~20-30x slower, so folder navigation is 3-5s in `run` vs
+# ~0.15s here on large scans.
+run-release: release
+    if [ -n "{{db}}" ]; then ./target/release/file-census --db "{{db}}" serve --port {{port}}; else ./target/release/file-census serve --port {{port}}; fi
+
+# Release web app with an explicit database file.
+run-with-db-release db_filename: release
+    ./target/release/file-census --db "{{db_filename}}" serve --port {{port}}
+
+# Release web app without opening the browser.
+run-no-open-release: release
+    if [ -n "{{db}}" ]; then ./target/release/file-census --db "{{db}}" serve --port {{port}} --no-open; else ./target/release/file-census serve --port {{port}} --no-open; fi
+
 # Run the Tauri desktop app in development mode.
 desktop-dev:
     cd src/native_app && {{dev}} ../../ui/node_modules/.bin/tauri dev
