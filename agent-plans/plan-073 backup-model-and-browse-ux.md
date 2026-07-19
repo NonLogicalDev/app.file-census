@@ -354,6 +354,18 @@ Decisions:
 - Row menu becomes membership-aware: staged member rows offer "Remove from
   Delete Check", others "Add to Delete Check".
 
+## Mode-rework work log 2026-07-19 (~14:40) — CDP-verified live (`80900c6`)
+
+- [x] deleteCheckBar above the table (Browse+Flat); side panel removed;
+  Inspector restored in the mode.
+- [x] TreePage.delete_check_summary (O(members) ext+int tier totals) +
+  unit test; Backup strip switches to it, scope-aware, while the mode is on.
+  Verified: folder 86,164 unsafe -> set 76,209; Internal safe 22,888 visible
+  and filterable via the Safe chip inside the mode.
+- [x] Toggle lights solid danger (computed style verified) + honest tooltip.
+- [x] Membership-aware row menu (Add vs Remove from Delete Check).
+- New task queued: #22 inline-expandable folders in Browse.
+
 ## Burn-down work log 2026-07-19 (~13:30) — all CDP-verified live
 
 - [x] Two-row nav shipped: Row 1 view+commands; Row 2 Backup filter + Scope +
