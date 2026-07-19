@@ -2607,7 +2607,7 @@ export default function App() {
       onShowAddLocation={() => setShowAddLocation(true)}
       commandGroups={commandGroups}
       topBarActions={topBarActions}
-      rightRail={activeTab === 'locations' && inspectorOpen && selectedScanView ? (
+      rightRail={activeTab === 'locations' && selectedScanView ? (
         <InspectorPanel
           inspected={inspected}
           activeScan={selectedScanView}
@@ -2616,6 +2616,7 @@ export default function App() {
           onLoadFilePreview={loadFilePreview}
         />
       ) : null}
+      rightRailOpen={inspectorOpen}
     >
       {activeTab === 'dashboard' && (
         <DashboardPage

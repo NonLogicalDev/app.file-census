@@ -4,6 +4,8 @@ import { Icon } from './Icon.jsx';
 import {
   appMainClassName,
   appRightRailClassName,
+  appRightRailOverlayClassName,
+  railHoverZoneClassName,
   appShellClassName,
   appSidebarClassName,
   Button,
@@ -116,6 +118,7 @@ export default function Shell({
   commandGroups = [],
   topBarActions,
   rightRail = null,
+  rightRailOpen = true,
   children
 }) {
   const [sidebarHidden, setSidebarHidden] = useState(readStoredSidebarHidden);
@@ -132,6 +135,7 @@ export default function Shell({
   // Inspector right-rail width, persisted; resizable via its left-edge handle.
   const [railWidth, setRailWidth] = useState(() => clampRailWidth(readSidebarPreference(RAIL_WIDTH_STORAGE_KEY)));
   const [railResizing, setRailResizing] = useState(false);
+  const [railPeeking, setRailPeeking] = useState(false);
   const railResizeSession = useRef(null);
   const activeTabMeta = tabs.find(([id]) => id === activeTab) || tabs[0];
   const selectedLocation = locationList.find((location) => location.slug === selectedLocationSlug);
@@ -351,7 +355,7 @@ export default function Shell({
 
   return (
     <div
-      className={appShellClassName({ sidebarHidden, compactSidebar, rightRail: Boolean(rightRail) })}
+      className={appShellClassName({ sidebarHidden, compactSidebar, rightRail: Boolean(rightRail) && rightRailOpen })}
       style={{ '--sidebar-width': `${sidebarWidth}px`, '--inspector-width': `${railWidth}px` }}
     >
       <button
@@ -584,7 +588,7 @@ export default function Shell({
         {children}
       </main>
 
-      {rightRail && (
+      {rightRail && rightRailOpen && (
         <aside className={`${appRightRailClassName} relative`} aria-label="Inspector rail">
           <div
             aria-label="Resize inspector"
@@ -609,6 +613,52 @@ export default function Shell({
           />
           {rightRail}
         </aside>
+      )}
+
+      {rightRail && !rightRailOpen && (
+        <>
+          {/* Collapsed-rail hover mode: hovering the right edge peeks the
+              Inspector as an overlay; resize works and holds the peek open. */}
+          <button
+            type="button"
+            className={railHoverZoneClassName({ visible: true, peeking: railPeeking })}
+            aria-label="Show inspector"
+            onMouseEnter={() => setRailPeeking(true)}
+            onFocus={() => setRailPeeking(true)}
+            onClick={() => setRailPeeking(true)}
+          />
+          <aside
+            className={appRightRailOverlayClassName({ peeking: railPeeking })}
+            aria-label="Inspector rail"
+            onMouseEnter={() => setRailPeeking(true)}
+            onMouseLeave={() => {
+              if (!railResizeSession.current) setRailPeeking(false);
+            }}
+          >
+            <div
+              aria-label="Resize inspector"
+              aria-orientation="vertical"
+              aria-valuemax={RAIL_MAX_WIDTH}
+              aria-valuemin={RAIL_MIN_WIDTH}
+              aria-valuenow={railWidth}
+              aria-valuetext={`${railWidth} pixels`}
+              className={sidebarResizeHandleClassName({
+                disabled: false,
+                resizing: railResizing,
+                className: '!left-[-4px] !right-auto'
+              })}
+              onKeyDown={handleRailResizeKeyDown}
+              onLostPointerCapture={finishRailResize}
+              onPointerCancel={finishRailResize}
+              onPointerDown={startRailResize}
+              onPointerMove={moveRailResize}
+              onPointerUp={finishRailResize}
+              role="separator"
+              tabIndex={0}
+            />
+            {rightRail}
+          </aside>
+        </>
       )}
 
       {/* Short-lived status toasts (no layout shift). */}

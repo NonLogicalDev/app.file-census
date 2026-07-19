@@ -325,6 +325,31 @@ function FileGridInner({
     };
   }, [contextMenu]);
 
+  // Keyboard navigation: ArrowUp/ArrowDown move the inspected row through the
+  // VISIBLE row order (sorted + expanded), skipping parent/placeholder rows.
+  const gridRootRef = useRef(null);
+  function handleGridKeyDown(event) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    if (typeof onInspectRow !== 'function') return;
+    if (event.target.closest('input, [role=menu]')) return;
+    const visible = table.getRowModel().rows
+      .map((tableRow) => tableRow.original)
+      .filter(isSelectableRow);
+    if (!visible.length) return;
+    event.preventDefault();
+    const currentIndex = visible.findIndex((entry) => entry.path === inspectedPath);
+    const nextIndex = event.key === 'ArrowDown'
+      ? Math.min(visible.length - 1, currentIndex + 1)
+      : Math.max(0, currentIndex < 0 ? 0 : currentIndex - 1);
+    const next = visible[nextIndex];
+    if (!next || next.path === inspectedPath) return;
+    onInspectRow(next);
+    requestAnimationFrame(() => {
+      const rowEl = gridRootRef.current?.querySelector(`tr[data-path="${window.CSS?.escape ? CSS.escape(next.path) : next.path}"]`);
+      rowEl?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
   // Live sort direction, read by the folders-first sorting fn to cancel
   // TanStack's descending negation so folders stay on top in both directions.
   const sortingStateRef = useRef([]);
@@ -425,7 +450,12 @@ function FileGridInner({
   }
 
   return (
-    <div className={fileGridClassName}>
+    <div
+      ref={gridRootRef}
+      className={`${fileGridClassName} focus-visible:outline-none`}
+      tabIndex={0}
+      onKeyDown={handleGridKeyDown}
+    >
       <table className={fileGridTableClassName} style={{ width: table.getTotalSize() }}>
         <thead>
           {table.getHeaderGroups().map((headerGroup) => (
@@ -511,8 +541,10 @@ function FileGridInner({
                 actionable: isActionableRow(row.original),
                 selected: selectedSet.has(row.original.path)
               })}${inspectedPath && row.original.path === inspectedPath ? ' !bg-surface-muted' : ''}`}
+              data-path={row.original.path}
               onClick={() => {
-                if (row.original.kind === 'file') onInspectRow?.(row.original);
+                // Files AND folders feed the Inspector; parent/placeholder don't.
+                if (isSelectableRow(row.original)) onInspectRow?.(row.original);
               }}
               onDoubleClick={() => {
                 if (row.original.kind === 'file') onInspect?.(row.original);
@@ -762,7 +794,7 @@ function baseColumns(options) {
 function NameCell({ fullPathName, row, value, expandableFolders = false, onToggleFolderExpand }) {
   const entry = row.original;
   // row.depth > 0 = an inline-expanded child; indent it under its folder.
-  const indent = row.depth ? { paddingInlineStart: `${row.depth * 16}px` } : undefined;
+  const indent = row.depth ? { paddingInlineStart: `${row.depth * 48}px` } : undefined;
   if (entry.kind === 'placeholder') {
     return (
       <span className={fileNameCellClassName({ kind: 'file' })} style={indent}>

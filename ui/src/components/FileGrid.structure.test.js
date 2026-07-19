@@ -69,6 +69,19 @@ test('file grid supports inline folder expansion beside the directory-only navig
   assert.match(directoryTreeUtilitiesSource, /entry\.kind !== 'dir'/);
 });
 
+test('rows are keyboard-navigable and folders are inspectable', () => {
+  // ArrowUp/ArrowDown move the inspected row through the visible order
+  // (sorted + expanded), scrolling it into view; single click inspects files
+  // AND folders (dbl-click still opens folders).
+  assert.match(fileGridSource, /function handleGridKeyDown/);
+  assert.match(fileGridSource, /event\.key !== 'ArrowDown' && event\.key !== 'ArrowUp'/);
+  assert.match(fileGridSource, /scrollIntoView\(\{ block: 'nearest' \}\)/);
+  assert.match(fileGridSource, /data-path=\{row\.original\.path\}/);
+  assert.match(fileGridSource, /if \(isSelectableRow\(row\.original\)\) onInspectRow\?\.\(row\.original\)/);
+  // Nested tree rows indent 48px per level (user: at least 3x the old 16px).
+  assert.match(fileGridSource, /row\.depth \* 48/);
+});
+
 test('file grid uses stable path identities and routes file inspection separately from folder navigation', () => {
   assert.match(fileGridSource, /getRowId: \(row\) => row\.path \|\| row\.name/);
   assert.match(fileGridSource, /selectedSet\.has\(row\.original\.path\)/);

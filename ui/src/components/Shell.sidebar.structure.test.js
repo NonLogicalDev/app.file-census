@@ -45,3 +45,13 @@ test('inspector right rail is a resizable shell column', () => {
   assert.match(shellSource, /aria-label="Resize inspector"/);
   assert.match(shellSource, /aria-label="Inspector rail"/);
 });
+
+test('collapsed inspector peeks from the right edge with resize held open', () => {
+  // Mirror of the sidebar's hidden/peek pattern, on the right edge.
+  assert.match(shellSource, /railHoverZoneClassName/);
+  assert.match(shellSource, /appRightRailOverlayClassName/);
+  assert.match(shellSource, /aria-label="Show inspector"/);
+  assert.match(shellSource, /setRailPeeking\(true\)/);
+  assert.match(shellSource, /if \(!railResizeSession\.current\) setRailPeeking\(false\)/);
+  assert.match(shellSource, /rightRail && !rightRailOpen/);
+});

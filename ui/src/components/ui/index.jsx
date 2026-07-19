@@ -51,6 +51,8 @@ export { StatusPill, statusPillDotClasses, statusPillVariantClasses } from './St
 export {
   appMainClassName,
   appRightRailClassName,
+  appRightRailOverlayClassName,
+  railHoverZoneClassName,
   appShellClassName,
   appSidebarClassName,
   eventStripClassName,

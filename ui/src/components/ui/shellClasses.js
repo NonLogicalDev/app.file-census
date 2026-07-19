@@ -116,6 +116,28 @@ export const appRightRailClassName = cn(
   'border-l border-[var(--sidebar-border)] bg-[var(--sidebar-bg)]'
 );
 
+// Collapsed-rail hover mode: a thin right-edge zone peeks the rail as a fixed
+// overlay (mirror of the sidebar's hidden/peek pattern).
+export function railHoverZoneClassName({ visible = false, peeking = false, className } = {}) {
+  return cn(
+    visible ? '!fixed !right-0 !top-0 !z-[45] !block !h-screen !w-[var(--sidebar-peek-width)]' : '!hidden',
+    '!rounded-none !border-0 !bg-transparent !p-0 !shadow-none',
+    'hover:!bg-[rgb(25_26_24_/_0.08)] hover:!shadow-none focus-visible:!bg-[rgb(25_26_24_/_0.08)] focus-visible:!outline-none',
+    peeking && 'pointer-events-none',
+    className
+  );
+}
+
+export function appRightRailOverlayClassName({ peeking = false, className } = {}) {
+  return cn(
+    'fixed right-0 top-0 z-40 flex h-screen w-[var(--inspector-width)] min-w-0 flex-col overflow-hidden',
+    'border-l border-[var(--sidebar-border)] bg-[var(--sidebar-bg)] shadow-lg',
+    'transition-transform duration-150 ease-out',
+    peeking ? 'translate-x-0' : 'translate-x-[calc(100%-var(--sidebar-peek-width))]',
+    className
+  );
+}
+
 export function appSidebarClassName({ sidebarHidden = false, sidebarPeeking = false, compactSidebar = false, className } = {}) {
   const overlayMode = sidebarHidden || compactSidebar;
 

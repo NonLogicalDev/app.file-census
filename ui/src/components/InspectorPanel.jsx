@@ -77,25 +77,39 @@ export default function InspectorPanel({
       </div>
       {inspected ? (
         <div className="min-h-0 flex-1 overflow-auto p-3">
-          <div className="mb-3 flex items-start gap-2">
-            <Icon name="file" className="mt-0.5 h-[18px] w-[18px] flex-none text-text-tertiary" />
+          {/* [Icon + Name] */}
+          <div className="flex items-start gap-2">
+            <Icon
+              name={inspected.kind === 'dir' ? 'folder' : 'file'}
+              className="mt-0.5 h-[18px] w-[18px] flex-none text-text-tertiary"
+            />
             <div className="min-w-0">
               <strong className="block truncate text-[12px] font-medium text-text">{inspected.name}</strong>
-              <span className="text-[11px] text-text-tertiary">{inspected.file_kind || 'File'}</span>
+              <span className="text-[11px] text-text-tertiary">
+                {inspected.kind === 'dir' ? 'Folder' : inspected.file_kind || 'File'}
+              </span>
             </div>
           </div>
-          <dl className="grid gap-2.5 text-[11px]">
-            <InspectorField label="Path" value={inspected.path} />
-            <InspectorField label="Size" value={bytes(inspected.size)} />
-            <InspectorField label="Modified" value={formatInspectorDate(inspected.mtime)} />
-            {activeScan && <InspectorField label="Scan" value={activeScan.nickname || activeScan.id} />}
-          </dl>
+          {/* [Open File Info] — content-identity modal, files only */}
+          {typeof onInspectFile === 'function' && inspected.kind === 'file' && (
+            <button
+              type="button"
+              onClick={() => onInspectFile(inspected)}
+              className="mt-2.5 inline-flex h-[26px] w-full items-center justify-center gap-1.5 rounded-md border border-border bg-surface-subtle px-2.5 text-[11px] text-muted transition-colors hover:bg-surface hover:text-text"
+            >
+              <Icon name="rowActions" className="h-3.5 w-3.5" /> Open File Info
+            </button>
+          )}
           <InspectorSection
             label="Preview"
             open={previewOpen}
             onToggle={() => setPreviewOpen((open) => !open)}
           >
-            {!previewKey ? (
+            {inspected.kind === 'dir' ? (
+              <p className="m-0 text-[11px] text-text-tertiary">
+                Select a file to preview it.
+              </p>
+            ) : !previewKey ? (
               <p className="m-0 text-[11px] text-text-tertiary">
                 Preview needs a fully hashed file row.
               </p>
@@ -121,12 +135,29 @@ export default function InspectorPanel({
               </p>
             )}
           </InspectorSection>
+          {/* [regular info] */}
+          <dl className="mt-3 grid gap-2.5 border-t border-sidebar-border pt-3 text-[11px]">
+            <InspectorField label="Path" value={inspected.path} />
+            <InspectorField label="Size" value={bytes(inspected.size)} />
+            {inspected.kind === 'dir' && (
+              <InspectorField label="Files" value={Number(inspected.file_count || 0).toLocaleString()} />
+            )}
+            {inspected.kind === 'dir' && inspected.distinct_count != null && (
+              <InspectorField label="Unique contents" value={Number(inspected.distinct_count || 0).toLocaleString()} />
+            )}
+            <InspectorField label="Modified" value={formatInspectorDate(inspected.mtime)} />
+            {activeScan && <InspectorField label="Scan" value={activeScan.nickname || activeScan.id} />}
+          </dl>
           <InspectorSection
             label="EXIF"
             open={exifOpen}
             onToggle={() => setExifOpen((open) => !open)}
           >
-            {!previewKey ? (
+            {inspected.kind === 'dir' ? (
+              <p className="m-0 text-[11px] text-text-tertiary">
+                Select a file to read its EXIF.
+              </p>
+            ) : !previewKey ? (
               <p className="m-0 text-[11px] text-text-tertiary">
                 EXIF needs a fully hashed file row.
               </p>
@@ -149,15 +180,6 @@ export default function InspectorPanel({
               </p>
             )}
           </InspectorSection>
-          {typeof onInspectFile === 'function' && (
-            <button
-              type="button"
-              onClick={() => onInspectFile(inspected)}
-              className="mt-3 inline-flex items-center gap-1.5 text-[11px] text-muted transition-colors hover:text-text"
-            >
-              <Icon name="rowActions" className="h-3.5 w-3.5" /> Full details
-            </button>
-          )}
         </div>
       ) : (
         <div className="grid min-h-0 flex-1 place-items-center p-4 text-center text-[11px] leading-relaxed text-text-tertiary">

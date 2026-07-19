@@ -56,6 +56,17 @@ test('inspector has lazy collapsible Preview and EXIF sections', () => {
   assert.match(inspectorSource, /onLoadFilePreview/);
   // Lazy gate: no fetch unless a section is expanded.
   assert.match(inspectorSource, /\(!previewOpen && !exifOpen\) \|\| !previewKey/);
+  // Structure: [Icon+Name] → [Open File Info] → Preview → info fields → EXIF,
+  // and folders are inspectable (kind-aware icon/labels/counts).
+  assert.match(inspectorSource, /Open File Info/);
+  assert.match(inspectorSource, /inspected\.kind === 'dir' \? 'folder' : 'file'/);
+  assert.match(inspectorSource, /Select a file to preview it\./);
+  assert.match(inspectorSource, /label="Unique contents"/);
+  const previewIdx = inspectorSource.indexOf('label="Preview"');
+  const infoIdx = inspectorSource.indexOf('label="Path"');
+  const exifIdx = inspectorSource.indexOf('label="EXIF"');
+  const buttonIdx = inspectorSource.indexOf('Open File Info');
+  assert.ok(buttonIdx < previewIdx && previewIdx < infoIdx && infoIdx < exifIdx, 'sections ordered button → Preview → info → EXIF');
 });
 
 test('browse table folders expand inline with lazy children', () => {
