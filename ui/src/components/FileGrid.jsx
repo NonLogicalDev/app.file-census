@@ -663,6 +663,7 @@ function baseColumns(options) {
       cell: ({ row, getValue }) => (row.original.kind === 'file' || row.original.kind === 'parent') ? '' : (getValue() ?? 0).toLocaleString()
     },
     { accessorKey: 'blake3', header: 'Hash Full', size: 126, minSize: 90, meta: { tooltip: 'Full content hash (BLAKE3) — exact identity used for safe backup matching' }, cell: ({ getValue }) => shortHash(getValue()) },
+    { accessorKey: 'blake3_light', header: 'Hash Light', size: 126, minSize: 90, meta: { tooltip: 'Sampled light hash (BLAKE3 over file samples) — used for "partial" likely-duplicate matching' }, cell: ({ getValue }) => shortHash(getValue()) },
     { accessorKey: 'ctime', header: 'CTime', size: 168, minSize: 120, cell: ({ getValue }) => formatDate(getValue()) },
     { accessorKey: 'mtime', header: 'Modified', size: 168, minSize: 120, cell: ({ getValue }) => formatDate(getValue()) },
     { accessorKey: 'mode', header: 'Mode', size: 88, minSize: 68 },

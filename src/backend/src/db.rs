@@ -205,6 +205,8 @@ pub struct TreeEntry {
     pub size: u64,
     pub file_count: u64,
     pub blake3: Option<String>,
+    #[serde(default)]
+    pub blake3_light: Option<String>,
     pub sha256: Option<String>,
     pub ctime: Option<String>,
     pub mtime: Option<String>,
@@ -2288,7 +2290,8 @@ impl Database {
                         COALESCE(dc.safe_file_count, 0), COALESCE(dc.warn_file_count, 0), \
                         COALESCE(dc.unsafe_file_count, 0), COALESCE(dc.copies_here, 0), \
                         COALESCE(dc.copies_away, 0), COALESCE(dc.int_safe_file_count, 0), \
-                        COALESCE(dc.int_warn_file_count, 0), COALESCE(dc.int_unsafe_file_count, 0) \
+                        COALESCE(dc.int_warn_file_count, 0), COALESCE(dc.int_unsafe_file_count, 0), \
+                        f.blake3_light \
                  {base_from} ORDER BY f.path LIMIT ?4 OFFSET ?5"
             );
             let mut stmt = tx.prepare(&sql)?;
@@ -2315,6 +2318,7 @@ impl Database {
                         size: row.get::<_, i64>(2)?.max(0) as u64,
                         file_count: 1,
                         blake3: Some(row.get(3)?),
+                        blake3_light: row.get(16)?,
                         sha256: Some(row.get(4)?),
                         ctime: row.get(5)?,
                         mtime: row.get(6)?,
@@ -3609,7 +3613,8 @@ fn scan_tree_immediate_children_from_cache(
                dc.copies_here, dc.copies_away,
                f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.size,
                dc.distinct_count,
-               dc.int_safe_file_count, dc.int_warn_file_count, dc.int_unsafe_file_count
+               dc.int_safe_file_count, dc.int_warn_file_count, dc.int_unsafe_file_count,
+               f.blake3_light
         FROM duplicate_cache_path_counts dc
         LEFT JOIN files f ON f.scan_id = dc.scan_id AND f.path = dc.path
         WHERE dc.run_id = ?1 AND dc.scan_id = ?2 AND dc.parent_path = ?3
@@ -3656,6 +3661,7 @@ fn scan_tree_immediate_children_from_cache(
                 size: total_size,
                 file_count,
                 blake3: None,
+                blake3_light: None,
                 sha256: None,
                 ctime: row.get(14)?,
                 mtime: row.get(15)?,
@@ -3683,6 +3689,7 @@ fn scan_tree_immediate_children_from_cache(
                 size: row.get::<_, Option<i64>>(17)?.unwrap_or(total_size as i64).max(0) as u64,
                 file_count: 1,
                 blake3: row.get(12)?,
+                blake3_light: row.get(22)?,
                 sha256: row.get(13)?,
                 ctime: row.get(14)?,
                 mtime: row.get(15)?,
@@ -3805,6 +3812,7 @@ fn scan_tree_immediate_children_aggregate(
                 size: total_size,
                 file_count,
                 blake3: None,
+                blake3_light: None,
                 sha256: None,
                 ctime: row.get(7)?,
                 mtime: row.get(8)?,
@@ -3845,6 +3853,7 @@ fn scan_tree_immediate_children_aggregate(
                 size: row.get::<_, Option<i64>>(11)?.unwrap_or(0).max(0) as u64,
                 file_count: 1,
                 blake3: row.get(12)?,
+                blake3_light: None,
                 sha256: row.get(13)?,
                 ctime: row.get(14)?,
                 mtime: row.get(15)?,
@@ -3999,6 +4008,7 @@ fn build_tree_page_entries(
                 size: 0,
                 file_count: 0,
                 blake3: None,
+                blake3_light: None,
                 sha256: None,
                 ctime: None,
                 mtime: None,
@@ -4055,6 +4065,7 @@ fn build_tree_page_entries(
                     size: row.file.size,
                     file_count: 1,
                     blake3: Some(row.file.blake3),
+                    blake3_light: None,
                     sha256: Some(row.file.sha256),
                     ctime: row.file.ctime,
                     mtime: row.file.mtime,
@@ -5352,6 +5363,7 @@ fn tree_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeEntry> {
         size: row.get(2)?,
         file_count: 1,
         blake3: Some(row.get(3)?),
+        blake3_light: None,
         sha256: Some(row.get(4)?),
         ctime: row.get(5)?,
         mtime: row.get(6)?,
