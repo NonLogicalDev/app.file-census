@@ -96,6 +96,9 @@ export default function FileExplorer(props) {
   // Backup safety filter over the current listing. This is "Delete Check" in the
   // unified model: markers are always shown; the filter narrows to a tier.
   const [backupFilter, setBackupFilter] = useState('all');
+  // Backup scope: 'external' = backed up on ANOTHER location; 'internal' = a
+  // duplicate exists on THIS same disk.
+  const [scope, setScope] = useState('external');
   // Browse (immediate-children tree, default) vs Flat (paginated all-descendants).
   const [viewMode, setViewMode] = useState(props.defaultViewMode || 'browse');
   // User-resizable Folders (directory-tree) pane width, persisted.
@@ -171,35 +174,41 @@ export default function FileExplorer(props) {
 
   // Backup-tier totals for the current listing (files here + descendants of the
   // folders shown), used for the filter chip counts and gating.
+  // Scope-aware tier readout for a row. Dir rows carry UNIQUE-content counts per
+  // tier; file rows carry a one-hot status. External = backed up on another
+  // location; Internal = a duplicate exists on this same disk.
+  const rowTier = (row, tier) => {
+    if (row.kind === 'dir') {
+      if (scope === 'internal') {
+        return tier === 'safe' ? row.int_safe_count || 0 : tier === 'warn' ? row.int_warn_count || 0 : row.int_unsafe_count || 0;
+      }
+      return tier === 'safe' ? row.safe_count || 0 : tier === 'warn' ? row.warn_count || 0 : row.unsafe_count || 0;
+    }
+    const status = scope === 'internal' ? row.internal_status : row.backup_status;
+    return status === tier ? 1 : 0;
+  };
+
   const backupTotals = useMemo(() => {
     const totals = { unsafe: 0, warn: 0, safe: 0 };
     for (const row of visibleGridRows) {
-      if (row.kind === 'file') {
-        if (row.backup_status === 'unsafe') totals.unsafe += 1;
-        else if (row.backup_status === 'warn') totals.warn += 1;
-        else if (row.backup_status === 'safe') totals.safe += 1;
-      } else if (row.kind === 'dir') {
-        totals.unsafe += row.unsafe_count || 0;
-        totals.warn += row.warn_count || 0;
-        totals.safe += Math.max(0, (row.file_count || 0) - (row.unsafe_count || 0) - (row.warn_count || 0));
-      }
+      if (row.kind === 'parent') continue;
+      totals.safe += rowTier(row, 'safe');
+      totals.warn += rowTier(row, 'warn');
+      totals.unsafe += rowTier(row, 'unsafe');
     }
     return totals;
-  }, [visibleGridRows]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleGridRows, scope]);
   const hasBackupData = backupTotals.unsafe + backupTotals.warn + backupTotals.safe > 0;
 
   const filteredGridRows = useMemo(() => {
     if (backupFilter === 'all') return visibleGridRows;
     return visibleGridRows.filter((row) => {
       if (row.kind === 'parent') return true;
-      if (row.kind === 'dir') {
-        if (backupFilter === 'unsafe') return (row.unsafe_count || 0) > 0;
-        if (backupFilter === 'warn') return (row.warn_count || 0) > 0;
-        return (row.file_count || 0) - (row.unsafe_count || 0) - (row.warn_count || 0) > 0;
-      }
-      return row.backup_status === backupFilter;
+      return rowTier(row, backupFilter) > 0;
     });
-  }, [visibleGridRows, backupFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleGridRows, backupFilter, scope]);
 
   const breadcrumbBar = (
     <nav className="flex min-h-8 flex-none items-center gap-1 overflow-x-auto border-b border-sidebar-border bg-sidebar-bg px-2" aria-label="Current path">
@@ -253,6 +262,7 @@ export default function FileExplorer(props) {
           fullPathName
           selectable={false}
           deleteCheck
+          scope={scope}
           onInspect={onInspectFile}
           onInspectRow={(entry) => { setInspected(entry); setInspectorOpen(true); }}
         />
@@ -286,6 +296,7 @@ export default function FileExplorer(props) {
         visibleColumns={gridVisibleColumns}
         selectable
         deleteCheck
+        scope={scope}
         selectedPaths={selectedGridPaths}
         inspectedPath={inspected?.path}
         canBuildThumbnails={canBuildThumbnails}
@@ -394,6 +405,14 @@ export default function FileExplorer(props) {
             <BackupFilterChip label="Unsafe" count={hasBackupData ? backupTotals.unsafe : undefined} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
             <BackupFilterChip label="Warn" count={hasBackupData ? backupTotals.warn : undefined} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
             <BackupFilterChip label="Safe" count={hasBackupData ? backupTotals.safe : undefined} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Scope</span>
+          <div className="inline-flex h-[30px] items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5">
+            <BackupFilterChip label="External" active={scope === 'external'} onClick={() => setScope('external')} />
+            <BackupFilterChip label="Internal" active={scope === 'internal'} onClick={() => setScope('internal')} />
           </div>
         </div>
 

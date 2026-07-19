@@ -83,48 +83,68 @@ function CopiesExist({ here = 0, away = 0 }) {
   );
 }
 
-// File Backup cell (External scope): is this content backed up on ANOTHER disk?
-function DeleteCheckStatusBadge({ status, here = 0, away = 0 }) {
+const badgeRed = `${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`;
+const badgeAmber = `${deleteCheckBadgeBase} border-warning/50 bg-warning-soft text-warning`;
+const badgeGreen = `${deleteCheckBadgeBase} border-success/40 bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`;
+
+// File Backup cell. External scope: is this content backed up on ANOTHER disk?
+// Internal scope: is there another copy of it on THIS disk?
+function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external' }) {
   if (!status) {
-    // No ready duplicate cache yet — backup status is unknown.
     return <span className="text-[10px] text-text-tertiary">—</span>;
   }
-  if (status === 'unsafe') {
-    // No copy on another location. If there are same-disk copies, say so rather
-    // than "last copy" (which would be wrong — deleting one still leaves others).
-    if (here > 0) {
+  if (scope === 'internal') {
+    if (status === 'safe') {
       return (
         <span className="inline-flex items-center">
-          <span className={`${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`} title="No copy on another location. Duplicated on this disk only.">
-            <Icon name="warning" className="h-3 w-3" /> No off-disk backup
-          </span>
+          <span className={badgeGreen} title="Another exact copy of this content exists on this same disk."><Icon name="copy" className="h-3 w-3" /> Duplicated here</span>
+          <CopiesExist here={here} away={away} />
+        </span>
+      );
+    }
+    if (status === 'warn') {
+      return (
+        <span className="inline-flex items-center">
+          <span className={badgeAmber} title="A light-hash (same size) match exists on this disk — probably a duplicate."><Icon name="warning" className="h-3 w-3" /> Similar here</span>
           <CopiesExist here={here} away={away} />
         </span>
       );
     }
     return (
       <span className="inline-flex items-center">
-        <span className={`${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`} title="The only copy anywhere in scope. Deleting it loses the content.">
-          <Icon name="warning" className="h-3 w-3" /> Last copy
+        <span className={badgeRed} title="No duplicate of this content on this disk."><Icon name="warning" className="h-3 w-3" /> Unique here</span>
+        {away > 0 && <span className="ml-1.5 text-[10px] text-muted tabular-nums" title={`${away} copies on other locations`}>[{away} off-disk]</span>}
+      </span>
+    );
+  }
+  if (status === 'unsafe') {
+    // External: no copy on another location. If there are same-disk copies, say
+    // so rather than "last copy" (deleting one still leaves others).
+    if (here > 0) {
+      return (
+        <span className="inline-flex items-center">
+          <span className={badgeRed} title="No copy on another location. Duplicated on this disk only."><Icon name="warning" className="h-3 w-3" /> No off-disk backup</span>
+          <CopiesExist here={here} away={away} />
         </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center">
+        <span className={badgeRed} title="The only copy anywhere in scope. Deleting it loses the content."><Icon name="warning" className="h-3 w-3" /> Last copy</span>
       </span>
     );
   }
   if (status === 'warn') {
     return (
       <span className="inline-flex items-center">
-        <span className={`${deleteCheckBadgeBase} border-warning/50 bg-warning-soft text-warning`} title="Only a light-hash (same size) match on another location: probably the same file, but not proven by full hash.">
-          <Icon name="warning" className="h-3 w-3" /> Partial
-        </span>
+        <span className={badgeAmber} title="Only a light-hash (same size) match on another location: probably the same file, but not proven by full hash."><Icon name="warning" className="h-3 w-3" /> Partial</span>
         <CopiesExist here={here} away={away} />
       </span>
     );
   }
   return (
     <span className="inline-flex items-center">
-      <span className={`${deleteCheckBadgeBase} border-success/40 bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`} title="An exact full-hash copy exists on another location.">
-        <Icon name="check" className="h-3 w-3" /> Safe
-      </span>
+      <span className={badgeGreen} title="An exact full-hash copy exists on another location."><Icon name="check" className="h-3 w-3" /> Safe</span>
       <CopiesExist here={here} away={away} />
     </span>
   );
@@ -218,6 +238,7 @@ export default function FileGrid({
   canBuildThumbnails = true,
   storageKey = 'file-grid',
   deleteCheck = false,
+  scope = 'external',
   onOpen,
   onInspect,
   onInspectRow,
@@ -231,8 +252,8 @@ export default function FileGrid({
   const selectableRows = useMemo(() => rows.filter(isSelectableRow), [rows]);
   const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedSet.has(row.path));
   const columns = useMemo(
-    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete }),
-    [allSelected, canBuildThumbnails, deleteCheck, fullPathName, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
+    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, canBuildThumbnails, deleteCheck, scope, onToggleSelection, onSetSelection, onBuildThumbnails, onExclude, onDelete }),
+    [allSelected, canBuildThumbnails, deleteCheck, scope, fullPathName, onBuildThumbnails, onDelete, onExclude, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
   );
   const columnVisibility = useMemo(() => {
     return Object.fromEntries(columns.map((column) => {
@@ -461,6 +482,7 @@ function baseColumns(options) {
     selectableRows,
     canBuildThumbnails,
     deleteCheck,
+    scope = 'external',
     onToggleSelection,
     onSetSelection,
     onBuildThumbnails,
@@ -585,17 +607,22 @@ function baseColumns(options) {
       size: 200,
       minSize: 130,
       meta: { contentOverflowVisible: true },
-      accessorFn: (row) => deleteCheckRank(row.backup_status),
+      accessorFn: (row) => deleteCheckRank(scope === 'internal' ? row.internal_status : row.backup_status),
       sortingFn: 'basic',
       cell: ({ row }) =>
         row.original.kind === 'file' ? (
           <DeleteCheckStatusBadge
-            status={row.original.backup_status}
+            status={scope === 'internal' ? row.original.internal_status : row.original.backup_status}
             here={row.original.copies_here}
             away={row.original.copies_away}
+            scope={scope}
           />
         ) : (
-          <FolderRollupBadge safe={row.original.safe_count} warn={row.original.warn_count} unsafe={row.original.unsafe_count} />
+          <FolderRollupBadge
+            safe={scope === 'internal' ? row.original.int_safe_count : row.original.safe_count}
+            warn={scope === 'internal' ? row.original.int_warn_count : row.original.warn_count}
+            unsafe={scope === 'internal' ? row.original.int_unsafe_count : row.original.unsafe_count}
+          />
         )
     });
   }
