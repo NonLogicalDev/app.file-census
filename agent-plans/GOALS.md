@@ -33,10 +33,17 @@ Fixed + CDP-verified this session:
 - **Bogus "Safe 189255" filter count** — UI derived folder-safe from instance
   file_count; fixed to use real safe_count. Verified: External Safe=0.
 
-Still to build this session:
-- **Delete Check set** — backend committed (members table, antichain add/remove,
-  survivor validate); needs unit tests + RPCs + UI (add-to-set, membership,
-  filter toggle), CDP-verified.
+- **Delete Check set** — DONE + CDP-verified. Per-scan antichain set (members
+  table, add/remove/clear, survivor validation unit-tested + RPCs). UI:
+  "Add to Delete Check" for the selection, a "Delete Check (N)" toggle that
+  filters the browse to staged paths and shows a membership panel with the
+  survivor summary. Verified live: stage @Photos -> Validate => 187,950 affected,
+  115,477 safe to delete, 72,473 would lose last copy.
+
+Remaining polish (optional):
+- "Add to Delete Check" row-context-menu item (selection button + toolbar work).
+- Flat-view Delete Check filtering is client-side on the loaded page only.
+- Actual file deletion is intentionally NOT wired (analysis/planning only).
 
 ## Plan (this session, ~5h, each phase gated by CDP verification)
 
