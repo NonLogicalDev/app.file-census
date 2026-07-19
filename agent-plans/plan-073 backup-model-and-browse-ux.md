@@ -498,6 +498,27 @@ safe-tier leaks in children. Two structure tests updated: the old "grid stays
 flat/non-hierarchical" contract is superseded by this user request.
 Screenshots: shot-browse-inline-expand.png.
 
+## Interaction polish work log 2026-07-19 (~22:40) — CDP-verified live (`9adc2c1`)
+
+Steering (three messages): (1) "move the ... context menu into right click menu
+on table items"; (2) "move Clear Set next to add to delete check button as a
+Clear Icon (no text), also ask for confirmation"; (3) "Make each scan location
++ scanid collapsible" in File Info / Locations (correction: BOTH levels).
+Shipped: FileGrid's per-row "..." trigger column removed — the same four
+actions open via right-click at the cursor (viewport-clamped; closes on
+outside click/Escape/scroll/resize; parent+placeholder rows inert). Clear set
+is now an icon-only trash button between "Add to Delete Check" and the mode
+toggle, confirmed through the app-level ConfirmModal pattern (body names the
+staged count; nothing on disk touched). File Info Locations groups collapse
+per-location AND per-scan with independent chevron state; scan headers gained
+a "N paths" count. CDP receipts: 0 aria-haspopup triggers left in the table;
+right-click menu items [Add to Delete Check, Build thumbnails, Exclude from
+scan, Remove from scan]; Esc closes; ../ row no menu; clear icon → confirm
+modal → Cancel keeps badge at 1; Locations path rows 101→1 (scan collapse)
+→0 (location collapse), scan state survives location re-expand. Tests: 143 UI.
+Screenshots: shot-context-menu.png / shot-locations-collapsible.png /
+shot-clear-confirm.png.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
