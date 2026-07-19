@@ -3,12 +3,107 @@ import { createRoot } from 'react-dom/client';
 
 import ScanProgressPools from './components/ScanProgressPools.jsx';
 import ScanScopeSelector from './components/search/ScanScopeSelector.jsx';
+import FileExplorer from './components/FileExplorer.jsx';
 import DuplicatesPage from './pages/DuplicatesPage.jsx';
 import SearchPage from './pages/SearchPage.jsx';
 import TasksPage from './pages/TasksPage.jsx';
 import PrototypeApp from './prototypes/redesign/PrototypeApp.jsx';
 import { appMainClassName } from './components/ui/index.jsx';
 import './style.css';
+
+// Mock data for the real (consolidated) FileExplorer: [Browse | Flat] +
+// backup filter, no more [Files | File tree | Delete Check] tabs.
+const EXPLORER_FILE_COLUMNS = [
+  ['name', 'Name'], ['size', 'Size'], ['file_count', 'Files'],
+  ['duplicate_file_count', 'Dup'], ['original_file_count', 'Uniq'],
+  ['same_scan_duplicate_file_count', 'Scan Dup'], ['blake3', 'BLAKE3'],
+  ['ctime', 'CTime'], ['mtime', 'Modified'], ['mode', 'Mode'], ['sha256', 'SHA-256']
+];
+const EXPLORER_VISIBLE_COLUMNS = ['name', 'size', 'file_count', 'mtime'];
+const EXPLORER_ROWS = [
+  { kind: 'dir', name: '@Photos', path: 'PHOTO_FILTER/@Photos', size: 184203948123, file_count: 88231, unsafe_count: 41200, warn_count: 120, mtime: '2026-03-11T10:22:00Z' },
+  { kind: 'dir', name: 'Camera Roll', path: 'PHOTO_FILTER/Camera Roll', size: 62103948123, file_count: 40122, unsafe_count: 21000, warn_count: 40, mtime: '2026-05-02T18:00:00Z' },
+  { kind: 'dir', name: 'Screenshots', path: 'PHOTO_FILTER/Screenshots', size: 812394812, file_count: 5192, unsafe_count: 400, warn_count: 5, mtime: '2026-06-19T09:12:00Z' },
+  { kind: 'file', name: 'IMG_2013.HEIC', path: 'PHOTO_FILTER/IMG_2013.HEIC', size: 3820112, backup_status: 'unsafe', copies_here: 0, copies_away: 0, mtime: '2026-01-04T14:30:00Z', blake3: 'a91f22cd8801', mode: '0644' },
+  { kind: 'file', name: 'IMG_2014.HEIC', path: 'PHOTO_FILTER/IMG_2014.HEIC', size: 3901120, backup_status: 'safe', copies_here: 2, copies_away: 0, mtime: '2026-01-04T14:31:00Z', blake3: 'bb0c1190aa42', mode: '0644' },
+  { kind: 'file', name: 'edit_scratch.psd', path: 'PHOTO_FILTER/edit_scratch.psd', size: 219884123, backup_status: 'warn', copies_here: 0, copies_away: 1, mtime: '2026-02-20T11:05:00Z', blake3: 'c73d2200ffab', mode: '0644' }
+];
+const EXPLORER_SCAN = {
+  id: 'b668d2e6', nickname: 'NLBackup latest', status: 'complete',
+  file_count: 133639, total_bytes: 272113615765, is_representative: false, log: []
+};
+const EXPLORER_LOCATION = { slug: 'disk-nlbackup', name: 'NLBackup', connected: true };
+const EXPLORER_TREE_NODES = {
+  '': { entries: [{ kind: 'dir', name: 'PHOTO_FILTER', path: 'PHOTO_FILTER', hasChildren: true }], loaded: true },
+  PHOTO_FILTER: { entries: EXPLORER_ROWS.filter((r) => r.kind === 'dir'), loaded: true }
+};
+const EXPLORER_FLAT_ROWS = [
+  { kind: 'file', name: 'IMG_2013.HEIC', path: 'PHOTO_FILTER/@Photos/2026/IMG_2013.HEIC', size: 3820112, backup_status: 'unsafe', copies_here: 0, copies_away: 0, mtime: '2026-01-04T14:30:00Z' },
+  { kind: 'file', name: 'IMG_2014.HEIC', path: 'PHOTO_FILTER/@Photos/2026/IMG_2014.HEIC', size: 3901120, backup_status: 'safe', copies_here: 2, copies_away: 0, mtime: '2026-01-04T14:31:00Z' },
+  { kind: 'file', name: 'edit_scratch.psd', path: 'PHOTO_FILTER/Camera Roll/edit_scratch.psd', size: 219884123, backup_status: 'warn', copies_here: 0, copies_away: 1, mtime: '2026-02-20T11:05:00Z' },
+  { kind: 'file', name: 'DSC00891.ARW', path: 'PHOTO_FILTER/Camera Roll/2025/DSC00891.ARW', size: 48211044, backup_status: 'unsafe', copies_here: 0, copies_away: 0, mtime: '2025-11-30T08:00:00Z' },
+  { kind: 'file', name: 'panorama_final.tif', path: 'PHOTO_FILTER/Screenshots/panorama_final.tif', size: 812394812, backup_status: 'safe', copies_here: 1, copies_away: 1, mtime: '2026-06-19T09:12:00Z' }
+];
+const noop = () => {};
+
+function FileExplorerConsolidatedPreview({ defaultViewMode = 'browse' }) {
+  const onLoadFlat = () => Promise.resolve({ total: EXPLORER_FLAT_ROWS.length, entries: EXPLORER_FLAT_ROWS });
+  return (
+    <div className="grid min-h-screen grid-cols-[var(--sidebar-width)_minmax(0,1fr)] bg-bg text-text" style={{ '--sidebar-width': '260px' }}>
+      <aside className="h-screen border-r border-sidebar-border bg-sidebar-bg" />
+      <main className={appMainClassName}>
+        <FileExplorer
+          activeScan={EXPLORER_SCAN}
+          location={EXPLORER_LOCATION}
+          busy={false}
+          showScanActions
+          selectedPath="PHOTO_FILTER"
+          pathHistory={['', 'PHOTO_FILTER']}
+          pathHistoryIndex={1}
+          fileColumns={EXPLORER_FILE_COLUMNS}
+          visibleColumns={EXPLORER_VISIBLE_COLUMNS}
+          gridVisibleColumns={EXPLORER_VISIBLE_COLUMNS}
+          visibleGridRows={EXPLORER_ROWS}
+          directoryTreeNodes={EXPLORER_TREE_NODES}
+          directoryTreeExpandedPaths={['', 'PHOTO_FILTER']}
+          directoryTreeLoadingPaths={[]}
+          locations={[EXPLORER_LOCATION]}
+          selectedGridPaths={[]}
+          selectedGridEntries={[]}
+          defaultViewMode={defaultViewMode}
+          onLoadTree={noop}
+          onLoadFlat={onLoadFlat}
+          onToggleDirectoryTree={noop}
+          onLoadMoreDirectoryTree={noop}
+          onGoBack={noop}
+          onGoForward={noop}
+          onGoParent={noop}
+          onBrowseCurrentFolder={noop}
+          onRequestBuildThumbnails={noop}
+          onRequestBuildThumbnailsForEntry={noop}
+          onToggleColumns={noop}
+          onToggleColumn={noop}
+          onCommitSearch={noop}
+          onAddSearchFilter={noop}
+          onRemoveSearchFilter={noop}
+          onGroupSearchFilters={noop}
+          onReplaceSearchFilterState={noop}
+          onToggleGridSelection={noop}
+          onSetGridSelection={noop}
+          onClearGridSelection={noop}
+          onOpenGridEntry={noop}
+          onInspectFile={noop}
+          onRequestExcludePath={noop}
+          onRequestDeletePath={noop}
+          onOpenScanExcludes={noop}
+          onOpenScanNotes={noop}
+          onRequestDeleteScan={noop}
+          setQuery={noop}
+        />
+      </main>
+    </div>
+  );
+}
 
 // Reproduces the real app-shell width chain (sidebar grid col + appMain) so
 // TasksPage overflow behaves exactly as in production, with a punishing long
@@ -212,6 +307,24 @@ const SAMPLE_SEARCH_RESULTS = [
 ];
 
 const PREVIEWS = [
+  {
+    path: '/explorer/consolidated',
+    group: 'Live components',
+    variant: 'FileExplorer',
+    title: 'File Explorer (consolidated)',
+    description: 'Real FileExplorer: [Browse | Flat] + backup filter, no legacy subview tabs.',
+    fullScreen: true,
+    render: () => <FileExplorerConsolidatedPreview />
+  },
+  {
+    path: '/explorer/flat',
+    group: 'Live components',
+    variant: 'FileExplorer flat',
+    title: 'File Explorer (Flat list)',
+    description: 'Real FileExplorer in Flat mode: paginated path+file list with backup markers.',
+    fullScreen: true,
+    render: () => <FileExplorerConsolidatedPreview defaultViewMode="flat" />
+  },
   {
     path: '/redesign/location-scan-browser',
     group: 'Redesign prototype',

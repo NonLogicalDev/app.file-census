@@ -6,8 +6,6 @@ import SearchFilterControls from './search/SearchFilterControls.jsx';
 import ScanProgressPools from './ScanProgressPools.jsx';
 import {
   Button,
-  deleteCheckCalloutClassName,
-  deleteCheckEmptyClassName,
   emptyTextClassName,
   logLineClassName,
   logPanelClassName,
@@ -17,10 +15,6 @@ import {
 import { bytes, isActiveStatus, statusLabel } from '../utils/format.js';
 
 // Prototype (location.css) chrome, translated to the shared token palette.
-const modePill = (active) =>
-  `inline-flex h-6 items-center gap-1.5 rounded px-2 text-[11px] transition-colors ${
-    active ? 'bg-surface-muted text-text' : 'text-muted hover:text-text'
-  }`;
 const ctrlBtn =
   'inline-flex h-[30px] items-center gap-1.5 rounded-md border border-border bg-surface-subtle px-2.5 text-[11px] text-muted transition-colors hover:bg-surface hover:text-text disabled:cursor-default disabled:opacity-40 disabled:hover:bg-surface-subtle disabled:hover:text-muted';
 const navBtn =
@@ -103,7 +97,7 @@ export default function FileExplorer(props) {
   // unified model: markers are always shown; the filter narrows to a tier.
   const [backupFilter, setBackupFilter] = useState('all');
   // Browse (immediate-children tree, default) vs Flat (paginated all-descendants).
-  const [viewMode, setViewMode] = useState('browse');
+  const [viewMode, setViewMode] = useState(props.defaultViewMode || 'browse');
   const [flatRows, setFlatRows] = useState([]);
   const [flatTotal, setFlatTotal] = useState(0);
   const [flatLoading, setFlatLoading] = useState(false);
@@ -136,12 +130,6 @@ export default function FileExplorer(props) {
   }, [viewMode, flatKey, flatOffset, onLoadFlat, activeScan, selectedPath, backupFilter]);
 
   if (!activeScan) return <p className={emptyTextClassName}>Select or run a scan to browse this location.</p>;
-  const showingDeleteCheck = scanSubview === 'delete-check';
-  const showingFileTree = scanSubview === 'tree';
-  // Split the staged Delete Check list so folders are listed on their own,
-  // ahead of individually-staged files.
-  const stagedFolders = deleteCheckStaged.filter((item) => item.kind === 'dir' || item.kind === 'parent');
-  const stagedFiles = deleteCheckStaged.filter((item) => item.kind !== 'dir' && item.kind !== 'parent');
   const selectedCount = selectedGridEntries.length;
   const canBuildThumbnails = Boolean(location?.connected && activeScan);
   const canStopScan = typeof onStopScan === 'function';
@@ -151,12 +139,6 @@ export default function FileExplorer(props) {
     : activeScanStatus
       ? 'Live scan'
       : 'Historical scan';
-
-  const modes = [
-    ['files', 'Files', 'browseFiles'],
-    ['tree', 'File tree', 'folder'],
-    ['delete-check', 'Delete Check', 'deleteCheck']
-  ];
 
   // Backup-tier totals for the current listing (files here + descendants of the
   // folders shown), used for the filter chip counts and gating.
@@ -221,26 +203,11 @@ export default function FileExplorer(props) {
         </span>
       ))}
       <div className="ml-auto flex flex-none items-center gap-2 pl-3">
-        <div className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5">
-          <BackupFilterChip label="Browse" active={viewMode === 'browse'} onClick={() => setViewMode('browse')} />
-          <BackupFilterChip label="Flat" active={viewMode === 'flat'} onClick={() => setViewMode('flat')} />
-        </div>
-        {hasBackupData && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Backup</span>
-            <div className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5">
-              <BackupFilterChip label="All" active={backupFilter === 'all'} onClick={() => setBackupFilter('all')} />
-              <BackupFilterChip label="Unsafe" count={backupTotals.unsafe} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
-              <BackupFilterChip label="Warn" count={backupTotals.warn} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
-              <BackupFilterChip label="Safe" count={backupTotals.safe} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
-            </div>
-          </div>
-        )}
-        {!hasBackupData && (
-          <span className="text-[10px] tabular-nums text-text-tertiary">
-            {viewMode === 'flat' ? `${flatTotal} files` : `${filteredGridRows.length} items`}
-          </span>
-        )}
+        <span className="text-[10px] tabular-nums text-text-tertiary">
+          {viewMode === 'flat'
+            ? `${flatTotal.toLocaleString()} files`
+            : `${filteredGridRows.length.toLocaleString()} items`}
+        </span>
       </div>
     </nav>
   );
@@ -285,11 +252,10 @@ export default function FileExplorer(props) {
   const resultsTable = (
     <div className="relative block min-h-[420px] flex-1 overflow-auto bg-bg">
       <FileGrid
-        storageKey={showingDeleteCheck ? 'locations-delete-check' : 'locations-files'}
-        rows={showingDeleteCheck ? visibleGridRows : filteredGridRows}
+        storageKey="locations-files"
+        rows={filteredGridRows}
         visibleColumns={gridVisibleColumns}
-        fullPathName={showingDeleteCheck}
-        selectable={!showingDeleteCheck}
+        selectable
         deleteCheck
         selectedPaths={selectedGridPaths}
         inspectedPath={inspected?.path}
@@ -299,16 +265,16 @@ export default function FileExplorer(props) {
         onInspectRow={(entry) => { setInspected(entry); setInspectorOpen(true); }}
         onToggleSelection={onToggleGridSelection}
         onSetSelection={onSetGridSelection}
-        onBuildThumbnails={showingDeleteCheck ? null : onRequestBuildThumbnailsForEntry}
-        onExclude={showingDeleteCheck ? null : onRequestExcludePath}
-        onDelete={showingDeleteCheck ? null : onRequestDeletePath}
+        onBuildThumbnails={onRequestBuildThumbnailsForEntry}
+        onExclude={onRequestExcludePath}
+        onDelete={onRequestDeletePath}
       />
-      {!visibleGridRows.length && (
+      {!filteredGridRows.length && (
         <p className="pointer-events-none absolute inset-x-0 top-[52px] z-[1] p-[18px] text-center text-[11px] text-muted">
           {filesLoading
             ? 'Loading files…'
-            : showingDeleteCheck
-              ? (deleteCheck ? 'No missing files.' : 'No Delete Check rows yet.')
+            : backupFilter !== 'all'
+              ? `No ${backupFilter} files in this folder.`
               : activeScanStatus
                 ? 'Waiting for the first flushed files...'
                 : 'No files discovered at this path yet.'}
@@ -385,79 +351,42 @@ export default function FileExplorer(props) {
         </div>
       </header>
 
-      {/* Workspace row: mode selector + view/command actions */}
+      {/* Workspace row: Browse/Flat view switch + backup filter + command actions */}
       <div className="flex flex-wrap items-center gap-2 border-b border-sidebar-border py-2">
         <div className="inline-flex h-[30px] flex-none items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5" role="tablist" aria-label="Scan views">
-          {modes.map(([value, label, icon]) => (
-            <button
-              key={value}
-              type="button"
-              role="tab"
-              aria-selected={scanSubview === value}
-              className={modePill(scanSubview === value)}
-              onClick={() => onSetScanSubview(value)}
-            >
-              {value === 'delete-check' && <Icon name={icon} className="h-3 w-3" />}
-              {label}
-            </button>
-          ))}
+          <BackupFilterChip label="Browse" active={viewMode === 'browse'} onClick={() => setViewMode('browse')} />
+          <BackupFilterChip label="Flat" active={viewMode === 'flat'} onClick={() => setViewMode('flat')} />
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-text-tertiary">Backup</span>
+          <div className="inline-flex h-[30px] items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5">
+            <BackupFilterChip label="All" active={backupFilter === 'all'} onClick={() => setBackupFilter('all')} />
+            <BackupFilterChip label="Unsafe" count={hasBackupData ? backupTotals.unsafe : undefined} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
+            <BackupFilterChip label="Warn" count={hasBackupData ? backupTotals.warn : undefined} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
+            <BackupFilterChip label="Safe" count={hasBackupData ? backupTotals.safe : undefined} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
+          </div>
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          {showingDeleteCheck ? (
-            <>
-              <button type="button" className={ctrlBtn} onClick={() => onRunDeleteCheck(activeScan.id, [])} disabled={busy}>
-                <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Check current folder
-              </button>
-              {deleteCheck && (
-                <button type="button" className={ctrlBtn} onClick={onCloseDeleteCheck} disabled={busy}>
-                  <Icon name="close" className="h-3.5 w-3.5" /> Clear result
-                </button>
-              )}
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                className={ctrlBtn}
-                onClick={() => onRunDeleteCheck(activeScan.id, selectedGridEntries)}
-                disabled={busy}
-              >
-                <Icon name="deleteCheck" className="h-3.5 w-3.5" />
-                {selectedCount ? `Delete check (${selectedCount})` : 'Delete check'}
-              </button>
-              {typeof onStageDeleteCheck === 'function' && (
-                <button
-                  type="button"
-                  className={ctrlBtn}
-                  onClick={() => onStageDeleteCheck(selectedGridEntries)}
-                  disabled={busy || !selectedCount}
-                  title="Add the selected files and folders to the Delete Check list"
-                >
-                  <Icon name="add" className="h-3.5 w-3.5" />
-                  Add to Delete Check{deleteCheckStaged.length ? ` (${deleteCheckStaged.length})` : ''}
-                </button>
-              )}
-              <button
-                type="button"
-                className={ctrlBtn}
-                onClick={() => onBrowseCurrentFolder(location)}
-                disabled={busy || !location.connected}
-              >
-                <Icon name="folder" className="h-3.5 w-3.5" /> Browse Folder
-              </button>
-              <button
-                type="button"
-                className={ctrlBtn}
-                onClick={() => onRequestBuildThumbnails(showingDeleteCheck ? [] : selectedGridEntries)}
-                disabled={busy || !canBuildThumbnails}
-                title={location.connected ? 'Build thumbnails for the current folder or selected rows' : 'Connect this location to build thumbnails'}
-              >
-                <Icon name="thumbnails" className="h-3.5 w-3.5" />
-                {selectedCount ? `Build Thumbnails (${selectedCount})` : 'Build Thumbnails'}
-              </button>
-            </>
-          )}
+          <button
+            type="button"
+            className={ctrlBtn}
+            onClick={() => onBrowseCurrentFolder(location)}
+            disabled={busy || !location.connected}
+          >
+            <Icon name="folder" className="h-3.5 w-3.5" /> Browse Folder
+          </button>
+          <button
+            type="button"
+            className={ctrlBtn}
+            onClick={() => onRequestBuildThumbnails(selectedGridEntries)}
+            disabled={busy || !canBuildThumbnails}
+            title={location.connected ? 'Build thumbnails for the current folder or selected rows' : 'Connect this location to build thumbnails'}
+          >
+            <Icon name="thumbnails" className="h-3.5 w-3.5" />
+            {selectedCount ? `Build Thumbnails (${selectedCount})` : 'Build Thumbnails'}
+          </button>
           <button type="button" className={`${ctrlBtn} ${showColumns ? 'bg-surface text-text' : ''}`} onClick={onToggleColumns} aria-expanded={showColumns}>
             <Icon name="columns" className="h-3.5 w-3.5" /> Columns
           </button>
@@ -578,7 +507,7 @@ export default function FileExplorer(props) {
         />
       </div>
 
-      {!showingDeleteCheck && selectedCount > 0 && (
+      {selectedCount > 0 && (
         <div className="mb-2 flex min-h-9 items-center justify-between gap-3 border-y border-sidebar-border bg-surface-subtle px-3 py-1.5 text-[11px] text-muted-strong">
           <span className="font-semibold">{selectedCount} selected</span>
           <Button variant="ghost" size="sm" onClick={onClearGridSelection} disabled={busy} icon={<Icon name="close" />}>
@@ -597,83 +526,8 @@ export default function FileExplorer(props) {
         </div>
       )}
 
-      {!showingDeleteCheck && viewMode === 'flat' ? (
+      {viewMode === 'flat' ? (
         flatView
-      ) : showingDeleteCheck ? (
-        <>
-          {deleteCheckStaged.length > 0 && (
-            <section className="mb-2.5 mt-2 overflow-hidden border border-sidebar-border bg-sidebar-bg">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sidebar-border px-3 py-2">
-                <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted">
-                  Delete Check list · {stagedFolders.length} {stagedFolders.length === 1 ? 'folder' : 'folders'} · {stagedFiles.length} {stagedFiles.length === 1 ? 'file' : 'files'}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    className={`${ctrlBtn} border-warning/40 text-warning`}
-                    onClick={() => onRunStagedDeleteCheck?.(activeScan.id)}
-                    disabled={busy}
-                  >
-                    <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Run Delete Check ({deleteCheckStaged.length})
-                  </button>
-                  <button type="button" className={ctrlBtn} onClick={onClearDeleteCheckStage} disabled={busy}>
-                    <Icon name="close" className="h-3.5 w-3.5" /> Clear list
-                  </button>
-                </div>
-              </div>
-              <div className="max-h-52 overflow-auto">
-                {stagedFolders.length > 0 && (
-                  <>
-                    <p className="sticky top-0 z-[1] bg-sidebar-bg px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
-                      Folders · {stagedFolders.length}
-                    </p>
-                    <ul className="divide-y divide-surface">
-                      {stagedFolders.map((item) => (
-                        <StagedDeleteCheckRow key={item.path} item={item} onRemove={onRemoveDeleteCheckStage} />
-                      ))}
-                    </ul>
-                  </>
-                )}
-                {stagedFiles.length > 0 && (
-                  <>
-                    <p className="sticky top-0 z-[1] bg-sidebar-bg px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
-                      Files · {stagedFiles.length}
-                    </p>
-                    <ul className="divide-y divide-surface">
-                      {stagedFiles.map((item) => (
-                        <StagedDeleteCheckRow key={item.path} item={item} onRemove={onRemoveDeleteCheckStage} />
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </div>
-            </section>
-          )}
-          {deleteCheck ? (
-            <section className={deleteCheckCalloutClassName({ safe: deleteCheck.safe })}>
-              <div>
-                <strong>{deleteCheck.safe ? 'Safe to delete' : 'Unsafe to delete'}</strong>
-                <span>
-                  {deleteCheck.safe
-                    ? `All ${deleteCheck.total_count} files in ${deleteCheckPath || 'root'} are present in at least one other location.`
-                    : `${deleteCheck.missing_count} of ${deleteCheck.total_count} files in ${deleteCheckPath || 'root'} are not present in another location.`}
-                </span>
-              </div>
-              <Button variant="secondary" onClick={() => onSetScanSubview('files')} icon={<Icon name="browseFiles" />}>
-                Back to files
-              </Button>
-            </section>
-          ) : (
-            <section className={deleteCheckEmptyClassName}>
-              <strong>No Delete Check result yet</strong>
-              <span>Run Delete Check from the Files tab to check the current folder or selected rows.</span>
-              <Button variant="warning" onClick={() => onRunDeleteCheck(activeScan.id, [])} disabled={busy} icon={<Icon name="deleteCheck" />}>
-                Check current folder
-              </Button>
-            </section>
-          )}
-          <div className="border border-sidebar-border bg-bg">{resultsTable}</div>
-        </>
       ) : (
         <div className="mt-2 flex min-h-[620px] flex-col overflow-hidden border border-sidebar-border bg-bg">
           {breadcrumbBar}
@@ -731,29 +585,6 @@ function BackupFilterChip({ label, count, tone, active, onClick }) {
       {label}
       {count != null && <span className="tabular-nums opacity-70">{count}</span>}
     </button>
-  );
-}
-
-function StagedDeleteCheckRow({ item, onRemove }) {
-  const isFolder = item.kind === 'dir' || item.kind === 'parent';
-  return (
-    <li className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-      <Icon
-        name={isFolder ? 'folder' : 'file'}
-        className={`h-3.5 w-3.5 flex-none ${isFolder ? 'text-accent' : 'text-text-tertiary'}`}
-      />
-      <span className="min-w-0 flex-1 truncate text-muted-strong" title={item.path}>
-        {item.path}
-      </span>
-      <button
-        type="button"
-        onClick={() => onRemove?.(item.path)}
-        className="grid h-5 w-5 flex-none place-items-center rounded text-text-tertiary hover:text-text"
-        aria-label={`Remove ${item.name} from Delete Check list`}
-      >
-        <Icon name="close" className="h-3 w-3" />
-      </button>
-    </li>
   );
 }
 

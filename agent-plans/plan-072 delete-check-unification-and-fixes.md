@@ -51,8 +51,13 @@ the default DB, and a hanging Delete Check.
        force a rebuild; verify markers populate on the live DB.
 3. [ ] Make the refcount scope correct (representative-scan-based; exclude
        same-location cross-scan snapshots). Add tests.
-4. [ ] Consolidate the interface: retire the old subview tabs; unify into
+4. [x] Consolidate the interface: retire the old subview tabs; unify into
        `[Browse | Flat]` + Backup filter; Browse=tree, Flat=path+file list.
+       Done: removed `[Files|File tree|Delete Check]` tabs + the delete-check
+       staging/callout branch from FileExplorer; the Browse/Flat switch and the
+       All/Unsafe/Warn/Safe backup filter (delete markers always on) are the
+       only surface. Screenshots (real FileExplorer, preview routes
+       `/explorer/consolidated` + `/explorer/flat`) confirm both views.
 5. [ ] Fix / retire the hanging Delete Check path (old delete_check on 275k).
 6. [ ] Row-select delete action with delete-time survivor check.
 7. [ ] Verify end-to-end against /Volumes/NLBackup + the default DB.
