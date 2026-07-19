@@ -286,6 +286,21 @@ Durable direction the user gave while this plan was built:
   Backend + UI are fully specced above (antichain + survivor algorithm); build
   with the user present.
 
+## Work Log (2026-07-19 overnight, cont.)
+
+- [x] 03:50 - Fixed Flat (web scans.tree ignored flat param -> returned folders).
+  CDP-verified: 500 file rows, "Showing 500 of 275,224". (`83e2245`)
+- [x] 04:30 - Internal/External scope toggle built for REAL (cache v7 stores
+  same-location unique-content tiers); fixed the bogus "Safe 189255" filter
+  count (used real safe_count). CDP-verified: External Safe=0, Internal
+  Safe=23,501. (`6f28790`)
+- [x] 05:05 - Delete Check set end-to-end: per-scan antichain members table +
+  survivor validation (unit-tested) + RPCs + UI (add / toggle / membership /
+  validate). CDP-verified: stage @Photos -> 187,950 affected, 115,477 safe,
+  72,473 last-copy. (`33cec70`, row menu `05:15`)
+- [x] Verification harness: `scratchpad/cdp.mjs` drives the live app in Chrome;
+  every feature proven by click+screenshot, not assertion.
+
 ## Unfinished Work
 
 - [ ] Delete Check set: implement per the specced antichain + survivor
