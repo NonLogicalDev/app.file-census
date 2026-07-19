@@ -35,7 +35,7 @@ const fileColumns = [
   ['size', 'Size'],
   ['file_count', 'Files'],
   ['distinct_count', 'Uniq'],
-  ['blake3', 'BLAKE3'],
+  ['blake3', 'Hash Full'],
   ['ctime', 'CTime'],
   ['mtime', 'Modified'],
   ['mode', 'Mode'],
