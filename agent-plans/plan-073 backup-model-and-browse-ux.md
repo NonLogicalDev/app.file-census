@@ -301,6 +301,56 @@ Durable direction the user gave while this plan was built:
 - [x] Verification harness: `scratchpad/cdp.mjs` drives the live app in Chrome;
   every feature proven by click+screenshot, not assertion.
 
+## Burn-down 2026-07-19 (audit fixes + nav refresh) — decisions
+
+- **Nav refresh**: split the crowded control row into two. Row 1: `[Browse|Flat]`
+  view switch + command actions (Browse Folder / Build Thumbnails / Export TSV /
+  Columns / Inspector). Row 2 (analysis row): Backup filter `[All|Safe|Partial|
+  Unsafe]` + Scope `[External|Internal]` + persistent "Add to Delete Check"
+  (disabled when nothing selected — no layout shift) + Delete Check toggle.
+- **Delete Check filter, server-side (both views)**: `scans.tree` gains
+  `delete_check: bool`. Browse: filter entries BEFORE pagination to rows that are
+  staged, under a staged folder, or an ANCESTOR of a staged member (so the chain
+  to staged paths stays navigable). Flat: SQL predicate (member paths + LIKE
+  descendants) before LIMIT/OFFSET so pagination + totals are correct. Empty
+  non-staged folders show an explicit "No Delete Check paths under this folder"
+  message — the old silent-vanish is replaced by honest state, and toggle-off
+  always restores.
+- **deleteCheckMode lifts to App** so tree/flat fetches carry the flag.
+- **Scope-aware everywhere**: flat `backup` filter switches to `int_*` columns
+  when scope=internal; Export TSV takes `scope` and emits internal verdict words
+  (`dup_on_disk`/`similar_on_disk`/`unique_on_disk`) when internal.
+- **Header tooltips become real**: FileGrid header button renders
+  `meta.tooltip` as `title` (making the previously-false claim true).
+- **Memo made effective**: inline `onInspectRow` arrows replaced with a
+  `useCallback` handler.
+- **Validation staleness**: set changes mark the last validation `stale` (amber
+  "re-validate" hint) instead of silently clearing it.
+- Deferred (recorded, not hidden): panel/inspector coexistence, URL-persisted
+  scope/mode, CLI `--delete-check` flag for `scans tree`.
+
+## Burn-down work log 2026-07-19 (~13:30) — all CDP-verified live
+
+- [x] Two-row nav shipped: Row 1 view+commands; Row 2 Backup filter + Scope +
+  persistent Add-to-Delete-Check + Delete Check toggle. (`bc3cdd9`)
+- [x] Server-side Delete Check filter (Browse pre-pagination incl. ancestors;
+  Flat SQL predicate). Verified: dc-ON browse = parent + @Photos only; dc-OFF
+  restores; Flat dc-ON = "Showing 500 of 187,950" (exactly @Photos);
+  non-staged folder returns 0 entries (CLI) with an explicit empty message.
+- [x] Flat delete-check affordances: checkboxes, row-menu add, panel in Flat.
+- [x] Real header tooltips (title from meta.tooltip; verified via DOM).
+- [x] Scope-aware flat filter + TSV: internal-unsafe 53,322 / internal-safe
+  134,628 (partitions 187,950 exactly) vs external-unsafe 187,886; TSV
+  scope=internal emits dup_on_disk/unique_on_disk words.
+- [x] Memo props stabilized (useCallback handleInspectRow, both grids).
+- [x] Stale-validation banner instead of vanishing numbers.
+- [x] Perf: dc flat count skips cache join without tier filter (2.2s->0.33s).
+- Honest residuals: (a) live scan-time re-render check still needs a headed
+  browser (task #19); (b) "Showing N of M" renders the previous total for ~2s
+  while a tier+dc count loads (polish: loading shimmer); (c) sidebar-click nav
+  into a non-staged folder wasn't exercised by the harness (selector miss) —
+  server behavior unit+CLI-verified instead.
+
 ## Self-audit 2026-07-19 (user-requested; verified against code, not memory)
 
 Cheats / workarounds of explicit requirements:
