@@ -76,6 +76,17 @@ All CDP-verified in the running app. 73 backend + 8 perf-gate + 139 UI tests.
   FileGrid memo reduces scan-time render cost. Residual event-lag needs live
   verification.
 
+### Delete-check bug fixes from real use (2026-07-19, CDP-verified)
+- File Backup badge overflowed + read contradictorily ("No off-disk backup
+  [141,575 copies exist]") → compact chip + "×142k" ("On-disk only" for the
+  same-disk-only case); no overflow; "Last copy" and a copy count never co-occur.
+- Delete Check mode filtered the browse grid → emptied non-staged folders and
+  broke paginated Flat ("no files"). Now it only reveals the membership/validation
+  panel; browsing is never filtered.
+- Top backup counter double-counted content shared across sibling folders (summed
+  child rollups). Now uses the browsed folder's OWN rollup (folder_summary):
+  PhotoMerge shows 8,198 unsafe (its own) not 17,757 (the sum).
+
 ### Known minor gaps (documented, not blocking)
 - Internal-scope filtering in Flat is client-side on the loaded page only
   (server-side flat filter uses the External tier columns).
