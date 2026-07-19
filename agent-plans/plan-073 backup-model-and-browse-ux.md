@@ -366,6 +366,14 @@ toggle too (default open, persisted `locations-folders-open`); collapsed, the
 left column disappears entirely. Grid columns are built dynamically from the
 two toggles, so with both closed the table spans the full width.
 
+## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
+
+- [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
+  longer auto-opens. Folders pane collapsible via toolbar toggle, persisted.
+  Dynamic grid columns; both closed = full-width table. Verified by measured
+  widths: 938 default / 938 after row click / 618 inspector open / 1162 both
+  collapsed / 938 restored.
+
 ## Mode-rework work log 2026-07-19 (~14:40) — CDP-verified live (`80900c6`)
 
 - [x] deleteCheckBar above the table (Browse+Flat); side panel removed;
