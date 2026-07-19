@@ -67,86 +67,85 @@ function deleteCheckRank(status) {
 const deleteCheckBadgeBase =
   'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.03em] whitespace-nowrap';
 
-// `here` = surviving copies of this content in the same location/scan (outside
-// the deletion selection); `away` = exact copies in other locations'
-// representative scans. Together they explain the status via the refcount model.
-// Total exact copies of this content that exist (this file + its copies). Shown
-// so a "backed up" file also states how many copies exist, and a same-location
-// duplicate that has no off-disk backup does not read as a true "last copy".
-function CopiesExist({ here = 0, away = 0 }) {
-  const total = 1 + here + away;
-  if (total <= 1) return null;
-  return (
-    <span className="ml-1.5 text-[10px] text-muted tabular-nums" title={`${here} more on this disk, ${away} on other locations`}>
-      [{total.toLocaleString()} copies exist]
-    </span>
-  );
-}
-
 const badgeRed = `${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`;
 const badgeAmber = `${deleteCheckBadgeBase} border-warning/50 bg-warning-soft text-warning`;
 const badgeGreen = `${deleteCheckBadgeBase} border-success/40 bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`;
 
+// Compact large counts so the Backup cell never overflows: 1_500 -> "1.5k".
+function compactCount(n) {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`.replace('.0k', 'k');
+  return `${(n / 1_000_000).toFixed(1)}M`.replace('.0M', 'M');
+}
+
+// A tiny "×N" copies chip (N = total copies of this content), truncation-safe.
+function CopiesChip({ count, title }) {
+  if (count <= 1) return null;
+  return (
+    <span className="ml-1 shrink-0 text-[10px] text-muted tabular-nums" title={title}>
+      ×{compactCount(count)}
+    </span>
+  );
+}
+
 // File Backup cell. External scope: is this content backed up on ANOTHER disk?
-// Internal scope: is there another copy of it on THIS disk?
+// Internal scope: is there another copy of it on THIS disk? Kept compact so it
+// fits the column; the exact numbers live in the tooltip. "Last copy" (nothing
+// survives) and a copy count never appear together.
 function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external' }) {
   if (!status) {
     return <span className="text-[10px] text-text-tertiary">—</span>;
   }
+  const totalEverywhere = 1 + here + away;
+  const wrap = (chip, extra) => (
+    <span className="inline-flex min-w-0 max-w-full items-center overflow-hidden">
+      {chip}
+      {extra}
+    </span>
+  );
+  const copiesTitle = `${totalEverywhere.toLocaleString()} copies of this content exist (${here.toLocaleString()} more on this disk, ${away.toLocaleString()} on other locations)`;
+
   if (scope === 'internal') {
     if (status === 'safe') {
-      return (
-        <span className="inline-flex items-center">
-          <span className={badgeGreen} title="Another exact copy of this content exists on this same disk."><Icon name="copy" className="h-3 w-3" /> Duplicated here</span>
-          <CopiesExist here={here} away={away} />
-        </span>
+      return wrap(
+        <span className={badgeGreen} title="Another exact copy of this content exists on this same disk."><Icon name="copy" className="h-3 w-3" /> Dup here</span>,
+        <CopiesChip count={1 + here} title={copiesTitle} />
       );
     }
     if (status === 'warn') {
-      return (
-        <span className="inline-flex items-center">
-          <span className={badgeAmber} title="A light-hash (same size) match exists on this disk — probably a duplicate."><Icon name="warning" className="h-3 w-3" /> Similar here</span>
-          <CopiesExist here={here} away={away} />
-        </span>
+      return wrap(
+        <span className={badgeAmber} title="A light-hash (same size) match exists on this disk — probably a duplicate."><Icon name="warning" className="h-3 w-3" /> Similar</span>,
+        <CopiesChip count={1 + here} title={copiesTitle} />
       );
     }
-    return (
-      <span className="inline-flex items-center">
-        <span className={badgeRed} title="No duplicate of this content on this disk."><Icon name="warning" className="h-3 w-3" /> Unique here</span>
-        {away > 0 && <span className="ml-1.5 text-[10px] text-muted tabular-nums" title={`${away} copies on other locations`}>[{away} off-disk]</span>}
-      </span>
+    return wrap(
+      <span className={badgeRed} title="No duplicate of this content on this disk."><Icon name="warning" className="h-3 w-3" /> Unique here</span>,
+      away > 0 ? <span className="ml-1 shrink-0 text-[10px] text-muted tabular-nums" title={`${away} copies on other locations`}>·{compactCount(away)} off-disk</span> : null
     );
   }
   if (status === 'unsafe') {
     // External: no copy on another location. If there are same-disk copies, say
-    // so rather than "last copy" (deleting one still leaves others).
+    // so rather than "last copy" (deleting one still leaves others on this disk).
     if (here > 0) {
-      return (
-        <span className="inline-flex items-center">
-          <span className={badgeRed} title="No copy on another location. Duplicated on this disk only."><Icon name="warning" className="h-3 w-3" /> No off-disk backup</span>
-          <CopiesExist here={here} away={away} />
-        </span>
+      return wrap(
+        <span className={badgeRed} title="No copy on another location — duplicated on this disk only."><Icon name="warning" className="h-3 w-3" /> On-disk only</span>,
+        <CopiesChip count={1 + here} title={copiesTitle} />
       );
     }
-    return (
-      <span className="inline-flex items-center">
-        <span className={badgeRed} title="The only copy anywhere in scope. Deleting it loses the content."><Icon name="warning" className="h-3 w-3" /> Last copy</span>
-      </span>
+    return wrap(
+      <span className={badgeRed} title="The only copy anywhere in scope. Deleting it loses the content."><Icon name="warning" className="h-3 w-3" /> Last copy</span>,
+      null
     );
   }
   if (status === 'warn') {
-    return (
-      <span className="inline-flex items-center">
-        <span className={badgeAmber} title="Only a light-hash (same size) match on another location: probably the same file, but not proven by full hash."><Icon name="warning" className="h-3 w-3" /> Partial</span>
-        <CopiesExist here={here} away={away} />
-      </span>
+    return wrap(
+      <span className={badgeAmber} title="Only a light-hash (same size) match on another location — probably the same file, but not proven by full hash."><Icon name="warning" className="h-3 w-3" /> Partial</span>,
+      <CopiesChip count={totalEverywhere} title={copiesTitle} />
     );
   }
-  return (
-    <span className="inline-flex items-center">
-      <span className={badgeGreen} title="An exact full-hash copy exists on another location."><Icon name="check" className="h-3 w-3" /> Safe</span>
-      <CopiesExist here={here} away={away} />
-    </span>
+  return wrap(
+    <span className={badgeGreen} title="An exact full-hash copy exists on another location."><Icon name="check" className="h-3 w-3" /> Safe</span>,
+    <CopiesChip count={totalEverywhere} title={copiesTitle} />
   );
 }
 

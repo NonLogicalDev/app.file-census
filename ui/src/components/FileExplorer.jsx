@@ -104,16 +104,10 @@ export default function FileExplorer(props) {
   // Backup scope: 'external' = backed up on ANOTHER location; 'internal' = a
   // duplicate exists on THIS same disk.
   const [scope, setScope] = useState('external');
-  // Delete Check mode: show the staged-set panel and filter the browse to it.
+  // Delete Check mode: reveal the staged-set panel (membership + validation).
+  // It does not filter the browse — that stranded the view in non-staged folders
+  // and broke the paginated Flat list; the panel is the set's source of truth.
   const [deleteCheckMode, setDeleteCheckMode] = useState(false);
-  const stagedPaths = useMemo(() => new Set(deleteCheckSet.map((m) => m.path)), [deleteCheckSet]);
-  const stagedFolders = useMemo(() => deleteCheckSet.filter((m) => m.kind === 'dir').map((m) => m.path), [deleteCheckSet]);
-  // A row is "in the set" if it is a staged member or lives under a staged folder.
-  const isStaged = (path) => {
-    if (!path) return false;
-    if (stagedPaths.has(path)) return true;
-    return stagedFolders.some((folder) => path === folder || path.startsWith(`${folder}/`));
-  };
   // Browse (immediate-children tree, default) vs Flat (paginated all-descendants).
   const [viewMode, setViewMode] = useState(props.defaultViewMode || 'browse');
   // User-resizable Folders (directory-tree) pane width, persisted.
@@ -216,17 +210,15 @@ export default function FileExplorer(props) {
   }, [visibleGridRows, scope]);
   const hasBackupData = backupTotals.unsafe + backupTotals.warn + backupTotals.safe > 0;
 
+  // Delete Check mode shows the staged-set panel; it does NOT hide rows from the
+  // browse (that stranded the view in non-staged folders and broke the paginated
+  // Flat list). Staged rows are marked instead, and the panel is the set's
+  // source of truth.
   const filteredGridRows = useMemo(() => {
-    let rows = visibleGridRows;
-    if (deleteCheckMode) {
-      rows = rows.filter((row) => row.kind === 'parent' || isStaged(row.path));
-    }
-    if (backupFilter !== 'all') {
-      rows = rows.filter((row) => row.kind === 'parent' || rowTier(row, backupFilter) > 0);
-    }
-    return rows;
+    if (backupFilter === 'all') return visibleGridRows;
+    return visibleGridRows.filter((row) => row.kind === 'parent' || rowTier(row, backupFilter) > 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleGridRows, backupFilter, scope, deleteCheckMode, stagedPaths, stagedFolders]);
+  }, [visibleGridRows, backupFilter, scope]);
 
   const breadcrumbBar = (
     <nav className="flex min-h-8 flex-none items-center gap-1 overflow-x-auto border-b border-sidebar-border bg-sidebar-bg px-2" aria-label="Current path">
@@ -504,7 +496,7 @@ export default function FileExplorer(props) {
             className={`${ctrlBtn} ${deleteCheckMode ? 'border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger' : ''}`}
             onClick={() => setDeleteCheckMode((on) => !on)}
             aria-pressed={deleteCheckMode}
-            title="Show only staged paths and the deletion-impact panel"
+            title="Show the Delete Check set panel (staged paths + deletion-impact validation)"
           >
             <Icon name="deleteCheck" className="h-3.5 w-3.5" /> Delete Check
             <span className={`ml-1 rounded-full px-1.5 text-[10px] ${deleteCheckMode ? 'bg-danger/20' : 'bg-surface-muted'}`}>{deleteCheckSet.length}</span>
