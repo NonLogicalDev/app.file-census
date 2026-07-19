@@ -70,25 +70,41 @@ const deleteCheckBadgeBase =
 // `here` = surviving copies of this content in the same location/scan (outside
 // the deletion selection); `away` = exact copies in other locations'
 // representative scans. Together they explain the status via the refcount model.
-function CopyCounts({ here = 0, away = 0 }) {
-  if (!here && !away) return null;
+// Total exact copies of this content that exist (this file + its copies). Shown
+// so a "backed up" file also states how many copies exist, and a same-location
+// duplicate that has no off-disk backup does not read as a true "last copy".
+function CopiesExist({ here = 0, away = 0 }) {
+  const total = 1 + here + away;
+  if (total <= 1) return null;
   return (
-    <span className="ml-1.5 inline-flex items-center gap-1.5 text-[10px] text-muted" title={`${here} more in this location, ${away} in other locations`}>
-      {here > 0 && <span className="tabular-nums">⌂{here}</span>}
-      {away > 0 && <span className="tabular-nums">↗{away}</span>}
+    <span className="ml-1.5 text-[10px] text-muted tabular-nums" title={`${here} more on this disk, ${away} on other locations`}>
+      [{total.toLocaleString()} copies exist]
     </span>
   );
 }
 
+// File Backup cell (External scope): is this content backed up on ANOTHER disk?
 function DeleteCheckStatusBadge({ status, here = 0, away = 0 }) {
   if (!status) {
     // No ready duplicate cache yet — backup status is unknown.
     return <span className="text-[10px] text-text-tertiary">—</span>;
   }
   if (status === 'unsafe') {
+    // No copy on another location. If there are same-disk copies, say so rather
+    // than "last copy" (which would be wrong — deleting one still leaves others).
+    if (here > 0) {
+      return (
+        <span className="inline-flex items-center">
+          <span className={`${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`} title="No copy on another location. Duplicated on this disk only.">
+            <Icon name="warning" className="h-3 w-3" /> No off-disk backup
+          </span>
+          <CopiesExist here={here} away={away} />
+        </span>
+      );
+    }
     return (
       <span className="inline-flex items-center">
-        <span className={`${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`} title="Deleting the selection removes the last surviving copy of this content">
+        <span className={`${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`} title="The only copy anywhere in scope. Deleting it loses the content.">
           <Icon name="warning" className="h-3 w-3" /> Last copy
         </span>
       </span>
@@ -97,35 +113,34 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0 }) {
   if (status === 'warn') {
     return (
       <span className="inline-flex items-center">
-        <span className={`${deleteCheckBadgeBase} border-warning/50 bg-warning-soft text-warning`} title="Only a light-hash match survives: probably the same file, but not proven by full hash">
-          <Icon name="warning" className="h-3 w-3" /> Similar
+        <span className={`${deleteCheckBadgeBase} border-warning/50 bg-warning-soft text-warning`} title="Only a light-hash (same size) match on another location: probably the same file, but not proven by full hash.">
+          <Icon name="warning" className="h-3 w-3" /> Partial
         </span>
-        <CopyCounts here={here} away={away} />
+        <CopiesExist here={here} away={away} />
       </span>
     );
   }
   return (
     <span className="inline-flex items-center">
-      <span className={`${deleteCheckBadgeBase} border-success/40 bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`} title="An exact full-hash copy survives the deletion">
+      <span className={`${deleteCheckBadgeBase} border-success/40 bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`} title="An exact full-hash copy exists on another location.">
         <Icon name="check" className="h-3 w-3" /> Safe
       </span>
-      <CopyCounts here={here} away={away} />
+      <CopiesExist here={here} away={away} />
     </span>
   );
 }
 
-function FolderRollupBadge({ unsafe = 0, warn = 0 }) {
-  if (!unsafe && !warn) {
-    return <span className="text-[10px] font-medium text-success/80">all backed up</span>;
+// Folder Backup cell: how many UNIQUE contents in the folder fall in each tier.
+function FolderRollupBadge({ safe = 0, warn = 0, unsafe = 0 }) {
+  if (!safe && !warn && !unsafe) {
+    return <span className="text-[10px] text-text-tertiary">—</span>;
   }
+  const chip = 'inline-flex items-center rounded-full border px-1.5 py-[1px] text-[10px] font-bold tabular-nums';
   return (
-    <span className="inline-flex items-center gap-1.5">
-      {unsafe > 0 && (
-        <span className="rounded-full border border-danger/50 px-1.5 py-[1px] text-[10px] font-bold text-danger">{unsafe} unsafe</span>
-      )}
-      {warn > 0 && (
-        <span className="rounded-full border border-warning/50 px-1.5 py-[1px] text-[10px] font-bold text-warning">{warn} similar</span>
-      )}
+    <span className="inline-flex flex-wrap items-center gap-1" title="Unique contents in this folder, by backup status">
+      {safe > 0 && <span className={`${chip} border-success/45 text-success`}>{safe.toLocaleString()} safe</span>}
+      {warn > 0 && <span className={`${chip} border-warning/50 text-warning`}>{warn.toLocaleString()} partial</span>}
+      {unsafe > 0 && <span className={`${chip} border-danger/50 text-danger`}>{unsafe.toLocaleString()} unsafe</span>}
     </span>
   );
 }
@@ -580,7 +595,7 @@ function baseColumns(options) {
             away={row.original.copies_away}
           />
         ) : (
-          <FolderRollupBadge unsafe={row.original.unsafe_count} warn={row.original.warn_count} />
+          <FolderRollupBadge safe={row.original.safe_count} warn={row.original.warn_count} unsafe={row.original.unsafe_count} />
         )
     });
   }
@@ -603,28 +618,12 @@ function baseColumns(options) {
       cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
     },
     {
-      accessorKey: 'duplicate_file_count',
-      header: 'Dup',
-      size: 68,
-      minSize: 56,
-      meta: numericColumnMeta,
-      cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
-    },
-    {
-      accessorKey: 'original_file_count',
+      accessorKey: 'distinct_count',
       header: 'Uniq',
-      size: 68,
+      size: 72,
       minSize: 56,
-      meta: numericColumnMeta,
-      cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
-    },
-    {
-      accessorKey: 'same_scan_duplicate_file_count',
-      header: 'Scan Dup',
-      size: 94,
-      minSize: 74,
-      meta: numericColumnMeta,
-      cell: ({ row, getValue }) => row.original.kind === 'parent' ? '' : getValue() ?? 0
+      meta: { ...numericColumnMeta, tooltip: 'Distinct contents (unique hashes) in this folder' },
+      cell: ({ row, getValue }) => (row.original.kind === 'file' || row.original.kind === 'parent') ? '' : (getValue() ?? 0).toLocaleString()
     },
     { accessorKey: 'blake3', header: 'BLAKE3', size: 126, minSize: 90, cell: ({ getValue }) => shortHash(getValue()) },
     { accessorKey: 'ctime', header: 'CTime', size: 168, minSize: 120, cell: ({ getValue }) => formatDate(getValue()) },

@@ -20,9 +20,14 @@ test('scan file browser exposes folder descendant file counts as a default Files
 
 test('file grid numeric columns align headers with numeric cell values', () => {
   assert.match(fileGridSource, /const numericColumnMeta = \{ align: 'right', className: fileGridNumericClassName \}/);
-  for (const column of ['size', 'file_count', 'duplicate_file_count', 'original_file_count', 'same_scan_duplicate_file_count']) {
+  for (const column of ['size', 'file_count']) {
     assert.match(fileGridSource, new RegExp(`accessorKey: '${column}'[\\s\\S]*?meta: numericColumnMeta`));
   }
+  // Uniq (distinct_count) is numeric too, via a spread of numericColumnMeta.
+  assert.match(fileGridSource, /accessorKey: 'distinct_count'[\s\S]*?\.\.\.numericColumnMeta/);
+  // The retired Dup / Scan Dup columns are gone.
+  assert.doesNotMatch(fileGridSource, /accessorKey: 'duplicate_file_count'/);
+  assert.doesNotMatch(fileGridSource, /accessorKey: 'same_scan_duplicate_file_count'/);
   assert.match(fileGridSource, /fileGridHeaderButtonClassName\(\{\s*align: headerAlign/);
 });
 

@@ -20,14 +20,15 @@ const EXPLORER_FILE_COLUMNS = [
   ['same_scan_duplicate_file_count', 'Scan Dup'], ['blake3', 'BLAKE3'],
   ['ctime', 'CTime'], ['mtime', 'Modified'], ['mode', 'Mode'], ['sha256', 'SHA-256']
 ];
-const EXPLORER_VISIBLE_COLUMNS = ['name', 'size', 'file_count', 'mtime'];
+const EXPLORER_VISIBLE_COLUMNS = ['name', 'size', 'file_count', 'distinct_count', 'mtime'];
 const EXPLORER_ROWS = [
-  { kind: 'dir', name: '@Photos', path: 'PHOTO_FILTER/@Photos', size: 184203948123, file_count: 88231, unsafe_count: 41200, warn_count: 120, mtime: '2026-03-11T10:22:00Z' },
-  { kind: 'dir', name: 'Camera Roll', path: 'PHOTO_FILTER/Camera Roll', size: 62103948123, file_count: 40122, unsafe_count: 21000, warn_count: 40, mtime: '2026-05-02T18:00:00Z' },
-  { kind: 'dir', name: 'Screenshots', path: 'PHOTO_FILTER/Screenshots', size: 812394812, file_count: 5192, unsafe_count: 400, warn_count: 5, mtime: '2026-06-19T09:12:00Z' },
-  { kind: 'file', name: 'IMG_2013.HEIC', path: 'PHOTO_FILTER/IMG_2013.HEIC', size: 3820112, backup_status: 'unsafe', copies_here: 0, copies_away: 0, mtime: '2026-01-04T14:30:00Z', blake3: 'a91f22cd8801', mode: '0644' },
-  { kind: 'file', name: 'IMG_2014.HEIC', path: 'PHOTO_FILTER/IMG_2014.HEIC', size: 3901120, backup_status: 'safe', copies_here: 2, copies_away: 0, mtime: '2026-01-04T14:31:00Z', blake3: 'bb0c1190aa42', mode: '0644' },
-  { kind: 'file', name: 'edit_scratch.psd', path: 'PHOTO_FILTER/edit_scratch.psd', size: 219884123, backup_status: 'warn', copies_here: 0, copies_away: 1, mtime: '2026-02-20T11:05:00Z', blake3: 'c73d2200ffab', mode: '0644' }
+  { kind: 'dir', name: '@Photos', path: 'PHOTO_FILTER/@Photos', size: 184203948123, file_count: 88231, distinct_count: 47000, safe_count: 12, warn_count: 120, unsafe_count: 46868, mtime: '2026-03-11T10:22:00Z' },
+  { kind: 'dir', name: 'Camera Roll', path: 'PHOTO_FILTER/Camera Roll', size: 62103948123, file_count: 40122, distinct_count: 21044, safe_count: 0, warn_count: 40, unsafe_count: 21004, mtime: '2026-05-02T18:00:00Z' },
+  { kind: 'dir', name: 'Screenshots', path: 'PHOTO_FILTER/Screenshots', size: 812394812, file_count: 5192, distinct_count: 5188, safe_count: 400, warn_count: 5, unsafe_count: 4783, mtime: '2026-06-19T09:12:00Z' },
+  { kind: 'file', name: 'IMG_2013.HEIC', path: 'PHOTO_FILTER/IMG_2013.HEIC', size: 3820112, distinct_count: 1, backup_status: 'unsafe', copies_here: 0, copies_away: 0, mtime: '2026-01-04T14:30:00Z', blake3: 'a91f22cd8801', mode: '0644' },
+  { kind: 'file', name: 'IMG_2014.HEIC', path: 'PHOTO_FILTER/IMG_2014.HEIC', size: 3901120, distinct_count: 1, backup_status: 'safe', copies_here: 2, copies_away: 1, mtime: '2026-01-04T14:31:00Z', blake3: 'bb0c1190aa42', mode: '0644' },
+  { kind: 'file', name: 'dup_scan_0043.heic', path: 'PHOTO_FILTER/dup_scan_0043.heic', size: 4102003, distinct_count: 1, backup_status: 'unsafe', copies_here: 3, copies_away: 0, mtime: '2026-01-05T09:00:00Z', blake3: 'de11aa0092fb', mode: '0644' },
+  { kind: 'file', name: 'edit_scratch.psd', path: 'PHOTO_FILTER/edit_scratch.psd', size: 219884123, distinct_count: 1, backup_status: 'warn', copies_here: 0, copies_away: 1, mtime: '2026-02-20T11:05:00Z', blake3: 'c73d2200ffab', mode: '0644' }
 ];
 const EXPLORER_SCAN = {
   id: 'b668d2e6', nickname: 'NLBackup latest', status: 'complete',
