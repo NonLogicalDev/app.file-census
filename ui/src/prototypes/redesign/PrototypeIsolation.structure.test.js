@@ -24,8 +24,8 @@ test('redesign prototypes are exposed only as full-screen component previews', (
   assert.match(previewSource, /path: '\/redesign\/duplicates'/);
   assert.match(previewSource, /path: '\/redesign\/tasks'/);
   // 3 redesign prototypes + TasksPage overflow fixture + 2 live FileExplorer
-  // previews (consolidated Browse + Flat) used for screenshot verification.
-  assert.equal((previewSource.match(/fullScreen: true/g) || []).length, 6);
+  // previews + 2 delete-check design prototypes, all screenshot fixtures.
+  assert.equal((previewSource.match(/fullScreen: true/g) || []).length, 8);
   assert.match(previewSource, /if \(activePreview\.fullScreen\)/);
   assert.match(previewSource, /replace\(\/\^#\/, ''\) \|\| '\/scan-progress\/expanded'/);
   assert.match(previewSource, /preview\.path === '\/scan-progress\/expanded'/);

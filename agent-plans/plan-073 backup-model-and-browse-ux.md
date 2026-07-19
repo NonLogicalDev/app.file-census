@@ -46,6 +46,32 @@ Prior art (the user asked to reuse it, not re-invent):
 - **plan-039 duplicate-cache-task**: cache rebuilds already emit lifecycle
   events and render as background Tasks; no new task table needed.
 
+## Steering Guidance (summarized, chronological)
+
+Durable direction the user gave while this plan was built:
+- "All backed up on every folder is bogus" — same-location duplicates must not
+  read as backed up. Ambient markers do cross-location checks only.
+- Bring back a Delete Check *set* to add folders/files to and validate what a
+  deletion would affect; the current model is "far too confusing".
+- Precompute duplicate info as a background task whenever the representative set
+  or excludes change.
+- Reuse prior designs — "we have been through some of this before, check the
+  historical agent plans" (plan-030 set, plan-064 safety taxonomy, plan-039
+  cache-as-task).
+- Interactive browsing is still 3-5s per folder click — find hotspots.
+- Folder Backup cell: show `[N safe] [N partial] [N unsafe]` counting UNIQUE
+  files per category.
+- Keep "Last copy"; for files that have copies show "[X copies exist]".
+- Add a Backup scope toggle: Internal (inside location) vs External (outside).
+- Prototype the delete-check UI: restore Add-to-Delete-Check actions, a
+  membership listing, and a Delete Check toggle for Browse/Flat that filters the
+  listing down to just the staged folders/files.
+- Table columns need more prominent dividers; otherwise resizing is very hard.
+- Folders pane must be resizable.
+- Process: use $Tasker_Plan religiously to record all work updates; keep this
+  steering guidance in the plan in summarized form; prototype + screenshot UX
+  before wiring.
+
 ## Product Integration
 
 - **Existing model**: one always-on backup marker per file/folder in Browse/Flat,
@@ -81,6 +107,24 @@ Prior art (the user asked to reuse it, not re-invent):
   query itself is ~0.15s in release.
 - Delete Check set is restored per plan-030 as a distinct surface (not folded
   back into the ambient browse tabs that plan-072 deliberately removed).
+
+## Requirements added 2026-07-19 (backup display + delete-check set)
+
+- Folder Backup cell shows three chips `[N safe] [N partial] [N unsafe]` where N
+  counts UNIQUE files (deduped by content) in each category. Rename the light
+  tier from "Similar"/"warn" to **partial** in the UI.
+- File Backup cell: keep **"Last copy"** for the unsafe/last-copy case; for files
+  that have copies show **"[X copies exist]"** instead of the ⌂/↗ glyphs.
+- Add a **Backup scope toggle: Internal (inside this location) vs External
+  (outside this location)**. External is the honest cross-location signal
+  (current default); Internal answers "is there another copy on THIS disk".
+  Requires per-file exact_here/exact_away/light_here/light_away in the cache so
+  both classifications derive without a second pass.
+- **Delete Check set** (prototype first): restore "Add to delete check" row/
+  folder actions; show a delete-check membership listing; add a **Delete Check
+  toggle** to Browse/Flat that filters the listing down to just the paths
+  (folders/files) staged for deletion. Deletion validation (refcount survivor
+  check) layers on top later.
 
 ## Implementation Steps
 

@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import ScanProgressPools from './components/ScanProgressPools.jsx';
 import ScanScopeSelector from './components/search/ScanScopeSelector.jsx';
 import FileExplorer from './components/FileExplorer.jsx';
+import DeleteCheckPrototype from './prototypes/DeleteCheckPrototype.jsx';
 import DuplicatesPage from './pages/DuplicatesPage.jsx';
 import SearchPage from './pages/SearchPage.jsx';
 import TasksPage from './pages/TasksPage.jsx';
@@ -315,6 +316,24 @@ const PREVIEWS = [
     description: 'Real FileExplorer: [Browse | Flat] + backup filter, no legacy subview tabs.',
     fullScreen: true,
     render: () => <FileExplorerConsolidatedPreview />
+  },
+  {
+    path: '/prototype/backup-and-delete-check',
+    group: 'Prototype',
+    variant: 'backup display + delete-check set',
+    title: 'Backup display + Delete Check (browse)',
+    description: 'plan-073 proposal: [N safe][N partial][N unsafe] folder chips, Last copy / [X copies exist], Internal/External scope toggle, Add-to-Delete-Check menu.',
+    fullScreen: true,
+    render: () => <DeleteCheckPrototype />
+  },
+  {
+    path: '/prototype/delete-check-active',
+    group: 'Prototype',
+    variant: 'delete-check set active',
+    title: 'Delete Check set (active)',
+    description: 'plan-073 proposal: Delete Check toggle ON — listing filtered to staged paths, membership panel, last-copy warning, validate CTA.',
+    fullScreen: true,
+    render: () => <DeleteCheckPrototype initialDeleteCheck />
   },
   {
     path: '/explorer/flat',
