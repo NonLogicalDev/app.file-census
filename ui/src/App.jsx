@@ -1897,6 +1897,22 @@ export default function App() {
     }
   }
 
+  // Inspector Preview/EXIF sections: cheap per-row fetch (no occurrence
+  // sweep server-side). Stable identity so FileExplorer effects can depend
+  // on it without refiring per render.
+  const loadFilePreview = useCallback((entry) => {
+    const scanId = entry?.scan_id || latest.current.selectedScanId;
+    if (!scanId || !entry?.path || !entry.blake3 || entry.size == null) {
+      return Promise.resolve(null);
+    }
+    return rpc('files.preview', {
+      scan_id: scanId,
+      path: entry.path,
+      blake3: entry.blake3,
+      size: entry.size
+    });
+  }, [rpc]);
+
   // Locations tab scope: representative scans only (default) vs all scans.
   const [fileOccAllScans, setFileOccAllScans] = useState(false);
   latest.current.fileOccAllScans = fileOccAllScans;
@@ -2170,6 +2186,7 @@ export default function App() {
     onLoadMoreDirectoryTree: loadMoreDirectoryTree,
     onOpenGridEntry: openGridEntry,
     onInspectFile: inspectFile,
+    onLoadFilePreview: loadFilePreview,
     onRequestExcludePath: requestExcludePath,
     onRequestDeletePath: requestDeletePath
   };

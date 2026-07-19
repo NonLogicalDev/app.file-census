@@ -458,6 +458,16 @@ async fn handle_rpc_result(
             let params: FileOccurrencesParams = decode_params(params)?;
             file_details_page(&state.db, &params)
         }
+        "files.preview" => {
+            let params: FileOccurrencesParams = decode_params(params)?;
+            Ok(serde_json::to_value(media::file_preview(
+                &state.db,
+                &params.scan_id,
+                &params.path,
+                &params.blake3,
+                params.size,
+            )?)?)
+        }
         "files.open" => {
             let params: FilePathActionParams = decode_params(params)?;
             let path = scan_child_path(&state.db, &params.scan_id, &params.path)?;

@@ -73,6 +73,68 @@ pub fn file_details(db: &Database, blake3: &str, size: u64) -> Result<FileDetail
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct FilePreview {
+    pub thumbnail: Option<ThumbnailView>,
+    pub exif: ExifView,
+}
+
+/// Lightweight per-row preview for the Inspector: cached thumbnail and EXIF
+/// first, falling back to a live read of THIS scan's copy only. Deliberately
+/// no occurrence sweep — this runs on row selection and must stay cheap even
+/// for content with hundreds of thousands of occurrences.
+pub fn file_preview(
+    db: &Database,
+    scan_id: &str,
+    path: &str,
+    blake3: &str,
+    size: u64,
+) -> Result<FilePreview> {
+    let source_path = scan_indexed_path(db, scan_id, path)
+        .ok()
+        .filter(|path| path.is_file());
+    let thumbnail = match db.thumbnail(blake3, size)? {
+        Some(thumbnail) => Some(thumbnail_view(thumbnail, true)),
+        None => source_path
+            .as_ref()
+            .and_then(|path| build_thumbnail_for_hash(db, blake3, size, path).ok()),
+    };
+    let exif = match db.cached_file_exif(blake3, size) {
+        Ok(Some(cached)) => ExifView {
+            status: cached.status,
+            source_path: cached.source_path,
+            fields: serde_json::from_str(&cached.fields_json).unwrap_or_default(),
+            error: cached.error,
+        },
+        _ => match source_path.as_ref() {
+            Some(path) => {
+                let view = exif_for_path(path);
+                let fields_json =
+                    serde_json::to_string(&view.fields).unwrap_or_else(|_| "[]".to_string());
+                let _ = db.cache_file_exif(
+                    blake3,
+                    size,
+                    &view.status,
+                    Some(scan_id),
+                    view.source_path.as_deref(),
+                    &fields_json,
+                    view.error.as_deref(),
+                );
+                view
+            }
+            None => ExifView {
+                status: "unavailable".to_string(),
+                source_path: None,
+                fields: Vec::new(),
+                error: Some(
+                    "No connected occurrence is available for metadata parsing.".to_string(),
+                ),
+            },
+        },
+    };
+    Ok(FilePreview { thumbnail, exif })
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ExifEnrichResult {
     pub scan_id: String,
     pub processed: u64,

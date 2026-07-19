@@ -33,6 +33,19 @@ test('backup filter is always-on, and the Delete Check SET is a distinct staged 
   assert.match(fileExplorerSource, /\{inspectorOpen && inspectorPane\}/);
 });
 
+test('inspector has lazy collapsible Preview and EXIF sections', () => {
+  // Sections are disclosure-style, persisted, and fetch via the lightweight
+  // files.preview RPC only while the inspector + section are open.
+  assert.match(fileExplorerSource, /function InspectorSection/);
+  assert.match(fileExplorerSource, /label="Preview"/);
+  assert.match(fileExplorerSource, /label="EXIF"/);
+  assert.match(fileExplorerSource, /locations-inspector-preview-open/);
+  assert.match(fileExplorerSource, /locations-inspector-exif-open/);
+  assert.match(fileExplorerSource, /onLoadFilePreview/);
+  // Lazy gate: no fetch unless the inspector is open and a section expanded.
+  assert.match(fileExplorerSource, /!inspectorOpen \|\| \(!previewOpen && !exifOpen\)/);
+});
+
 test('file explorer does not advertise unavailable EXIF enrichment controls', () => {
   assert.doesNotMatch(fileExplorerSource, /onRequestScanExif/);
   assert.doesNotMatch(fileExplorerSource, /onRequestScanExifForEntry/);

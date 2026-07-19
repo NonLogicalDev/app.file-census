@@ -430,6 +430,37 @@ the loaded page (location header -> scan header -> compact path rows; drop the
 per-occurrence blake3/sha repetition — occurrences share the content hash by
 definition).
 
+## Modal-rework work log 2026-07-19 (~19:00) — CDP-verified live (`f0daa00`)
+
+Shipped: FileInfoModal tabs → SegmentedTabs chips (Preview/Metadata/EXIF/
+Locations); Locations grouped location→scan→path rows with a `representative`
+badge per scan header and compact Open/Reveal actions; Representative/All-scans
+scope chips wired to `representative_only` on files.details (server-side, so
+"Showing 100 of N" totals stay honest). Also in this batch: DirectoryTree greys
+out remain-set-only folders in DC mode (disabled + tooltip, verified via
+tree-probe: .Spotlight-V100/.TemporaryItems/.fseventsd inert, root+staged
+active), and visible_file_occurrences_page now uses the persistent
+scan_excluded_files anti-join per visibility scan (replacing the per-call temp
+excluded_file_ids table) in both origin and occurrence queries.
+
+CDP receipts (scan b668d2e6, content `._@Photos` blake3 663047e6…): modal opens
+~5s; Representative shows "141575 known copies / Showing 100 of 141575 …
+representative scans"; All scans flips to 244655; grouped card `disk-nlbackup
+NLBackup` → scan header `7/18/2026 · Ready · representative · b668d2e6`.
+Screenshots: shot-modal-locations-rep.png / shot-modal-locations-all.png.
+
+Debugging lesson (recorded so no one chases this again): the "modal hang >45s"
+was NOT a hang. WS frame tracing showed files.details resolving in ~4.3s and
+the modal rendering; every probe failed on `indexOf('File info')` because the
+h2 renders through CSS text-transform:uppercase and innerText returns the
+TRANSFORMED text ("FILE INFO"). Probes must match case-insensitively or use
+toUpperCase(). Secondary probe pitfall: wrapping window.WebSocket without
+copying the OPEN/CLOSED statics kills the app's reconnect logic.
+
+Not done from the modal spec: the shared `SegmentedChip` extraction (modal uses
+SegmentedTabs directly; FileExplorer's BackupFilterChip still its own) — queued
+as polish.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
