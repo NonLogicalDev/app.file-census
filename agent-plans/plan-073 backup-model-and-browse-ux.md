@@ -95,8 +95,8 @@ Prior art (the user asked to reuse it, not re-invent):
        refcount survivor check. Prototype + screenshots before wiring.
 5. [ ] Browse/Flat folder counters: unique vs duplicated (full + light),
        consistent with the cross-location classification.
-6. [ ] FileGrid: more prominent column dividers + easier-to-grab resize handles.
-7. [ ] Make the Folders (directory-tree) pane resizable (persisted width).
+6. [x] FileGrid: more prominent column dividers + easier-to-grab resize handles.
+7. [x] Make the Folders (directory-tree) pane resizable (persisted width).
 
 ## Learning Log
 
@@ -129,6 +129,10 @@ Prior art (the user asked to reuse it, not re-invent):
 - [x] 2026-07-19 00:15 - Committed backend fixes (`54c7698`).
 - [x] 2026-07-19 00:20 - Measured debug (3-5s) vs release (~0.15s warm) tree RPC
   against the live data; added release `run-*` Justfile recipes.
+- [x] 2026-07-19 01:15 - FileGrid dividers (header border-strong + body divider)
+  and visible-by-default resizer bar; 139 UI tests pass; screenshot-verified.
+- [x] 2026-07-19 01:18 - Resizable Folders pane (drag handle, 160-520px,
+  persisted to `locations-folders-width`). Committed `42fa6e9`.
 - [ ] 2026-07-19 - Prototype the restored Delete Check set and screenshot before
   wiring (step 4).
 
@@ -137,6 +141,5 @@ Prior art (the user asked to reuse it, not re-invent):
 - [ ] Step 4: restore the Delete Check set (plan-030) as a separate surface with
   refcount survivor validation. Prototype + screenshots first.
 - [ ] Step 5: Browse/Flat folder unique/dup(full+light) counters.
-- [ ] Step 6: stronger column dividers + resize-handle affordance.
-- [ ] Step 7: resizable Folders pane (persisted).
-- [ ] Confirm the live app runs the release build (dev `serve` used debug).
+- [ ] Confirm the live app runs the release build (dev `serve` used debug); the
+  `run-release` recipes now exist.
