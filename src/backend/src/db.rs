@@ -4385,7 +4385,11 @@ fn duplicate_cache_path_counts(
         let group = content_groups
             .entry((file.scan_id.clone(), file.blake3.clone(), file.size))
             .or_insert((tier, Vec::new()));
-        group.0 = tier;
+        // All instances of one content in a scan share a tier (identical
+        // blake3/size/location). Defense-in-depth for a deletion tool: if data
+        // were ever inconsistent, keep the UNSAFEST tier (lowest) so a folder
+        // rollup never over-claims safety. 0=unsafe < 1=partial < 2=safe.
+        group.0 = group.0.min(tier);
         group.1.push(file.path.clone());
     }
 
