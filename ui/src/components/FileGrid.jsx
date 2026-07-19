@@ -273,6 +273,9 @@ function FileGridInner({
   onRemoveDeleteCheck,
   stagedPaths = null
 }) {
+  // Render-count probe: lets automated perf checks assert the React.memo wrap
+  // actually skips re-renders (unrelated parent state must not bump this).
+  if (typeof window !== 'undefined') window.__fileGridRenders = (window.__fileGridRenders || 0) + 1;
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const selectableRows = useMemo(() => rows.filter(isSelectableRow), [rows]);
   const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedSet.has(row.path));
