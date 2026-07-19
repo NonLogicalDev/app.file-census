@@ -94,15 +94,27 @@ export const navIconClassName = cn(
 
 export const navIconSvgClassName = 'h-[15px] w-[15px] stroke-current';
 
-export function appShellClassName({ sidebarHidden = false, compactSidebar = false, className } = {}) {
+export function appShellClassName({ sidebarHidden = false, compactSidebar = false, rightRail = false, className } = {}) {
+  const peekLeft = sidebarHidden || compactSidebar;
   return cn(
     'grid min-h-screen bg-bg',
-    sidebarHidden || compactSidebar
-      ? 'grid-cols-[var(--sidebar-peek-width)_minmax(0,1fr)]'
-      : 'grid-cols-[var(--sidebar-width)_minmax(0,1fr)]',
+    peekLeft
+      ? rightRail
+        ? 'grid-cols-[var(--sidebar-peek-width)_minmax(0,1fr)_var(--inspector-width)]'
+        : 'grid-cols-[var(--sidebar-peek-width)_minmax(0,1fr)]'
+      : rightRail
+        ? 'grid-cols-[var(--sidebar-width)_minmax(0,1fr)_var(--inspector-width)]'
+        : 'grid-cols-[var(--sidebar-width)_minmax(0,1fr)]',
     className
   );
 }
+
+// The Inspector right rail: docked full-height column mirroring the sidebar's
+// chrome, with its own left-edge resize handle.
+export const appRightRailClassName = cn(
+  'sticky top-0 z-30 flex h-screen min-w-0 flex-col overflow-hidden',
+  'border-l border-[var(--sidebar-border)] bg-[var(--sidebar-bg)]'
+);
 
 export function appSidebarClassName({ sidebarHidden = false, sidebarPeeking = false, compactSidebar = false, className } = {}) {
   const overlayMode = sidebarHidden || compactSidebar;

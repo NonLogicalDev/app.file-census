@@ -50,6 +50,7 @@ export {
 export { StatusPill, statusPillDotClasses, statusPillVariantClasses } from './StatusPill.jsx';
 export {
   appMainClassName,
+  appRightRailClassName,
   appShellClassName,
   appSidebarClassName,
   eventStripClassName,

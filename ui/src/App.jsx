@@ -3,6 +3,7 @@ import { chooseDatabase, chooseFolder, databaseInfo as loadDatabaseInfo, isTauri
 import { requireTreePage } from './api/treePage.js';
 import { useRpcConnection } from './api/useRpcConnection.js';
 import AppModals from './components/AppModals.jsx';
+import InspectorPanel from './components/InspectorPanel.jsx';
 import {
   DIRECTORY_TREE_PAGE_LIMIT,
   directoryAncestorPaths,
@@ -1898,6 +1899,20 @@ export default function App() {
     }
   }
 
+  // Inspector right rail (app-level, docked like the sidebar). The inspected
+  // row is App state so the rail survives view re-renders; the handler is
+  // stable so the memoized FileGrid isn't re-rendered per parent render.
+  const [inspected, setInspected] = useState(null);
+  const [inspectorOpen, setInspectorOpen] = useState(
+    () => globalThis.localStorage?.getItem('locations-inspector-open') === '1'
+  );
+  useEffect(() => {
+    globalThis.localStorage?.setItem('locations-inspector-open', inspectorOpen ? '1' : '0');
+  }, [inspectorOpen]);
+  const handleInspectRow = useCallback((entry) => {
+    setInspected(entry);
+  }, []);
+
   // Inline Browse-table folder expansion: side-loads a folder's page WITHOUT
   // changing the selected path (that's loadTree's job). Respects the current
   // search query and Delete Check mode so expanded children match the table.
@@ -2208,8 +2223,11 @@ export default function App() {
     onLoadMoreDirectoryTree: loadMoreDirectoryTree,
     onOpenGridEntry: openGridEntry,
     onInspectFile: inspectFile,
-    onLoadFilePreview: loadFilePreview,
     onLoadFolderChildren: loadFolderChildren,
+    inspected,
+    inspectorOpen,
+    onToggleInspector: () => setInspectorOpen((open) => !open),
+    onInspectRow: handleInspectRow,
     onRequestExcludePath: requestExcludePath,
     onRequestDeletePath: requestDeletePath
   };
@@ -2589,6 +2607,15 @@ export default function App() {
       onShowAddLocation={() => setShowAddLocation(true)}
       commandGroups={commandGroups}
       topBarActions={topBarActions}
+      rightRail={activeTab === 'locations' && inspectorOpen && selectedScanView ? (
+        <InspectorPanel
+          inspected={inspected}
+          activeScan={selectedScanView}
+          onClose={() => setInspectorOpen(false)}
+          onInspectFile={inspectFile}
+          onLoadFilePreview={loadFilePreview}
+        />
+      ) : null}
     >
       {activeTab === 'dashboard' && (
         <DashboardPage

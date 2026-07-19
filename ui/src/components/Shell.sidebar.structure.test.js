@@ -18,8 +18,11 @@ test('sidebar persists its collapsed state and bounded width without assuming st
   assert.match(shellSource, /writeSidebarPreference\(SIDEBAR_WIDTH_STORAGE_KEY, String\(sidebarWidth\)\)/);
 });
 
-test('sidebar uses an accessible pointer and keyboard resize separator only when the expanded desktop sidebar is available', () => {
-  assert.match(shellSource, /const sidebarResizeDisabled = compactSidebar \|\| sidebarHidden/);
+test('sidebar uses an accessible pointer and keyboard resize separator whenever the sidebar is visible (incl. hover peek)', () => {
+  // Resize works in the hover/peek overlay too; the peek is held open while a
+  // drag is in flight (user request 2026-07-19).
+  assert.match(shellSource, /const sidebarResizeDisabled = !sidebarVisuallyOpen && !sidebarPeeking/);
+  assert.match(shellSource, /if \(!sidebarResizeSession\.current\) setSidebarPeeking\(false\)/);
   assert.match(shellSource, /role="separator"/);
   assert.match(shellSource, /aria-valuemin=\{SIDEBAR_MIN_WIDTH\}/);
   assert.match(shellSource, /aria-valuemax=\{SIDEBAR_MAX_WIDTH\}/);
@@ -31,5 +34,14 @@ test('sidebar uses an accessible pointer and keyboard resize separator only when
   assert.match(shellSource, /event\.key === 'ArrowRight'/);
   assert.match(shellSource, /event\.key === 'Home'/);
   assert.match(shellSource, /event\.key !== 'End'/);
-  assert.match(shellSource, /style=\{\{ '--sidebar-width': `\$\{sidebarWidth\}px` \}\}/);
+  assert.match(shellSource, /'--sidebar-width': `\$\{sidebarWidth\}px`/);
+});
+
+test('inspector right rail is a resizable shell column', () => {
+  assert.match(shellSource, /RAIL_WIDTH_STORAGE_KEY/);
+  assert.match(shellSource, /clampRailWidth/);
+  assert.match(shellSource, /'--inspector-width': `\$\{railWidth\}px`/);
+  assert.match(shellSource, /onPointerDown=\{startRailResize\}/);
+  assert.match(shellSource, /aria-label="Resize inspector"/);
+  assert.match(shellSource, /aria-label="Inspector rail"/);
 });

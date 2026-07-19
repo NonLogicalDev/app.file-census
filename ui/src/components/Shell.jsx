@@ -3,6 +3,7 @@ import { CommandPalette } from './command-palette/index.js';
 import { Icon } from './Icon.jsx';
 import {
   appMainClassName,
+  appRightRailClassName,
   appShellClassName,
   appSidebarClassName,
   Button,
@@ -49,6 +50,16 @@ const SIDEBAR_HIDDEN_STORAGE_KEY = 'file-census.sidebar.hidden';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'file-census.sidebar.width';
 const SIDEBAR_KEYBOARD_STEP = 16;
 const SIDEBAR_KEYBOARD_LARGE_STEP = 48;
+const RAIL_WIDTH_STORAGE_KEY = 'file-census.inspector.width';
+const RAIL_MIN_WIDTH = 240;
+const RAIL_MAX_WIDTH = 560;
+
+function clampRailWidth(value) {
+  if (value == null || value === '') return 320;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 320;
+  return Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(parsed)));
+}
 
 function readSidebarPreference(key) {
   if (typeof window === 'undefined') return null;
@@ -104,6 +115,7 @@ export default function Shell({
   onShowAddLocation,
   commandGroups = [],
   topBarActions,
+  rightRail = null,
   children
 }) {
   const [sidebarHidden, setSidebarHidden] = useState(readStoredSidebarHidden);
@@ -117,10 +129,16 @@ export default function Shell({
   const toastSeq = useRef(0);
   const sidebarRef = useRef(null);
   const sidebarResizeSession = useRef(null);
+  // Inspector right-rail width, persisted; resizable via its left-edge handle.
+  const [railWidth, setRailWidth] = useState(() => clampRailWidth(readSidebarPreference(RAIL_WIDTH_STORAGE_KEY)));
+  const [railResizing, setRailResizing] = useState(false);
+  const railResizeSession = useRef(null);
   const activeTabMeta = tabs.find(([id]) => id === activeTab) || tabs[0];
   const selectedLocation = locationList.find((location) => location.slug === selectedLocationSlug);
   const sidebarVisuallyOpen = compactSidebar ? sidebarPeeking : !sidebarHidden;
-  const sidebarResizeDisabled = compactSidebar || sidebarHidden;
+  // Resizing works whenever the sidebar is visible — including the hover/peek
+  // overlay (the peek is held open for the duration of the drag).
+  const sidebarResizeDisabled = !sidebarVisuallyOpen && !sidebarPeeking;
   const runningScans = runningProgress.filter((progress) => isActiveStatus(progress.status));
   const runningScan = runningScans[0] || null;
   const navItems = [
@@ -158,6 +176,10 @@ export default function Shell({
   useEffect(() => {
     writeSidebarPreference(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
+
+  useEffect(() => {
+    writeSidebarPreference(RAIL_WIDTH_STORAGE_KEY, String(railWidth));
+  }, [railWidth]);
 
   useEffect(() => () => {
     sidebarResizeSession.current = null;
@@ -264,6 +286,55 @@ export default function Shell({
     setSidebarWidth(clampSidebarWidth(session.startWidth + event.clientX - session.startX));
   }
 
+  const finishRailResize = useCallback((event) => {
+    const session = railResizeSession.current;
+    if (!session || (event && session.pointerId !== event.pointerId)) return;
+    const control = event?.currentTarget;
+    railResizeSession.current = null;
+    if (control?.hasPointerCapture?.(session.pointerId)) {
+      control.releasePointerCapture(session.pointerId);
+    }
+    setRailResizing(false);
+  }, []);
+
+  function startRailResize(event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const control = event.currentTarget;
+    try {
+      control.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is optional in older embedded webviews.
+    }
+    railResizeSession.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: railWidth
+    };
+    setRailResizing(true);
+  }
+
+  function moveRailResize(event) {
+    const session = railResizeSession.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    // The handle sits on the rail's LEFT edge: dragging left widens it.
+    setRailWidth(clampRailWidth(session.startWidth - (event.clientX - session.startX)));
+  }
+
+  function handleRailResizeKeyDown(event) {
+    const step = event.shiftKey ? SIDEBAR_KEYBOARD_LARGE_STEP : SIDEBAR_KEYBOARD_STEP;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowLeft' ? 1 : -1;
+      setRailWidth((current) => clampRailWidth(current + direction * step));
+      return;
+    }
+    if (event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    setRailWidth(event.key === 'Home' ? RAIL_MIN_WIDTH : RAIL_MAX_WIDTH);
+  }
+
   function handleSidebarResizeKeyDown(event) {
     if (sidebarResizeDisabled) return;
     const step = event.shiftKey ? SIDEBAR_KEYBOARD_LARGE_STEP : SIDEBAR_KEYBOARD_STEP;
@@ -280,8 +351,8 @@ export default function Shell({
 
   return (
     <div
-      className={appShellClassName({ sidebarHidden, compactSidebar })}
-      style={{ '--sidebar-width': `${sidebarWidth}px` }}
+      className={appShellClassName({ sidebarHidden, compactSidebar, rightRail: Boolean(rightRail) })}
+      style={{ '--sidebar-width': `${sidebarWidth}px`, '--inspector-width': `${railWidth}px` }}
     >
       <button
         type="button"
@@ -300,7 +371,11 @@ export default function Shell({
         className={appSidebarClassName({ sidebarHidden, sidebarPeeking, compactSidebar })}
         aria-label="Application navigation"
         onMouseEnter={() => setSidebarPeeking(true)}
-        onMouseLeave={() => setSidebarPeeking(false)}
+        onMouseLeave={() => {
+          // Keep the hover overlay open while a resize drag is in flight —
+          // the pointer often crosses the sidebar edge mid-drag.
+          if (!sidebarResizeSession.current) setSidebarPeeking(false);
+        }}
       >
         <div
           aria-controls="app-sidebar"
@@ -508,6 +583,33 @@ export default function Shell({
             Tasks page and the sidebar chip; the workspace stays uncluttered. */}
         {children}
       </main>
+
+      {rightRail && (
+        <aside className={`${appRightRailClassName} relative`} aria-label="Inspector rail">
+          <div
+            aria-label="Resize inspector"
+            aria-orientation="vertical"
+            aria-valuemax={RAIL_MAX_WIDTH}
+            aria-valuemin={RAIL_MIN_WIDTH}
+            aria-valuenow={railWidth}
+            aria-valuetext={`${railWidth} pixels`}
+            className={sidebarResizeHandleClassName({
+              disabled: false,
+              resizing: railResizing,
+              className: '!left-[-4px] !right-auto'
+            })}
+            onKeyDown={handleRailResizeKeyDown}
+            onLostPointerCapture={finishRailResize}
+            onPointerCancel={finishRailResize}
+            onPointerDown={startRailResize}
+            onPointerMove={moveRailResize}
+            onPointerUp={finishRailResize}
+            role="separator"
+            tabIndex={0}
+          />
+          {rightRail}
+        </aside>
+      )}
 
       {/* Short-lived status toasts (no layout shift). */}
       {toasts.length > 0 && (

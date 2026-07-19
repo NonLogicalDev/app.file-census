@@ -91,7 +91,6 @@ export default function FileExplorer(props) {
     onLoadMoreDirectoryTree,
     onOpenGridEntry,
     onInspectFile,
-    onLoadFilePreview,
     onRequestExcludePath,
     onRequestDeletePath
   } = props;
@@ -100,76 +99,19 @@ export default function FileExplorer(props) {
   // staged set when it is on); this component only toggles + renders it.
   const deleteCheckMode = Boolean(props.deleteCheckMode);
   const onSetDeleteCheckMode = props.onSetDeleteCheckMode;
-  const [inspected, setInspected] = useState(null);
-  // Both side panels are manually toggled and persisted. Inspector defaults
-  // CLOSED so the table keeps its width; Folders defaults open.
-  const [inspectorOpen, setInspectorOpen] = useState(
-    () => globalThis.localStorage?.getItem('locations-inspector-open') === '1'
-  );
+  // The Inspector is an APP-LEVEL right rail now (docked like the sidebar);
+  // this component only reads the inspected row for the highlight, forwards
+  // row clicks, and hosts the toggle button. Folders stays local + persisted.
+  const inspected = props.inspected || null;
+  const inspectorOpen = Boolean(props.inspectorOpen);
+  const onToggleInspector = props.onToggleInspector;
+  const handleInspectRow = props.onInspectRow;
   const [foldersOpen, setFoldersOpen] = useState(
     () => globalThis.localStorage?.getItem('locations-folders-open') !== '0'
   );
   useEffect(() => {
-    globalThis.localStorage?.setItem('locations-inspector-open', inspectorOpen ? '1' : '0');
-  }, [inspectorOpen]);
-  useEffect(() => {
     globalThis.localStorage?.setItem('locations-folders-open', foldersOpen ? '1' : '0');
   }, [foldersOpen]);
-  // Inspector Preview/EXIF disclosure sections, persisted. Data loads lazily:
-  // only while the inspector is open AND a section is expanded, and only for
-  // fully hashed file rows (files.preview is cheap — cached thumbnail/EXIF
-  // first, no occurrence sweep — but zero fetches is still cheaper).
-  const [previewOpen, setPreviewOpen] = useState(
-    () => globalThis.localStorage?.getItem('locations-inspector-preview-open') === '1'
-  );
-  const [exifOpen, setExifOpen] = useState(
-    () => globalThis.localStorage?.getItem('locations-inspector-exif-open') === '1'
-  );
-  useEffect(() => {
-    globalThis.localStorage?.setItem('locations-inspector-preview-open', previewOpen ? '1' : '0');
-  }, [previewOpen]);
-  useEffect(() => {
-    globalThis.localStorage?.setItem('locations-inspector-exif-open', exifOpen ? '1' : '0');
-  }, [exifOpen]);
-  const [inspectedPreview, setInspectedPreview] = useState(null);
-  const previewKey = inspected && inspected.kind === 'file' && inspected.blake3
-    ? `${inspected.scan_id || ''}:${inspected.path}:${inspected.blake3}`
-    : null;
-  const inspectedPreviewKeyRef = useRef(null);
-  useEffect(() => {
-    if (!inspectorOpen || (!previewOpen && !exifOpen) || !previewKey) return undefined;
-    if (typeof onLoadFilePreview !== 'function') return undefined;
-    if (inspectedPreviewKeyRef.current === previewKey) return undefined;
-    inspectedPreviewKeyRef.current = previewKey;
-    let stale = false;
-    setInspectedPreview({ key: previewKey, loading: true });
-    onLoadFilePreview(inspected)
-      .then((data) => {
-        if (stale) return;
-        setInspectedPreview({
-          key: previewKey,
-          loading: false,
-          thumbnail: data?.thumbnail || null,
-          exif: data?.exif || null
-        });
-      })
-      .catch((error) => {
-        if (stale) return;
-        // Allow a retry on the next expand/selection instead of pinning the error.
-        inspectedPreviewKeyRef.current = null;
-        setInspectedPreview({ key: previewKey, loading: false, error: error.message });
-      });
-    return () => {
-      stale = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- inspected is keyed by previewKey
-  }, [inspectorOpen, previewOpen, exifOpen, previewKey, onLoadFilePreview]);
-  // Stable handler so the memoized FileGrid isn't re-rendered by a fresh
-  // function identity on every FileExplorer render. Sets the inspected file but
-  // does NOT auto-open the panel (manual expand only).
-  const handleInspectRow = useCallback((entry) => {
-    setInspected(entry);
-  }, []);
   // Exact staged member paths (for membership-aware row menus).
   const stagedMemberPaths = useMemo(() => new Set(deleteCheckSet.map((m) => m.path)), [deleteCheckSet]);
   // Backup safety filter over the current listing. This is "Delete Check" in the
@@ -545,111 +487,6 @@ export default function FileExplorer(props) {
   );
 
 
-  const inspectorPane = (
-    <aside className="flex min-h-0 min-w-0 flex-col border-l border-sidebar-border bg-sidebar-bg" aria-label="File inspector">
-      <div className="flex h-8 flex-none items-center justify-between border-b border-sidebar-border px-3 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted">
-        <span>Inspector</span>
-        <button
-          type="button"
-          onClick={() => setInspectorOpen(false)}
-          className="grid h-5 w-5 place-items-center rounded text-text-tertiary transition-colors hover:text-text"
-          aria-label="Close inspector"
-        >
-          <Icon name="close" className="h-3.5 w-3.5" />
-        </button>
-      </div>
-      {inspected ? (
-        <div className="min-h-0 overflow-auto p-3">
-          <div className="mb-3 flex items-start gap-2">
-            <Icon name="file" className="mt-0.5 h-[18px] w-[18px] flex-none text-text-tertiary" />
-            <div className="min-w-0">
-              <strong className="block truncate text-[12px] font-medium text-text">{inspected.name}</strong>
-              <span className="text-[11px] text-text-tertiary">{inspected.file_kind || 'File'}</span>
-            </div>
-          </div>
-          <dl className="grid gap-2.5 text-[11px]">
-            <InspectorField label="Path" value={inspected.path} />
-            <InspectorField label="Size" value={bytes(inspected.size)} />
-            <InspectorField label="Modified" value={formatInspectorDate(inspected.mtime)} />
-            <InspectorField label="Scan" value={activeScan.nickname || activeScan.id} />
-          </dl>
-          <InspectorSection
-            label="Preview"
-            open={previewOpen}
-            onToggle={() => setPreviewOpen((open) => !open)}
-          >
-            {!previewKey ? (
-              <p className="m-0 text-[11px] text-text-tertiary">
-                Preview needs a fully hashed file row.
-              </p>
-            ) : !inspectedPreview || inspectedPreview.key !== previewKey || inspectedPreview.loading ? (
-              <p className="m-0 text-[11px] text-text-tertiary">Loading preview…</p>
-            ) : inspectedPreview.error ? (
-              <p className="m-0 text-[11px] text-warning">{inspectedPreview.error}</p>
-            ) : inspectedPreview.thumbnail ? (
-              <>
-                <img
-                  src={inspectedPreview.thumbnail.data_url}
-                  alt={inspected.name}
-                  className="max-h-48 w-full rounded-ui border border-border object-contain"
-                />
-                <p className="mb-0 mt-1 text-[10px] text-text-tertiary">
-                  {inspectedPreview.thumbnail.width} × {inspectedPreview.thumbnail.height}
-                  {inspectedPreview.thumbnail.cached ? ' · cached' : ' · freshly built'}
-                </p>
-              </>
-            ) : (
-              <p className="m-0 text-[11px] text-text-tertiary">
-                No thumbnail — not a supported image, or the file is offline.
-              </p>
-            )}
-          </InspectorSection>
-          <InspectorSection
-            label="EXIF"
-            open={exifOpen}
-            onToggle={() => setExifOpen((open) => !open)}
-          >
-            {!previewKey ? (
-              <p className="m-0 text-[11px] text-text-tertiary">
-                EXIF needs a fully hashed file row.
-              </p>
-            ) : !inspectedPreview || inspectedPreview.key !== previewKey || inspectedPreview.loading ? (
-              <p className="m-0 text-[11px] text-text-tertiary">Loading EXIF…</p>
-            ) : inspectedPreview.error ? (
-              <p className="m-0 text-[11px] text-warning">{inspectedPreview.error}</p>
-            ) : inspectedPreview.exif?.fields?.length ? (
-              <dl className="grid gap-1.5 text-[11px]">
-                {inspectedPreview.exif.fields.map((field) => (
-                  <div key={`${field.group}-${field.tag}`} className="grid grid-cols-[minmax(0,45%)_minmax(0,1fr)] gap-2">
-                    <dt className="truncate text-text-tertiary" title={`${field.group} · ${field.tag}`}>{field.tag}</dt>
-                    <dd className="m-0 truncate text-muted-strong" title={field.value}>{field.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            ) : (
-              <p className="m-0 text-[11px] text-text-tertiary">
-                {inspectedPreview.exif?.error || 'No EXIF data for this file.'}
-              </p>
-            )}
-          </InspectorSection>
-          {typeof onInspectFile === 'function' && (
-            <button
-              type="button"
-              onClick={() => onInspectFile(inspected)}
-              className="mt-3 inline-flex items-center gap-1.5 text-[11px] text-muted transition-colors hover:text-text"
-            >
-              <Icon name="rowActions" className="h-3.5 w-3.5" /> Full details
-            </button>
-          )}
-        </div>
-      ) : (
-        <div className="grid min-h-0 flex-1 place-items-center p-4 text-center text-[11px] leading-relaxed text-text-tertiary">
-          Select a row to keep its file context visible while you work in this scan.
-        </div>
-      )}
-    </aside>
-  );
-
   return (
     <div className="min-w-0 text-[13px]">
       {/* Route bar */}
@@ -724,7 +561,7 @@ export default function FileExplorer(props) {
           <button
             type="button"
             className={`${ctrlBtn} ${inspectorOpen ? 'bg-surface text-text' : ''}`}
-            onClick={() => setInspectorOpen((open) => !open)}
+            onClick={() => onToggleInspector?.()}
             aria-pressed={inspectorOpen}
             title={inspectorOpen ? 'Collapse the Inspector panel' : 'Show the Inspector panel (details for the clicked row)'}
           >
@@ -777,7 +614,7 @@ export default function FileExplorer(props) {
                 ? `Clear all ${deleteCheckSet.length} staged ${deleteCheckSet.length === 1 ? 'path' : 'paths'} from the Delete Check set`
                 : 'The Delete Check set is empty'}
             >
-              <Icon name="delete" className="h-3.5 w-3.5" />
+              <Icon name="clear" className="h-3.5 w-3.5" />
             </button>
           )}
           <button
@@ -926,11 +763,11 @@ export default function FileExplorer(props) {
           <div
             className="grid min-h-0 flex-1"
             style={{
-              // Both side panels are optional: [folders?] table [inspector?].
+              // The Folders pane is optional; the Inspector lives in the
+              // app-level right rail now: [folders?] table.
               gridTemplateColumns: [
                 foldersOpen ? `${foldersWidth}px` : null,
-                'minmax(0,1fr)',
-                inspectorOpen ? '320px' : null
+                'minmax(0,1fr)'
               ]
                 .filter(Boolean)
                 .join(' ')
@@ -965,7 +802,6 @@ export default function FileExplorer(props) {
               {deleteCheckMode && deleteCheckBar}
               {resultsTable}
             </section>
-            {inspectorOpen && inspectorPane}
           </div>
         </div>
       )}
@@ -1002,35 +838,6 @@ function BackupFilterChip({ label, count, tone, active, onClick }) {
       {count != null && <span className="tabular-nums opacity-70">{count}</span>}
     </button>
   );
-}
-
-function InspectorSection({ label, open, onToggle, children }) {
-  return (
-    <section className="mt-3 border-t border-sidebar-border pt-2">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="flex w-full items-center gap-1.5 border-0 bg-transparent p-0 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted transition-colors hover:text-text"
-      >
-        <Icon name={open ? 'chevronDown' : 'chevronRight'} className="h-3 w-3" /> {label}
-      </button>
-      {open && <div className="mt-2">{children}</div>}
-    </section>
-  );
-}
-
-function InspectorField({ label, value }) {
-  return (
-    <div>
-      <dt className="text-text-tertiary">{label}</dt>
-      <dd className="mt-0.5 m-0 break-words text-muted-strong">{value || '—'}</dd>
-    </div>
-  );
-}
-
-function formatInspectorDate(value) {
-  return value ? new Date(value).toLocaleString() : '—';
 }
 
 function breadcrumbs(selectedPath) {

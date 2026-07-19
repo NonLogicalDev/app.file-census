@@ -29,8 +29,10 @@ test('backup filter is always-on, and the Delete Check SET is a distinct staged 
   assert.match(fileExplorerSource, /dc_safe/);
   assert.match(fileExplorerSource, /would lose last copy/);
   assert.match(fileExplorerSource, /onAddDeleteCheck/);
-  // The Inspector keeps its column even while the mode is on.
-  assert.match(fileExplorerSource, /\{inspectorOpen && inspectorPane\}/);
+  // The Inspector is an app-level right rail; the explorer only hosts the
+  // toggle and forwards row clicks.
+  assert.match(fileExplorerSource, /onToggleInspector/);
+  assert.doesNotMatch(fileExplorerSource, /inspectorPane/);
 });
 
 test('clear set is an icon-only confirmed action beside Add to Delete Check', () => {
@@ -42,16 +44,18 @@ test('clear set is an icon-only confirmed action beside Add to Delete Check', ()
 });
 
 test('inspector has lazy collapsible Preview and EXIF sections', () => {
-  // Sections are disclosure-style, persisted, and fetch via the lightweight
-  // files.preview RPC only while the inspector + section are open.
-  assert.match(fileExplorerSource, /function InspectorSection/);
-  assert.match(fileExplorerSource, /label="Preview"/);
-  assert.match(fileExplorerSource, /label="EXIF"/);
-  assert.match(fileExplorerSource, /locations-inspector-preview-open/);
-  assert.match(fileExplorerSource, /locations-inspector-exif-open/);
-  assert.match(fileExplorerSource, /onLoadFilePreview/);
-  // Lazy gate: no fetch unless the inspector is open and a section expanded.
-  assert.match(fileExplorerSource, /!inspectorOpen \|\| \(!previewOpen && !exifOpen\)/);
+  // Sections live in the app-level InspectorPanel: disclosure-style,
+  // persisted, fetching via the lightweight files.preview RPC only while a
+  // section is expanded.
+  const inspectorSource = readFileSync(join(componentsDir, 'InspectorPanel.jsx'), 'utf8');
+  assert.match(inspectorSource, /function InspectorSection/);
+  assert.match(inspectorSource, /label="Preview"/);
+  assert.match(inspectorSource, /label="EXIF"/);
+  assert.match(inspectorSource, /locations-inspector-preview-open/);
+  assert.match(inspectorSource, /locations-inspector-exif-open/);
+  assert.match(inspectorSource, /onLoadFilePreview/);
+  // Lazy gate: no fetch unless a section is expanded.
+  assert.match(inspectorSource, /\(!previewOpen && !exifOpen\) \|\| !previewKey/);
 });
 
 test('browse table folders expand inline with lazy children', () => {
