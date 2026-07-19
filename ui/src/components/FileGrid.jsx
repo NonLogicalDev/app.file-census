@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   flexRender,
   getCoreRowModel,
@@ -228,7 +228,7 @@ function loadStoredLayout(storageKey) {
   }
 }
 
-export default function FileGrid({
+function FileGridInner({
   rows = [],
   visibleColumns = [],
   fullPathName = false,
@@ -709,3 +709,9 @@ function sortIndicator(sortState) {
   if (sortState === 'desc') return '▼';
   return '';
 }
+
+// Memoized: the file grid is expensive (TanStack table) and its props are stable
+// across unrelated top-level re-renders (e.g. live scan-progress ticks), so
+// React.memo prevents it from re-rendering every ~100ms during a scan.
+const FileGrid = memo(FileGridInner);
+export default FileGrid;
