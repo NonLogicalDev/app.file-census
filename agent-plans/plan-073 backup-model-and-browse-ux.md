@@ -68,6 +68,12 @@ Durable direction the user gave while this plan was built:
   listing down to just the staged folders/files.
 - Table columns need more prominent dividers; otherwise resizing is very hard.
 - Folders pane must be resizable.
+- Delete Check set is built iteratively (add/remove dirs/files over time) and
+  spans MULTIPLE locations.
+- No nested additions for now: if a folder already encloses the item being
+  added, refuse (keep the set an antichain per location).
+- Retire Dup / Scan Dup / Uniq columns (the new backup display replaces them);
+  optionally keep Uniq but redefine it as distinct-hash count in the folder.
 - Process: use $Tasker_Plan religiously to record all work updates; keep this
   steering guidance in the plan in summarized form; prototype + screenshot UX
   before wiring.
@@ -145,6 +151,30 @@ Durable direction the user gave while this plan was built:
 - **Delete Check toggle** acts as an advanced filter: the browse shows only the
   staged directories/files, and the Backup column recomputes with B = the set,
   so it directly shows what deletion would destroy.
+- **The set is a cross-location working set built iteratively.** Each member
+  carries its `(scan/location, path, kind)`; the user adds/removes individual
+  dirs/files over many folders and across MULTIPLE locations before validating.
+  It is app-level (not per-scan) so it can span locations. Membership panel
+  groups members by location.
+- **No nested additions (for now): the set is an antichain per location.** When
+  adding path X to the set, refuse if X is equal to, enclosed by, or encloses an
+  existing member within the same location. The primary case the user named:
+  "if a folder already encloses what we are trying to add, refuse." Also refuse
+  the reverse (adding a folder that encloses an existing member) rather than
+  silently absorbing it. Refusals surface a clear reason (e.g. "already covered
+  by <ancestor>"). Nesting checks are per-location: a path in location A never
+  encloses a path in location B.
+
+## Column decisions 2026-07-19 (Dup / Scan Dup / Uniq)
+
+- The new Backup display (folder `[N safe][N partial][N unsafe]` + file verdict
+  with `[X copies exist]`) subsumes what Dup / Scan Dup / Uniq conveyed, so
+  **remove the Dup and Scan Dup columns** — they are no longer needed.
+- **Uniq may stay but is redefined**: it should mean the count of UNIQUE HASHES
+  (distinct `(blake3,size)`) in the folder's subtree, i.e. how many distinct
+  contents live here — NOT "files that only exist in this folder" (the current
+  `original_file_count` meaning, which is confusing). Defer until the folder
+  chip rollups land, since both read the same distinct-content cache rollup.
 
 ## Implementation Steps
 
@@ -175,6 +205,12 @@ Durable direction the user gave while this plan was built:
 12. [ ] UI: Internal/External scope toggle wired to the two verdict sets.
 13. [ ] UI: restore Add-to-Delete-Check actions + membership panel + a Delete
         Check toggle (filters to staged paths, recomputes verdicts vs the set).
+14. [ ] Delete Check set is cross-location + iterative: app-level persisted set
+        keyed by (scan/location, path, kind); add/remove members; enforce the
+        antichain-per-location invariant (refuse nested adds with a reason);
+        membership panel groups by location.
+15. [ ] Remove Dup + Scan Dup columns; redefine Uniq = distinct-hash count (or
+        drop it) once the folder chip rollups land.
 
 ## Learning Log
 

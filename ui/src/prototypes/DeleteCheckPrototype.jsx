@@ -51,9 +51,20 @@ const FILES = [
 ];
 const ALL_ROWS = [...FOLDERS, ...FILES];
 
-// Paths staged into the Delete Check set for the "active" screenshot.
-const STAGED_FOLDERS = ['PHOTO_FILTER/Camera Roll', 'PHOTO_FILTER/Screenshots'];
-const STAGED_FILES = ['PHOTO_FILTER/IMG_2013.HEIC'];
+// The Delete Check set is a cross-location working set built iteratively. Each
+// member carries its location + path + kind; it can span locations and stays an
+// antichain per location (no member encloses another).
+const STAGED = [
+  { location: 'NLBackup', kind: 'dir', path: 'PHOTO_FILTER/Camera Roll' },
+  { location: 'NLBackup', kind: 'dir', path: 'PHOTO_FILTER/Screenshots' },
+  { location: 'NLBackup', kind: 'file', path: 'PHOTO_FILTER/IMG_2013.HEIC' },
+  { location: 'SSD-Archive', kind: 'dir', path: 'exports/2019 masters' }
+];
+// Rows are the NLBackup PHOTO_FILTER children; stage-match is by that path.
+const STAGED_HERE = new Set(
+  STAGED.filter((m) => m.location === 'NLBackup').map((m) => m.path)
+);
+const STAGED_LOCATIONS = [...new Set(STAGED.map((m) => m.location))];
 
 function bytes(n) {
   if (n >= GB) return `${(n / GB).toFixed(1)} GB`;
@@ -98,8 +109,8 @@ function FileBackup({ info }) {
   );
 }
 
-function Row({ row, scope, staged, showMenu }) {
-  const isStaged = staged.has(`PHOTO_FILTER/${row.name}`);
+function Row({ row, scope, showMenu }) {
+  const isStaged = STAGED_HERE.has(`PHOTO_FILTER/${row.name}`);
   return (
     <tr className="group border-b border-border hover:bg-surface-muted">
       <td className="w-8 border-r border-border px-2 py-1.5 text-center">
@@ -139,11 +150,10 @@ export default function DeleteCheckPrototype({ initialDeleteCheck = false, initi
   const [scope, setScope] = useState(initialScope);
   const [deleteCheck, setDeleteCheck] = useState(initialDeleteCheck);
 
-  const staged = useMemo(() => new Set([...STAGED_FOLDERS, ...STAGED_FILES]), []);
   const rows = useMemo(() => {
     if (!deleteCheck) return ALL_ROWS;
-    return ALL_ROWS.filter((r) => staged.has(`PHOTO_FILTER/${r.name}`));
-  }, [deleteCheck, staged]);
+    return ALL_ROWS.filter((r) => STAGED_HERE.has(`PHOTO_FILTER/${r.name}`));
+  }, [deleteCheck]);
 
   return (
     <div className="min-h-screen bg-bg p-4 text-[13px] text-text">
@@ -192,7 +202,7 @@ export default function DeleteCheckPrototype({ initialDeleteCheck = false, initi
           >
             <Icon name="deleteCheck" className="h-3.5 w-3.5" />
             Delete Check
-            <span className={`ml-1 rounded-full px-1.5 text-[10px] ${deleteCheck ? 'bg-danger/20' : 'bg-surface-muted'}`}>{staged.size}</span>
+            <span className={`ml-1 rounded-full px-1.5 text-[10px] ${deleteCheck ? 'bg-danger/20' : 'bg-surface-muted'}`}>{STAGED.length}</span>
           </button>
         </div>
       </div>
@@ -219,13 +229,13 @@ export default function DeleteCheckPrototype({ initialDeleteCheck = false, initi
             </thead>
             <tbody>
               {rows.map((row) => (
-                <Row key={row.name} row={row} scope={scope} staged={staged} showMenu={!deleteCheck && row.name === 'IMG_2014.HEIC'} />
+                <Row key={row.name} row={row} scope={scope} showMenu={!deleteCheck && row.name === 'IMG_2014.HEIC'} />
               ))}
             </tbody>
           </table>
           {deleteCheck && (
             <p className="border-t border-border bg-surface-subtle px-3 py-1.5 text-[11px] text-muted">
-              Showing only the {staged.size} paths staged for deletion.
+              Showing only this location's staged paths. The set also has members in other locations (see panel).
             </p>
           )}
         </div>
@@ -238,25 +248,28 @@ export default function DeleteCheckPrototype({ initialDeleteCheck = false, initi
               <button className="text-[11px] text-muted hover:text-text">Clear</button>
             </div>
             <div className="px-3 py-2 text-[11px] text-muted">
-              {STAGED_FOLDERS.length} folders · {STAGED_FILES.length} file · <strong className="text-text">45,315 files</strong> affected
+              {STAGED.filter((m) => m.kind === 'dir').length} folders · {STAGED.filter((m) => m.kind === 'file').length} file · {STAGED_LOCATIONS.length} locations · <strong className="text-text">45,315 files</strong> affected
             </div>
             <div className="min-h-0 flex-1 overflow-auto">
-              <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-text-tertiary">Folders</p>
-              {STAGED_FOLDERS.map((p) => (
-                <div key={p} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                  <Icon name="folder" className="h-3.5 w-3.5 flex-none text-accent" />
-                  <span className="min-w-0 flex-1 truncate text-muted-strong">{p}</span>
-                  <Icon name="close" className="h-3 w-3 flex-none text-text-tertiary hover:text-text" />
+              {STAGED_LOCATIONS.map((loc) => (
+                <div key={loc}>
+                  <p className="flex items-center gap-1.5 border-b border-sidebar-border/60 bg-surface-subtle px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.06em] text-text-tertiary">
+                    <Icon name="locations" className="h-3 w-3" /> {loc}
+                  </p>
+                  {STAGED.filter((m) => m.location === loc).map((m) => (
+                    <div key={m.path} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
+                      <Icon name={m.kind === 'dir' ? 'folder' : 'file'} className={`h-3.5 w-3.5 flex-none ${m.kind === 'dir' ? 'text-accent' : 'text-text-tertiary'}`} />
+                      <span className="min-w-0 flex-1 truncate text-muted-strong">{m.path}</span>
+                      <Icon name="close" className="h-3 w-3 flex-none text-text-tertiary hover:text-text" />
+                    </div>
+                  ))}
                 </div>
               ))}
-              <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-text-tertiary">Files</p>
-              {STAGED_FILES.map((p) => (
-                <div key={p} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                  <Icon name="file" className="h-3.5 w-3.5 flex-none text-text-tertiary" />
-                  <span className="min-w-0 flex-1 truncate text-muted-strong">{p}</span>
-                  <Icon name="close" className="h-3 w-3 flex-none text-text-tertiary hover:text-text" />
-                </div>
-              ))}
+              <p className="px-3 py-2 text-[10px] leading-relaxed text-text-tertiary">
+                Add/remove members over time across locations. Nested adds are
+                refused: a folder already in the set blocks adding anything inside
+                it.
+              </p>
             </div>
             <div className="border-t border-sidebar-border p-3">
               <div className="mb-2 flex items-center gap-2 rounded border border-danger/40 bg-[color:color-mix(in_srgb,var(--danger)_10%,var(--surface))] px-2 py-1.5 text-[11px] text-danger">
