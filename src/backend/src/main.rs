@@ -6,6 +6,7 @@ use clap::Parser;
 use file_census_backend::web;
 
 mod cli;
+mod scan_watch;
 
 #[tokio::main]
 async fn main() -> Result<()> {

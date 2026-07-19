@@ -224,6 +224,8 @@ enum ScanSubcommand {
     Stop(ScanIdArgs),
     /// Show live progress for a scan in a targeted server process.
     Progress(ScanIdArgs),
+    /// Live Ratatui dashboard of running scans (polls a targeted server process).
+    Watch(WatchArgs),
     /// Show the file tree for a scan.
     Tree(TreeArgs),
     /// Export per-file backup verdicts as TSV (for acting on the dedup analysis).
@@ -271,6 +273,15 @@ struct ScanStartArgs {
     /// Light scans are excluded from exact duplicate/delete-check scope.
     #[arg(long, default_value = "full")]
     hash_policy: String,
+}
+
+#[derive(Args)]
+struct WatchArgs {
+    /// Limit the watch to a single scan id (default: all running scans).
+    scan_id: Option<String>,
+    /// Exit after this many poll ticks (for non-interactive/testing use).
+    #[arg(long)]
+    ticks: Option<u32>,
 }
 
 #[derive(Args)]
@@ -725,6 +736,7 @@ fn command_path(command: &Command) -> &'static str {
             ScanSubcommand::Resume(_) => "scans.resume",
             ScanSubcommand::Stop(_) => "scans.stop",
             ScanSubcommand::Progress(_) => "scans.progress",
+            ScanSubcommand::Watch(_) => "scans.watch",
             ScanSubcommand::Tree(_) => "scans.tree",
             ScanSubcommand::ExportVerdicts(_) => "scans.export-verdicts",
             ScanSubcommand::DeleteCheck(_) => "scans.delete-check",
@@ -917,6 +929,15 @@ fn run_scans(
             })
         }
         ScanSubcommand::Running => run_server_scan_request(server, "scans.running", None, json),
+        ScanSubcommand::Watch(args) => {
+            let server = server.with_context(|| {
+                "scans watch targets a running app process; pass --server http://127.0.0.1:3838"
+                    .to_string()
+            })?;
+            crate::scan_watch::run(args.scan_id.clone(), args.ticks, || {
+                request_server_json(server, "GET", "/api/scans/running")
+            })
+        }
         ScanSubcommand::Progress(args) => run_server_scan_request(
             server,
             "scans.progress",

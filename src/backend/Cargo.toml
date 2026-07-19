@@ -53,3 +53,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.10", features = ["v4"] }
 walkdir = "2.5"
+ratatui = "0.28"
+crossterm = "0.28"
