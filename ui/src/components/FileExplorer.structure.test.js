@@ -8,18 +8,22 @@ const componentsDir = dirname(fileURLToPath(import.meta.url));
 const fileExplorerSource = readFileSync(join(componentsDir, 'FileExplorer.jsx'), 'utf8');
 const directoryTreeSource = readFileSync(join(componentsDir, 'DirectoryTree.jsx'), 'utf8');
 
-test('delete check is a persistent backup filter over browsing, not a separate subview', () => {
-  // The unified model: markers are always shown and the All/Unsafe/Warn/Safe
-  // backup filter is the only "delete check" surface. The old explicit subview
-  // (Check current folder / Safe-to-delete callout / staging list) is retired.
+test('backup filter is always-on, and the Delete Check SET is a distinct staged surface', () => {
+  // Markers are always shown; the All/Unsafe/Warn/Safe backup filter is the
+  // ambient surface. The Delete Check SET (staged paths + validation panel) is a
+  // separate mode, NOT the retired subview tabs / current-folder callout.
   assert.match(fileExplorerSource, /label="Unsafe"/);
-  assert.match(fileExplorerSource, /label="Warn"/);
   assert.match(fileExplorerSource, /label="Safe"/);
   assert.match(fileExplorerSource, /setBackupFilter/);
+  // The retired explicit subview affordances are gone (the old current-folder
+  // callout and the subview tab switch).
   assert.doesNotMatch(fileExplorerSource, /Check current folder/);
-  assert.doesNotMatch(fileExplorerSource, /Safe to delete/);
-  assert.doesNotMatch(fileExplorerSource, /Delete Check list/);
-  assert.doesNotMatch(fileExplorerSource, /StagedDeleteCheckRow/);
+  assert.doesNotMatch(fileExplorerSource, /onSetScanSubview/);
+  // The restored Delete Check set: toggle, membership panel, validation.
+  assert.match(fileExplorerSource, /setDeleteCheckMode/);
+  assert.match(fileExplorerSource, /deleteCheckPanel/);
+  assert.match(fileExplorerSource, /onValidateDeleteCheck/);
+  assert.match(fileExplorerSource, /onAddDeleteCheck/);
 });
 
 test('file explorer does not advertise unavailable EXIF enrichment controls', () => {

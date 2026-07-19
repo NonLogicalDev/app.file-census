@@ -1990,8 +1990,67 @@ export default function App() {
     [rpc]
   );
 
+  // Per-scan Delete Check set (dirs/files staged for deletion) + validation.
+  const [deleteCheckSet, setDeleteCheckSet] = useState([]);
+  const [deleteCheckValidation, setDeleteCheckValidation] = useState(null);
+  const refreshDeleteCheckSet = useCallback(async (scanId = latest.current.selectedScanId) => {
+    if (!scanId) { setDeleteCheckSet([]); return; }
+    try {
+      const members = await rpc('delete_check.list', { scan_id: scanId });
+      setDeleteCheckSet(members || []);
+    } catch { /* transient */ }
+  }, [rpc]);
+  const addToDeleteCheck = useCallback(async (entries) => {
+    const scanId = latest.current.selectedScanId;
+    if (!scanId) return;
+    const list = (Array.isArray(entries) ? entries : [entries]).filter((e) => e && e.path && e.kind !== 'parent');
+    let members = null;
+    const refusals = [];
+    for (const entry of list) {
+      try {
+        const outcome = await rpc('delete_check.add', { scan_id: scanId, path: entry.path, kind: entry.kind === 'dir' ? 'dir' : 'file' });
+        if (outcome?.members) members = outcome.members;
+        if (outcome && !outcome.added && outcome.reason) refusals.push(`${entry.path}: ${outcome.reason}`);
+      } catch (error) {
+        refusals.push(String(error?.message || error));
+      }
+    }
+    if (members) setDeleteCheckSet(members);
+    setDeleteCheckValidation(null);
+    if (refusals.length) setMessage(refusals.join('\n'));
+  }, [rpc]);
+  const removeFromDeleteCheck = useCallback(async (path) => {
+    const scanId = latest.current.selectedScanId;
+    if (!scanId) return;
+    const members = await rpc('delete_check.remove', { scan_id: scanId, path });
+    setDeleteCheckSet(members || []);
+    setDeleteCheckValidation(null);
+  }, [rpc]);
+  const clearDeleteCheck = useCallback(async () => {
+    const scanId = latest.current.selectedScanId;
+    if (!scanId) return;
+    const members = await rpc('delete_check.clear', { scan_id: scanId });
+    setDeleteCheckSet(members || []);
+    setDeleteCheckValidation(null);
+  }, [rpc]);
+  const validateDeleteCheck = useCallback(async () => {
+    const scanId = latest.current.selectedScanId;
+    if (!scanId) return;
+    const validation = await rpc('delete_check.validate', { scan_id: scanId });
+    setDeleteCheckValidation(validation);
+  }, [rpc]);
+  useEffect(() => {
+    void refreshDeleteCheckSet(selectedScanId);
+  }, [selectedScanId, refreshDeleteCheckSet]);
+
   const commonLocationProps = {
     onLoadFlat: loadFlatPage,
+    deleteCheckSet,
+    deleteCheckValidation,
+    onAddDeleteCheck: addToDeleteCheck,
+    onRemoveDeleteCheck: removeFromDeleteCheck,
+    onClearDeleteCheck: clearDeleteCheck,
+    onValidateDeleteCheck: validateDeleteCheck,
     locationList,
     selectedLocationSlug,
     selectedLocationView,
