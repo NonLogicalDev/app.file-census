@@ -58,9 +58,15 @@ the default DB, and a hanging Delete Check.
        All/Unsafe/Warn/Safe backup filter (delete markers always on) are the
        only surface. Screenshots (real FileExplorer, preview routes
        `/explorer/consolidated` + `/explorer/flat`) confirm both views.
-5. [ ] Fix / retire the hanging Delete Check path (old delete_check on 275k).
+5. [x] Fix / retire the hanging Delete Check path (old delete_check on 275k).
+       Retired with step 4: the delete-check subview substituted a whole
+       presence-check result set (up to 133k rows) into the grid, which hung the
+       browser. App no longer substitutes those rows; the CLI delete_check query
+       itself returns instantly, so nothing hangs.
 6. [ ] Row-select delete action with delete-time survivor check.
-7. [ ] Verify end-to-end against /Volumes/NLBackup + the default DB.
+7. [~] Verify end-to-end: perf proven on a copy of the default DB (release
+       binary) + all backend/UI tests + perf gates green; live-app restart with
+       the new binary (rebuilds v4 cache on open) still owed as a final check.
 
 ## Perf receipts (default DB, scan b668d2e6, 133,639 visible files under one folder)
 
@@ -104,5 +110,10 @@ Root causes and fixes:
 
 ## Unfinished Work
 
-- [ ] Steps 1–7. Do not add further features until the interface is coherent and
-  the regressions are measured and fixed.
+- [ ] Step 3: representative-scan scope test (classification test exists and the
+  live cache classifies correctly; a dedicated cross-scan-snapshot guard test is
+  still owed).
+- [ ] Step 6: row-select delete action with a delete-time survivor check
+  (decrement light/full refcounts; block deleting the last copy).
+- [ ] Step 7: restart the live app on the default DB to confirm the v4 cache
+  rebuild + fast browsing in-process (perf already proven on a copy).
