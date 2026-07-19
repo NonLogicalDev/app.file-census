@@ -544,7 +544,15 @@ impl Database {
                 run_id TEXT NOT NULL REFERENCES duplicate_cache_runs(id) ON DELETE CASCADE,
                 scan_id TEXT NOT NULL,
                 path TEXT NOT NULL,
+                -- Immediate parent directory of `path` ('' for top-level entries).
+                -- Indexed so browsing a folder is an O(children) lookup instead of
+                -- an O(subtree) aggregation over every descendant file.
+                parent_path TEXT NOT NULL DEFAULT '',
                 kind TEXT NOT NULL DEFAULT 'file' CHECK (kind IN ('file', 'dir')),
+                -- Subtree rollups on dir rows (own value on file rows) so a folder
+                -- listing reads counts/size/count without scanning its descendants.
+                file_count INTEGER NOT NULL DEFAULT 0,
+                total_size INTEGER NOT NULL DEFAULT 0,
                 duplicate_file_count INTEGER NOT NULL DEFAULT 0,
                 original_file_count INTEGER NOT NULL DEFAULT 0,
                 same_scan_duplicate_file_count INTEGER NOT NULL DEFAULT 0,
@@ -564,7 +572,13 @@ impl Database {
             CREATE TABLE IF NOT EXISTS scan_exclusion_cache (
                 scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,
                 fingerprint TEXT NOT NULL,
-                built_at TEXT NOT NULL
+                built_at TEXT NOT NULL,
+                -- Visible (non-excluded, non-error) file totals, computed during
+                -- the same O(files) pass that builds the exclusion set. Read on
+                -- every tree navigation for the scope fingerprint/status, so
+                -- caching them avoids a per-navigation SUM(size) over the scan.
+                visible_file_count INTEGER NOT NULL DEFAULT 0,
+                visible_total_bytes INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS scan_excluded_files (
@@ -582,6 +596,8 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_duplicate_cache_runs_fingerprint_status ON duplicate_cache_runs(fingerprint, status);
             CREATE INDEX IF NOT EXISTS idx_duplicate_cache_run_scans_run ON duplicate_cache_run_scans(run_id);
             CREATE INDEX IF NOT EXISTS idx_duplicate_cache_path_counts_run_scan_path ON duplicate_cache_path_counts(run_id, scan_id, path);
+            -- The parent_path index is created in migrate() after the ALTER that
+            -- adds the column, so pre-existing databases don't fail here.
             CREATE INDEX IF NOT EXISTS idx_file_exif_status ON file_exif(status);
             "#,
         )?;
@@ -638,6 +654,8 @@ impl Database {
             "unsafe_file_count",
             "copies_here",
             "copies_away",
+            "file_count",
+            "total_size",
         ] {
             if !column_exists(conn, "duplicate_cache_path_counts", column)? {
                 conn.execute(
@@ -648,6 +666,32 @@ impl Database {
                 )?;
             }
         }
+        if !column_exists(conn, "duplicate_cache_path_counts", "parent_path")? {
+            conn.execute(
+                "ALTER TABLE duplicate_cache_path_counts ADD COLUMN parent_path TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        for column in ["visible_file_count", "visible_total_bytes"] {
+            if !column_exists(conn, "scan_exclusion_cache", column)? {
+                conn.execute(
+                    &format!(
+                        "ALTER TABLE scan_exclusion_cache ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                    ),
+                    [],
+                )?;
+                // Force a one-time exclusion-cache rebuild so the new totals get
+                // populated (the old fingerprint would otherwise skip it).
+                conn.execute(
+                    "UPDATE scan_exclusion_cache SET fingerprint = fingerprint || '\u{1f}stale'",
+                    [],
+                )?;
+            }
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_duplicate_cache_path_counts_run_scan_parent ON duplicate_cache_path_counts(run_id, scan_id, parent_path)",
+            [],
+        )?;
         migrate_locations_type_check(conn)?;
         Ok(())
     }
@@ -1799,12 +1843,16 @@ impl Database {
             let mut stmt = tx.prepare(
                 r#"
                 INSERT INTO duplicate_cache_path_counts
-                    (run_id, scan_id, path, kind, duplicate_file_count, original_file_count, same_scan_duplicate_file_count,
+                    (run_id, scan_id, path, parent_path, kind, file_count, total_size,
+                     duplicate_file_count, original_file_count, same_scan_duplicate_file_count,
                      safe_file_count, warn_file_count, unsafe_file_count, copies_here, copies_away)
                 VALUES
-                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 ON CONFLICT(run_id, scan_id, path) DO UPDATE SET
+                    parent_path = excluded.parent_path,
                     kind = excluded.kind,
+                    file_count = excluded.file_count,
+                    total_size = excluded.total_size,
                     duplicate_file_count = excluded.duplicate_file_count,
                     original_file_count = excluded.original_file_count,
                     same_scan_duplicate_file_count = excluded.same_scan_duplicate_file_count,
@@ -1816,11 +1864,15 @@ impl Database {
                 "#,
             )?;
             for ((scan_id, path), counts) in &path_counts {
+                let parent_path = path.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
                 stmt.execute(params![
                     run_id,
                     scan_id,
                     path,
+                    parent_path,
                     counts.kind,
+                    counts.file_count,
+                    counts.total_size,
                     counts.duplicate_file_count,
                     counts.original_file_count,
                     counts.same_scan_duplicate_file_count,
@@ -1927,13 +1979,6 @@ impl Database {
         // visibility table for its effective scope, so reload the precise tree
         // scope immediately afterwards before reading tree rows.
         let duplicate_cache = Self::current_duplicate_cache_status_for_conn(&tx)?;
-        let selected_location_id = scan_location_id(&tx, scan_id)?;
-        let mut visibility_scan_ids = vec![scan_id.to_string()];
-        visibility_scan_ids.extend(duplicate_scope_scan_ids(
-            &tx,
-            selected_location_id.as_deref(),
-        )?);
-        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
 
         let normalized = normalize_tree_prefix(prefix);
         // Tie the tree's duplicate counters to the same cache run this page
@@ -1945,11 +1990,21 @@ impl Database {
         };
         let filter = query.and_then(|q| q.filter.as_ref());
         // Browsing (depth 1, no filter) is the hot path: aggregate immediate
-        // children in SQL rather than folding every descendant row in Rust.
-        // Deeper/filtered reads keep the general row-fold path.
+        // children in SQL, anti-joining the persistent per-scan exclusion cache
+        // directly (indexed) instead of copying ~140k excluded ids into a temp
+        // table on every navigation. Deeper/filtered reads keep the general
+        // row-fold path, which still uses the temp `excluded_file_ids`.
         let entries = if depth == 1 && filter.is_none() {
+            ensure_scan_exclusion_cache_ready(&tx, scan_id)?;
             scan_tree_immediate_children(&tx, scan_id, &normalized, ready_run_id)?
         } else {
+            let selected_location_id = scan_location_id(&tx, scan_id)?;
+            let mut visibility_scan_ids = vec![scan_id.to_string()];
+            visibility_scan_ids.extend(duplicate_scope_scan_ids(
+                &tx,
+                selected_location_id.as_deref(),
+            )?);
+            prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
             let rows = scan_tree_source_rows(&tx, scan_id, &normalized, ready_run_id)?;
             build_tree_page_entries(rows, &normalized, depth, filter)?
         };
@@ -1992,10 +2047,7 @@ impl Database {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         ensure_scan_exists(&tx, scan_id)?;
         let duplicate_cache = Self::current_duplicate_cache_status_for_conn(&tx)?;
-        let selected_location_id = scan_location_id(&tx, scan_id)?;
-        let mut visibility_scan_ids = vec![scan_id.to_string()];
-        visibility_scan_ids.extend(duplicate_scope_scan_ids(&tx, selected_location_id.as_deref())?);
-        prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
+        ensure_scan_exclusion_cache_ready(&tx, scan_id)?;
 
         let normalized = normalize_tree_prefix(prefix);
         let ready_run_id = if duplicate_cache.status == "ready" {
@@ -2018,18 +2070,54 @@ impl Database {
         let limit = limit.unwrap_or(DEFAULT_TREE_PAGE_LIMIT).max(1);
         let base_from = format!(
             "FROM files f \
-             LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id \
+             LEFT JOIN scan_excluded_files excluded_f \
+                    ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id \
              LEFT JOIN duplicate_cache_path_counts dc \
                     ON dc.run_id = ?3 AND dc.scan_id = f.scan_id AND dc.path = f.path \
-             WHERE excluded_f.id IS NULL AND f.scan_id = ?1 AND f.error IS NULL \
+             WHERE excluded_f.file_id IS NULL AND f.scan_id = ?1 AND f.error IS NULL \
                AND f.kind = 'file' AND f.path LIKE ?2 ESCAPE '\\'{backup_where}"
         );
 
-        let total = tx.query_row(
-            &format!("SELECT COUNT(*) {base_from}"),
-            params![scan_id, like, ready_run_id],
-            |row| row.get::<_, i64>(0),
-        )? as u64;
+        // The total drives pagination. Counting `files` joined to the cache over
+        // every descendant is O(subtree) (~18s on the default DB's 133k-file
+        // scan). Instead read it from the pre-rolled cache: summing the
+        // per-child rollup columns over `parent_path = prefix` yields the subtree
+        // total (files or a backup tier) in O(children) via the parent_path index.
+        let covers_cache = match ready_run_id.as_deref() {
+            Some(run_id) => duplicate_cache_covers_scan(&tx, run_id, scan_id)?,
+            None => false,
+        };
+        let total = if covers_cache {
+            let run_id = ready_run_id.as_deref().expect("covered implies ready run");
+            let parent_path = normalized.strip_suffix('/').unwrap_or(&normalized);
+            let (files_c, unsafe_c, warn_c, safe_c): (i64, i64, i64, i64) = tx.query_row(
+                "SELECT COALESCE(SUM(file_count), 0), COALESCE(SUM(unsafe_file_count), 0), \
+                        COALESCE(SUM(warn_file_count), 0), COALESCE(SUM(safe_file_count), 0) \
+                 FROM duplicate_cache_path_counts \
+                 WHERE run_id = ?1 AND scan_id = ?2 AND parent_path = ?3",
+                params![run_id, scan_id, parent_path],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            let tier = match backup {
+                "unsafe" => unsafe_c,
+                "warn" => warn_c,
+                "safe" => safe_c,
+                _ => files_c,
+            };
+            tier.max(0) as u64
+        } else {
+            // No cache yet: backup tiers are unknown, so count all visible files
+            // under the prefix (the filter has nothing to apply against).
+            tx.query_row(
+                "SELECT COUNT(*) FROM files f \
+                 LEFT JOIN scan_excluded_files excluded_f \
+                        ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id \
+                 WHERE excluded_f.file_id IS NULL AND f.scan_id = ?1 AND f.error IS NULL \
+                   AND f.kind = 'file' AND f.path LIKE ?2 ESCAPE '\\'",
+                params![scan_id, like],
+                |row| row.get::<_, i64>(0),
+            )? as u64
+        };
 
         let entries = {
             let sql = format!(
@@ -3001,9 +3089,11 @@ fn ensure_scan_exclusion_cache(
     }
 
     conn.execute("DELETE FROM scan_excluded_files WHERE scan_id = ?1", [scan_id])?;
+    let mut visible_file_count: i64 = 0;
+    let mut visible_total_bytes: i64 = 0;
     {
         let mut files_stmt =
-            conn.prepare("SELECT id, path, kind FROM files WHERE scan_id = ?1")?;
+            conn.prepare("SELECT id, path, kind, size, error FROM files WHERE scan_id = ?1")?;
         let mut insert_stmt = conn.prepare(
             "INSERT OR IGNORE INTO scan_excluded_files (scan_id, file_id) VALUES (?1, ?2)",
         )?;
@@ -3012,31 +3102,200 @@ fn ensure_scan_exclusion_cache(
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         for row in rows {
-            let (id, path, kind) = row?;
-            if scan_path_is_excluded(matcher, &path, kind == "dir") {
+            let (id, path, kind, size, error) = row?;
+            let is_dir = kind == "dir";
+            let excluded = scan_path_is_excluded(matcher, &path, is_dir);
+            if excluded {
                 insert_stmt.execute(params![scan_id, id])?;
+            } else if !is_dir && error.is_none() {
+                // Mirror `visible_scan_file_totals`: non-excluded files without an
+                // error. Computed here so navigation can read it in O(1).
+                visible_file_count += 1;
+                visible_total_bytes += size.max(0);
             }
         }
     }
     conn.execute(
-        "INSERT OR REPLACE INTO scan_exclusion_cache (scan_id, fingerprint, built_at)
-         VALUES (?1, ?2, ?3)",
-        params![scan_id, fingerprint, Utc::now().to_rfc3339()],
+        "INSERT OR REPLACE INTO scan_exclusion_cache
+            (scan_id, fingerprint, built_at, visible_file_count, visible_total_bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            scan_id,
+            fingerprint,
+            Utc::now().to_rfc3339(),
+            visible_file_count,
+            visible_total_bytes
+        ],
     )?;
     Ok(())
 }
 
-/// Fast path for the browsing hot case (depth 1, no filter): aggregate the
-/// immediate children entirely in SQL and return only the ~N child rows, instead
-/// of streaming every descendant row into Rust and folding there. Browsing a
-/// top folder of a 275k-file scan fetched ~283k rows per navigation; this
-/// returns ~20. Semantics match `build_tree_page_entries` for depth 1: each
-/// descendant file rolls into its immediate-child directory, and immediate-child
-/// files are listed directly.
+/// Ensures the persistent exclusion set for one scan is current, building the
+/// matcher from that scan's patterns. Cheap after the first build (fingerprint
+/// gated). Callers that anti-join `scan_excluded_files` directly (the browse hot
+/// path) use this instead of `prepare_excluded_file_ids`, avoiding a per-query
+/// copy of every excluded id into a temp table.
+fn ensure_scan_exclusion_cache_ready(conn: &Connection, scan_id: &str) -> Result<()> {
+    let patterns: Vec<String> = {
+        let mut stmt =
+            conn.prepare("SELECT pattern FROM scan_excludes WHERE scan_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([scan_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let matcher = build_scan_exclude_matcher(&patterns)?;
+    ensure_scan_exclusion_cache(conn, scan_id, &matcher)
+}
+
+/// Browsing hot case (depth 1, no filter). When a ready duplicate cache covers
+/// this scan, immediate children are read straight from the pre-rolled
+/// `duplicate_cache_path_counts` rows via the `parent_path` index — an
+/// O(children) lookup that never scans the subtree. Otherwise it falls back to
+/// aggregating descendant file rows in SQL (O(subtree), correct but slow), which
+/// is only hit before the cache is built.
 fn scan_tree_immediate_children(
+    conn: &Connection,
+    scan_id: &str,
+    normalized_prefix: &str,
+    ready_run_id: Option<&str>,
+) -> Result<Vec<TreeEntry>> {
+    if let Some(run_id) = ready_run_id {
+        if duplicate_cache_covers_scan(conn, run_id, scan_id)? {
+            return scan_tree_immediate_children_from_cache(
+                conn,
+                scan_id,
+                normalized_prefix,
+                run_id,
+            );
+        }
+    }
+    scan_tree_immediate_children_aggregate(conn, scan_id, normalized_prefix, ready_run_id)
+}
+
+/// True when the ready cache run has materialized rows for this scan, so the
+/// pre-rolled `parent_path` fast path can be used instead of subtree aggregation.
+fn duplicate_cache_covers_scan(conn: &Connection, run_id: &str, scan_id: &str) -> Result<bool> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM duplicate_cache_path_counts WHERE run_id = ?1 AND scan_id = ?2 LIMIT 1",
+            params![run_id, scan_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// O(children) immediate-children read: every direct child (file or dir) is a
+/// single pre-rolled cache row selected by the `parent_path` index. Dir rows
+/// already carry subtree file_count/total_size and duplicate/backup rollups;
+/// `files` is joined only to recover each child's own metadata (hashes, times,
+/// mode). No descendant scan, no temp exclusion table.
+fn scan_tree_immediate_children_from_cache(
+    conn: &Connection,
+    scan_id: &str,
+    normalized_prefix: &str,
+    run_id: &str,
+) -> Result<Vec<TreeEntry>> {
+    let parent_path = normalized_prefix
+        .strip_suffix('/')
+        .unwrap_or(normalized_prefix);
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT dc.path, dc.kind, dc.file_count, dc.total_size,
+               dc.duplicate_file_count, dc.original_file_count, dc.same_scan_duplicate_file_count,
+               dc.safe_file_count, dc.warn_file_count, dc.unsafe_file_count,
+               dc.copies_here, dc.copies_away,
+               f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.size
+        FROM duplicate_cache_path_counts dc
+        LEFT JOIN files f ON f.scan_id = dc.scan_id AND f.path = dc.path
+        WHERE dc.run_id = ?1 AND dc.scan_id = ?2 AND dc.parent_path = ?3
+        ORDER BY dc.path
+        "#,
+    )?;
+    let rows = stmt.query_map(params![run_id, scan_id, parent_path], |row| {
+        let path: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let file_count = row.get::<_, i64>(2)?.max(0) as u64;
+        let total_size = row.get::<_, i64>(3)?.max(0) as u64;
+        let dup = row.get::<_, i64>(4)?.max(0) as u64;
+        let orig = row.get::<_, i64>(5)?.max(0) as u64;
+        let same_dup = row.get::<_, i64>(6)?.max(0) as u64;
+        let safe = row.get::<_, i64>(7)?.max(0) as u64;
+        let warn = row.get::<_, i64>(8)?.max(0) as u64;
+        let unsafe_ = row.get::<_, i64>(9)?.max(0) as u64;
+        let copies_here = row.get::<_, i64>(10)?.max(0) as u64;
+        let copies_away = row.get::<_, i64>(11)?.max(0) as u64;
+        let name = path
+            .rsplit_once('/')
+            .map(|(_, tail)| tail.to_string())
+            .unwrap_or_else(|| path.clone());
+        if kind == "dir" {
+            Ok(TreeEntry {
+                path,
+                name,
+                kind: "dir".to_string(),
+                size: total_size,
+                file_count,
+                blake3: None,
+                sha256: None,
+                ctime: row.get(14)?,
+                mtime: row.get(15)?,
+                mode: row.get(16)?,
+                duplicate_file_count: dup,
+                original_file_count: orig,
+                same_scan_duplicate_file_count: same_dup,
+                backup_status: String::new(),
+                unsafe_count: unsafe_,
+                warn_count: warn,
+                copies_here: 0,
+                copies_away: 0,
+            })
+        } else {
+            let backup_status = if unsafe_ > 0 {
+                "unsafe"
+            } else if warn > 0 {
+                "warn"
+            } else if safe > 0 {
+                "safe"
+            } else {
+                ""
+            };
+            Ok(TreeEntry {
+                path,
+                name,
+                kind: "file".to_string(),
+                size: row.get::<_, Option<i64>>(17)?.unwrap_or(total_size as i64).max(0) as u64,
+                file_count: 1,
+                blake3: row.get(12)?,
+                sha256: row.get(13)?,
+                ctime: row.get(14)?,
+                mtime: row.get(15)?,
+                mode: row.get(16)?,
+                duplicate_file_count: dup,
+                original_file_count: orig,
+                same_scan_duplicate_file_count: same_dup,
+                backup_status: backup_status.to_string(),
+                unsafe_count: 0,
+                warn_count: 0,
+                copies_here,
+                copies_away,
+            })
+        }
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+/// Fallback aggregation path (no ready cache yet): aggregate the immediate
+/// children entirely in SQL and return only the ~N child rows, instead of
+/// streaming every descendant row into Rust and folding there. Semantics match
+/// `build_tree_page_entries` for depth 1: each descendant file rolls into its
+/// immediate-child directory, and immediate-child files are listed directly.
+fn scan_tree_immediate_children_aggregate(
     conn: &Connection,
     scan_id: &str,
     normalized_prefix: &str,
@@ -3068,10 +3327,11 @@ fn scan_tree_immediate_children(
                 COALESCE(dc.copies_here, 0) AS ch,
                 COALESCE(dc.copies_away, 0) AS ca
             FROM files f
-            LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
+            LEFT JOIN scan_excluded_files excluded_f
+                   ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id
             LEFT JOIN duplicate_cache_path_counts dc
                    ON dc.run_id = ?3 AND dc.scan_id = f.scan_id AND dc.path = f.path
-            WHERE excluded_f.id IS NULL
+            WHERE excluded_f.file_id IS NULL
               AND f.scan_id = ?1
               AND f.error IS NULL
               AND f.path LIKE ?2 ESCAPE '\'
@@ -3645,6 +3905,9 @@ struct DuplicateCacheFile {
 #[derive(Clone, Debug)]
 struct DuplicatePathCounts {
     kind: String,
+    // Subtree file count / byte size on dir rows; own 1 / size on file rows.
+    file_count: u64,
+    total_size: u64,
     duplicate_file_count: u64,
     original_file_count: u64,
     same_scan_duplicate_file_count: u64,
@@ -3711,7 +3974,12 @@ fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> 
         .iter()
         .filter_map(|row| row.scan_id.clone())
         .collect::<Vec<_>>();
-    prepare_excluded_file_ids(conn, scan_ids.clone())?;
+    // Ensure the persistent exclusion set exists for each scope scan (cheap when
+    // the exclusion fingerprint is unchanged). `visible_scan_file_totals` below
+    // anti-joins `scan_excluded_files` directly, so no temp-table copy is needed.
+    for scan_id in &scan_ids {
+        ensure_scan_exclusion_cache_ready(conn, scan_id)?;
+    }
 
     let mut locations = Vec::with_capacity(location_rows.len());
     let mut scans = Vec::with_capacity(scan_ids.len());
@@ -3763,7 +4031,12 @@ fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> 
     }
 
     let payload_json = serde_json::to_string(&DuplicateScopePayload {
-        version: 2,
+        // Bump when the cache's stored SHAPE changes so existing "ready" runs are
+        // treated as stale and rebuilt. v3 added the backup classification
+        // columns (safe/warn/unsafe + copies_here/copies_away). v4 added
+        // parent_path + per-dir file_count/total_size rollups for O(children)
+        // folder browsing.
+        version: 4,
         locations,
     })?;
     let fingerprint = blake3::hash(payload_json.as_bytes()).to_hex().to_string();
@@ -3776,12 +4049,29 @@ fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> 
 }
 
 fn visible_scan_file_totals(conn: &Connection, scan_id: &str) -> Result<(u64, u64)> {
+    // Read the precomputed totals cached alongside the exclusion set. They are
+    // refreshed by `ensure_scan_exclusion_cache` on the same trigger (patterns or
+    // the scan's files changing), so reading them avoids a per-navigation
+    // COUNT/SUM(size) scan over the whole scan (~133k rows on the default DB).
+    // Callers ensure the exclusion cache first; fall back to a live scan only if
+    // the cache row is somehow absent.
+    let cached: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT visible_file_count, visible_total_bytes FROM scan_exclusion_cache WHERE scan_id = ?1",
+            [scan_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((count, bytes)) = cached {
+        return Ok((count.max(0) as u64, bytes.max(0) as u64));
+    }
     conn.query_row(
         r#"
         SELECT COUNT(*), COALESCE(SUM(f.size), 0)
         FROM files f
-        LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
-        WHERE excluded_f.id IS NULL
+        LEFT JOIN scan_excluded_files excluded_f
+          ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id
+        WHERE excluded_f.file_id IS NULL
           AND f.scan_id = ?1
           AND f.kind = 'file'
           AND f.error IS NULL
@@ -3941,6 +4231,8 @@ fn duplicate_cache_path_counts(
             &file.scan_id,
             &file.path,
             "file",
+            1,
+            file.size,
             duplicate_file_count,
             original_file_count,
             same_scan_duplicate_file_count,
@@ -3952,6 +4244,8 @@ fn duplicate_cache_path_counts(
                 &file.scan_id,
                 &ancestor,
                 "dir",
+                1,
+                file.size,
                 duplicate_file_count,
                 original_file_count,
                 same_scan_duplicate_file_count,
@@ -3979,6 +4273,8 @@ fn increment_duplicate_path_counts(
     scan_id: &str,
     path: &str,
     kind: &str,
+    file_count_delta: u64,
+    size_delta: u64,
     duplicate_file_count: u64,
     original_file_count: u64,
     same_scan_duplicate_file_count: u64,
@@ -3988,6 +4284,8 @@ fn increment_duplicate_path_counts(
         .entry((scan_id.to_string(), path.to_string()))
         .or_insert_with(|| DuplicatePathCounts {
             kind: kind.to_string(),
+            file_count: 0,
+            total_size: 0,
             duplicate_file_count: 0,
             original_file_count: 0,
             same_scan_duplicate_file_count: 0,
@@ -4000,6 +4298,8 @@ fn increment_duplicate_path_counts(
     if counts.kind != "file" {
         counts.kind = kind.to_string();
     }
+    counts.file_count = counts.file_count.saturating_add(file_count_delta);
+    counts.total_size = counts.total_size.saturating_add(size_delta);
     counts.duplicate_file_count = counts
         .duplicate_file_count
         .saturating_add(duplicate_file_count);

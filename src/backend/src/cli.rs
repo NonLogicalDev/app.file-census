@@ -290,6 +290,12 @@ struct TreeArgs {
     /// Folder traversal depth. Must be at least 1; output is always bounded.
     #[arg(long, default_value_t = 1)]
     depth: u32,
+    /// Return a flat, paginated descendant-file listing instead of the tree.
+    #[arg(long)]
+    flat: bool,
+    /// Backup tier filter for --flat: all (default), unsafe, warn, or safe.
+    #[arg(long, default_value = "all")]
+    backup: String,
 }
 
 #[derive(Args)]
@@ -500,6 +506,8 @@ pub struct DuplicatesCommand {
 enum DuplicatesSubcommand {
     /// List duplicate groups.
     List(DupesArgs),
+    /// Rebuild the duplicate/backup cache for the current scope (synchronous).
+    Rebuild,
 }
 
 #[derive(Args)]
@@ -725,6 +733,7 @@ fn command_path(command: &Command) -> &'static str {
         Command::Dupes(_) => "dupes",
         Command::Duplicates(command) => match &command.command {
             DuplicatesSubcommand::List(_) => "duplicates.list",
+            DuplicatesSubcommand::Rebuild => "duplicates.rebuild",
         },
         Command::Thumbnails(command) => match &command.command {
             ThumbnailsSubcommand::Build(_) => "thumbnails.build",
@@ -957,14 +966,24 @@ fn run_scans(
                 );
             }
             let path = normalized_tree_path(&args.path)?;
-            let tree = db.scan_tree_page(
-                &args.scan_id,
-                &path,
-                Some(args.limit.max(1)),
-                args.offset,
-                args.depth,
-                None,
-            )?;
+            let tree = if args.flat {
+                db.scan_flat_page(
+                    &args.scan_id,
+                    &path,
+                    &args.backup,
+                    Some(args.limit.max(1)),
+                    args.offset,
+                )?
+            } else {
+                db.scan_tree_page(
+                    &args.scan_id,
+                    &path,
+                    Some(args.limit.max(1)),
+                    args.offset,
+                    args.depth,
+                    None,
+                )?
+            };
             // JSON consumers get the entries array (a list-shaped command, like
             // `scans list`/`files find`); pagination metadata is reported to
             // stderr in the human-readable form.
@@ -1835,6 +1854,16 @@ fn run_duplicates(db: Database, command: DuplicatesCommand, json: bool) -> Resul
         DuplicatesSubcommand::List(args) => {
             let groups = db.duplicate_groups_for_scans(args.limit, &args.scan_ids)?;
             emit(&groups, json, |groups| print_duplicate_groups(groups))
+        }
+        DuplicatesSubcommand::Rebuild => {
+            let run_id = db.rebuild_duplicate_cache_for_current_scope()?;
+            emit(&run_id, json, |run_id| {
+                match run_id {
+                    Some(id) => println!("rebuilt duplicate cache run {id}"),
+                    None => println!("no scope to rebuild (no locations/scans)"),
+                }
+                Ok(())
+            })
         }
     }
 }
