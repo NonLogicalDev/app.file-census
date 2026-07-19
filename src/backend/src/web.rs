@@ -358,6 +358,31 @@ async fn handle_rpc_result(
             crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
             Ok(serde_json::to_value(excludes)?)
         }
+        "delete_check.list" => {
+            let params: ScanIdParams = decode_params(params)?;
+            Ok(serde_json::to_value(state.db.delete_check_set(&params.scan_id)?)?)
+        }
+        "delete_check.add" => {
+            let params: DeleteCheckAddParams = decode_params(params)?;
+            let outcome = state
+                .db
+                .delete_check_add(&params.scan_id, &params.path, &params.kind)?;
+            Ok(serde_json::to_value(outcome)?)
+        }
+        "delete_check.remove" => {
+            let params: DeleteCheckRemoveParams = decode_params(params)?;
+            let members = state.db.delete_check_remove(&params.scan_id, &params.path)?;
+            Ok(serde_json::to_value(members)?)
+        }
+        "delete_check.clear" => {
+            let params: ScanIdParams = decode_params(params)?;
+            state.db.delete_check_clear(&params.scan_id)?;
+            Ok(serde_json::to_value(state.db.delete_check_set(&params.scan_id)?)?)
+        }
+        "delete_check.validate" => {
+            let params: ScanIdParams = decode_params(params)?;
+            Ok(serde_json::to_value(state.db.delete_check_validate(&params.scan_id)?)?)
+        }
         "scans.delete_check" => {
             let params: DeleteCheckParams = decode_params(params)?;
             let result =
@@ -1053,6 +1078,19 @@ async fn scan_files(
 struct VerdictsQuery {
     path: Option<String>,
     backup: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteCheckAddParams {
+    scan_id: String,
+    path: String,
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteCheckRemoveParams {
+    scan_id: String,
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]

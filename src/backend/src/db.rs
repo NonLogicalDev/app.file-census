@@ -5486,6 +5486,75 @@ mod tests {
     }
 
     #[test]
+    fn delete_check_set_antichain_and_survivor_validation() {
+        let root = test_root("delete-check-set");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let src = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Source".to_string(),
+                slug: "src".to_string(),
+                root_path: root.join("src"),
+                notes: None,
+            })
+            .unwrap();
+        let bak = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Backup".to_string(),
+                slug: "bak".to_string(),
+                root_path: root.join("bak"),
+                notes: None,
+            })
+            .unwrap();
+        let s1 = db.start_scan(&src, Path::new("/")).unwrap();
+        let s2 = db.start_scan(&bak, Path::new("/")).unwrap();
+        let f = |scan: &str, path: &str, b3: &str| test_file(scan, path, 10, b3);
+        db.insert_file_batch(&[
+            f(&s1, "dir1/a.jpg", "HASH_A"),  // exact copy in bak -> survives elsewhere
+            f(&s1, "dir1/b.jpg", "HASH_B"),  // twin at dir2/d.jpg (same location)
+            f(&s1, "dir2/d.jpg", "HASH_B"),
+            f(&s1, "dir1/c.jpg", "HASH_C"),  // twin at dir1/c2.jpg, both under dir1
+            f(&s1, "dir1/c2.jpg", "HASH_C"),
+        ])
+        .unwrap();
+        db.insert_file_batch(&[f(&s2, "backup/a.jpg", "HASH_A")]).unwrap();
+        db.finish_scan(&s1, 5, 0, 0, 50, "complete").unwrap();
+        db.finish_scan(&s2, 1, 0, 0, 10, "complete").unwrap();
+        db.set_representative_scan(&s1).unwrap();
+        db.set_representative_scan(&s2).unwrap();
+        crate::duplicate_cache::run_rebuild_duplicate_cache(&db, &crate::events::EventHub::default());
+
+        // Antichain: adding dir1 succeeds; a child or the same path is refused;
+        // adding a folder that would enclose an existing member is refused.
+        assert!(db.delete_check_add(&s1, "dir1", "dir").unwrap().added);
+        assert!(!db.delete_check_add(&s1, "dir1/a.jpg", "file").unwrap().added, "enclosed by dir1");
+        assert!(!db.delete_check_add(&s1, "dir1", "dir").unwrap().added, "already present");
+        db.delete_check_remove(&s1, "dir1").unwrap();
+        db.delete_check_add(&s1, "dir1/c.jpg", "file").unwrap();
+        assert!(!db.delete_check_add(&s1, "dir1", "dir").unwrap().added, "would enclose dir1/c.jpg");
+        db.delete_check_clear(&s1).unwrap();
+
+        // Survivor validation with the set = {dir1}. Affected = a,b,c,c2 (4).
+        // HASH_A survives (copy in bak). HASH_B survives (dir2/d.jpg is outside
+        // the set). HASH_C is destroyed (both copies are under dir1).
+        assert!(db.delete_check_add(&s1, "dir1", "dir").unwrap().added);
+        let v = db.delete_check_validate(&s1).unwrap();
+        assert!(v.cache_ready);
+        assert_eq!(v.affected_files, 4, "a,b,c,c2 under dir1");
+        assert_eq!(v.affected_contents, 3, "HASH_A, HASH_B, HASH_C");
+        assert_eq!(v.would_lose_last_copy, 2, "the two HASH_C copies");
+        assert_eq!(v.safe_to_delete, 2);
+
+        // Adding dir2/d.jpg too makes HASH_B destroyed as well (both copies staged).
+        assert!(db.delete_check_add(&s1, "dir2/d.jpg", "file").unwrap().added);
+        let v2 = db.delete_check_validate(&s1).unwrap();
+        assert_eq!(v2.affected_files, 5);
+        assert_eq!(v2.would_lose_last_copy, 4, "HASH_B (2) + HASH_C (2)");
+        assert_eq!(v2.safe_to_delete, 1, "only HASH_A survives");
+    }
+
+    #[test]
     fn scan_tree_page_surfaces_backup_status_from_built_cache() {
         let root = test_root("backup-status-tree");
         let db = Database::open(root.join("state.db")).unwrap();
