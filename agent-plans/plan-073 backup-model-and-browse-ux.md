@@ -478,6 +478,26 @@ built"), EXIF honest "No Exif data found in JPEG"; `._` AppleDouble row →
 "not a supported image" / "EXIF is only attempted for common image file
 types". Screenshot: shot-inspector-preview-exif.png. Tests: 140 UI, 74 lib.
 
+## Browse tree-in-table work log 2026-07-19 (~21:30) — CDP-verified live (`53756d0`)
+
+User (mid-build, confirming the queued task): "Can we make Browse mode more
+like tree mode? We still have not allowed expanding folders in the table."
+Shipped inline folder expansion in the Browse table: disclosure chevron on dir
+rows → lazily fetches that folder's page (scans.tree side-load, limit 500,
+respects search + delete_check) and renders children indented in place via
+TanStack subRows (expansion keyed by path; autoResetExpanded off so async
+children and nested expansions survive). Backup-tier filter applies at every
+depth; children sort dirs-first; >500 children shows an honest "open the
+folder for the rest" placeholder; child cache clears on navigation/scan/DC/
+search changes; failed fetches drop the node so re-expand retries. Flat stays
+flat. Also this session: FileGrid render-count probe (`2fc4ba7`) proved the
+memo live (Folders/Inspector toggles → 0 grid re-renders; row click → exactly
++1). CDP receipts: expand @Photos 11→23 rows, nested photoslibrary →55,
+collapse →11, re-expand →55 instant from cache; Unsafe filter + expand → 0
+safe-tier leaks in children. Two structure tests updated: the old "grid stays
+flat/non-hierarchical" contract is superseded by this user request.
+Screenshots: shot-browse-inline-expand.png.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
