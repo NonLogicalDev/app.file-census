@@ -91,6 +91,8 @@ export default function FileExplorer(props) {
     onLoadMoreDirectoryTree,
     onOpenGridEntry,
     onInspectFile,
+    onOpenFileSystem,
+    onRevealFileSystem,
     onRequestExcludePath,
     onRequestDeletePath
   } = props;
@@ -416,6 +418,8 @@ export default function FileExplorer(props) {
           onRemoveDeleteCheck={onRemoveDeleteCheck}
           onInspect={onInspectFile}
           onInspectRow={handleInspectRow}
+          onOpenSystem={onOpenFileSystem}
+          onRevealSystem={onRevealFileSystem}
         />
         {!flatRows.length && (
           <p className="pointer-events-none absolute inset-x-0 top-[52px] p-[18px] text-center text-[11px] text-muted">
@@ -461,6 +465,8 @@ export default function FileExplorer(props) {
         onOpen={onOpenGridEntry}
         onInspect={onInspectFile}
         onInspectRow={handleInspectRow}
+        onOpenSystem={onOpenFileSystem}
+        onRevealSystem={onRevealFileSystem}
         onToggleSelection={onToggleGridSelection}
         onSetSelection={onSetGridSelection}
         onBuildThumbnails={onRequestBuildThumbnailsForEntry}

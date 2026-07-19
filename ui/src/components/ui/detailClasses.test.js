@@ -39,7 +39,9 @@ test('metadata and exif helpers keep responsive two-column cards', () => {
   assert.match(metadataItemClassName({ compact: true }), /bg-surface/);
   assert.match(metadataValueClassName, /whitespace-normal/);
   assert.match(exifPanelClassName, /grid/);
-  assert.match(exifStatusClassName, /justify-between/);
+  // Long unbroken source paths must wrap inside the modal, not stretch it.
+  assert.match(exifStatusClassName, /\[&_code\]:break-all/);
+  assert.match(exifStatusClassName, /min-w-0/);
   assert.match(exifGridClassName, /grid-cols-\[repeat\(2,minmax\(0,1fr\)\)\]/);
   assert.match(exifGridClassName, /\[&_code\]:whitespace-normal/);
 });

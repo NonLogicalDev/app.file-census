@@ -267,7 +267,9 @@ function FileGridInner({
   onRemoveDeleteCheck,
   stagedPaths = null,
   expandableFolders = false,
-  onToggleFolderExpand
+  onToggleFolderExpand,
+  onOpenSystem,
+  onRevealSystem
 }) {
   // Render-count probe: lets automated perf checks assert the React.memo wrap
   // actually skips re-renders (unrelated parent state must not bump this).
@@ -301,7 +303,7 @@ function FileGridInner({
   // viewport; closes on outside pointerdown, Escape, scroll, or resize.
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
-  const hasRowActions = Boolean(onDelete || onBuildThumbnails || onExclude || onAddDeleteCheck || onRemoveDeleteCheck);
+  const hasRowActions = Boolean(onDelete || onBuildThumbnails || onExclude || onAddDeleteCheck || onRemoveDeleteCheck || onOpenSystem || onRevealSystem);
   useEffect(() => {
     if (!contextMenu) return undefined;
     function onPointerDown(event) {
@@ -585,6 +587,39 @@ function FileGridInner({
           onDoubleClick={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
         >
+          {contextMenu.entry.kind === 'file' && onInspect && (
+            <MenuItem
+              icon={<Icon name="rowActions" />}
+              onClick={() => {
+                onInspect(contextMenu.entry);
+                setContextMenu(null);
+              }}
+            >
+              File Info
+            </MenuItem>
+          )}
+          {onOpenSystem && (
+            <MenuItem
+              icon={<Icon name="openFile" />}
+              onClick={() => {
+                onOpenSystem(contextMenu.entry);
+                setContextMenu(null);
+              }}
+            >
+              Open File
+            </MenuItem>
+          )}
+          {onRevealSystem && (
+            <MenuItem
+              icon={<Icon name="revealFile" />}
+              onClick={() => {
+                onRevealSystem(contextMenu.entry);
+                setContextMenu(null);
+              }}
+            >
+              Reveal File
+            </MenuItem>
+          )}
           {stagedPaths?.has(contextMenu.entry.path) && onRemoveDeleteCheck ? (
             <MenuItem
               variant="warning"

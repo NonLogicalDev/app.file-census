@@ -13,8 +13,11 @@ export const filePreviewTextClassName = 'text-muted';
 export const exifPanelClassName = 'grid gap-2.5';
 
 export const exifStatusClassName = cn(
-  'flex items-center justify-between gap-2.5 rounded-panel border border-border bg-surface-muted p-2.5',
-  '[&_strong]:uppercase'
+  // min-w-0 + break-all on the source path so a long unbroken path wraps
+  // inside the modal instead of stretching it past the viewport.
+  'flex min-w-0 flex-wrap items-center gap-2.5 rounded-panel border border-border bg-surface-muted p-2.5',
+  '[&_strong]:uppercase',
+  '[&_code]:min-w-0 [&_code]:flex-1 [&_code]:whitespace-normal [&_code]:break-all'
 );
 
 export const exifGridClassName = cn(

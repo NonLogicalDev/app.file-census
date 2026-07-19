@@ -46,7 +46,7 @@ export default function AppModals(props) {
       {props.showAddLocation && <LocationForm title="Add location" form={props.form} setForm={props.setForm} busy={props.busy} onSubmit={props.onAddLocation} onCancel={() => props.setShowAddLocation(false)} submitLabel="Add location" canChooseNativeFolder={props.canChooseNativeFolder} onChooseLocationFolder={props.onChooseLocationFolder} />}
       {props.showEditLocation && <LocationForm title="Edit location" form={props.editForm} setForm={props.setEditForm} busy={props.busy} onSubmit={props.onUpdateLocation} onCancel={() => props.setShowEditLocation(false)} submitLabel="Save location" slugDisabled canChooseNativeFolder={props.canChooseNativeFolder} onChooseLocationFolder={props.onChooseLocationFolder} />}
       {props.showScanNotes && (
-        <Modal>
+        <Modal onClose={() => props.setShowScanNotes(false)}>
           <ModalSurface as="form" className={formStackClassName} onSubmit={(event) => { event.preventDefault(); props.onUpdateScanNotes(); }}>
             <h2>Scan notes</h2>
             <label className={fieldLabelClassName}>Notes<textarea className={textAreaClassName()} value={props.scanNotesForm.notes} onChange={(event) => props.setScanNotesForm({ ...props.scanNotesForm, notes: event.currentTarget.value })} placeholder="What makes this scan useful, suspicious, or representative?" /></label>
@@ -58,7 +58,7 @@ export default function AppModals(props) {
         </Modal>
       )}
       {props.showScanExcludes && (
-        <Modal>
+        <Modal onClose={() => props.setShowScanExcludes(false)}>
           <ModalSurface as="form" className={formStackClassName} onSubmit={(event) => { event.preventDefault(); props.onUpdateScanExcludes(); }}>
             <h2>Scan excludes</h2>
             <label className={fieldLabelClassName}>Gitignore-style patterns
@@ -78,7 +78,7 @@ export default function AppModals(props) {
         </Modal>
       )}
       {props.scanStartForm && (
-        <Modal>
+        <Modal onClose={() => props.setScanStartForm(null)}>
           <ModalSurface as="form" className={formStackClassName} onSubmit={(event) => { event.preventDefault(); props.onConfirmScanStart(); }}>
             <h2>Start scan</h2>
             <label className={fieldLabelClassName}>Subfolder to scan
@@ -172,7 +172,7 @@ function BuildThumbnailsModal(props) {
   const pathLabel = request.label || request.path || 'root';
   const isSelection = Boolean(request.paths?.length);
   return (
-    <Modal>
+    <Modal onClose={() => props.setShowBuildThumbnails(false)}>
       <ModalSurface className="gap-3">
         <h2>Build thumbnails</h2>
         <p className="text-muted-strong leading-[1.45]">Build missing cached thumbnails for image files in <strong>{pathLabel}</strong>. Existing cached thumbnails are reused.</p>
@@ -205,7 +205,7 @@ function LocationForm({ title, form, setForm, busy, onSubmit, onCancel, submitLa
     if (path) update('root_path', path);
   };
   return (
-    <Modal>
+    <Modal onClose={onCancel}>
       <ModalSurface as="form" className={formStackClassName} onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
         <h2>{title}</h2>
         {slugDisabled && <label className={fieldLabelClassName}>Slug<input className={fieldClassName()} value={form.slug} disabled /></label>}
@@ -284,7 +284,7 @@ function FileInfoModal(props) {
   const visibleOccurrenceCount = fileInfo.occurrences.length;
   const hasMoreOccurrences = fileInfo.occurrence_next_offset != null && visibleOccurrenceCount < occurrenceCount;
   return (
-    <Modal>
+    <Modal onClose={() => props.setShowFileInfo(false)}>
       <ModalSurface size="wide">
         <div className={panelTitleClassName}>
           <div className={panelTitleTextClassName}>
@@ -292,7 +292,7 @@ function FileInfoModal(props) {
             <p className={panelTitleSubtextClassName}>{occurrenceCount} known {occurrenceCount === 1 ? 'copy' : 'copies'}</p>
           </div>
           <Toolbar className={actionToolbarClassName}>
-            <Button type="button" variant="secondary" onClick={() => props.onRevealFileInScan?.(fileInfo.file)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal in scan</Button>
+            <Button type="button" variant="secondary" onClick={() => props.onRevealFileInScan?.(fileInfo.file)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal File</Button>
             <Button type="button" variant="secondary" onClick={() => props.setShowFileInfo(false)} icon={<Icon name="close" />}>Close</Button>
           </Toolbar>
         </div>

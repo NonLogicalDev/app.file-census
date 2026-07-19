@@ -5,11 +5,16 @@ import { bytes } from '../utils/format.js';
 // App-level right-rail Inspector (docked beside the workspace like the left
 // sidebar). Shows the clicked row's context plus lazy collapsible Preview and
 // EXIF sections backed by the cheap files.preview RPC.
+const inspectorActionButtonClassName =
+  'inline-flex h-[26px] w-full items-center justify-center gap-1.5 rounded-md border border-border bg-surface-subtle px-2 text-[11px] text-muted transition-colors hover:bg-surface hover:text-text';
+
 export default function InspectorPanel({
   inspected,
   activeScan,
   onClose,
   onInspectFile,
+  onOpenFile,
+  onRevealFile,
   onLoadFilePreview
 }) {
   // Preview/EXIF disclosure sections, persisted. Data loads lazily: only
@@ -28,6 +33,58 @@ export default function InspectorPanel({
   useEffect(() => {
     globalThis.localStorage?.setItem('locations-inspector-exif-open', exifOpen ? '1' : '0');
   }, [exifOpen]);
+  // User-resizable preview height (drag handle under the image), persisted.
+  const PREVIEW_MIN_HEIGHT = 96;
+  const PREVIEW_MAX_HEIGHT = 640;
+  const [previewHeight, setPreviewHeight] = useState(() => {
+    const stored = Number(globalThis.localStorage?.getItem('locations-inspector-preview-height'));
+    return Number.isFinite(stored) && stored >= PREVIEW_MIN_HEIGHT
+      ? Math.min(stored, PREVIEW_MAX_HEIGHT)
+      : 192;
+  });
+  useEffect(() => {
+    globalThis.localStorage?.setItem('locations-inspector-preview-height', String(previewHeight));
+  }, [previewHeight]);
+  const previewResizeSession = useRef(null);
+  function clampPreviewHeight(value) {
+    return Math.min(PREVIEW_MAX_HEIGHT, Math.max(PREVIEW_MIN_HEIGHT, Math.round(value)));
+  }
+  function startPreviewResize(event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is optional in older embedded webviews.
+    }
+    previewResizeSession.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: previewHeight
+    };
+  }
+  function movePreviewResize(event) {
+    const session = previewResizeSession.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    setPreviewHeight(clampPreviewHeight(session.startHeight + event.clientY - session.startY));
+  }
+  function finishPreviewResize(event) {
+    const session = previewResizeSession.current;
+    if (!session || (event && session.pointerId !== event.pointerId)) return;
+    previewResizeSession.current = null;
+    if (event?.currentTarget?.hasPointerCapture?.(session.pointerId)) {
+      event.currentTarget.releasePointerCapture(session.pointerId);
+    }
+  }
+  function handlePreviewResizeKeyDown(event) {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    const step = event.shiftKey ? 48 : 16;
+    const direction = event.key === 'ArrowDown' ? 1 : -1;
+    setPreviewHeight((current) => clampPreviewHeight(current + direction * step));
+  }
+
   const [inspectedPreview, setInspectedPreview] = useState(null);
   const previewKey = inspected && inspected.kind === 'file' && inspected.blake3
     ? `${inspected.scan_id || ''}:${inspected.path}:${inspected.blake3}`
@@ -90,16 +147,43 @@ export default function InspectorPanel({
               </span>
             </div>
           </div>
-          {/* [Open File Info] — content-identity modal, files only */}
-          {typeof onInspectFile === 'function' && inspected.kind === 'file' && (
-            <button
-              type="button"
-              onClick={() => onInspectFile(inspected)}
-              className="mt-2.5 inline-flex h-[26px] w-full items-center justify-center gap-1.5 rounded-md border border-border bg-surface-subtle px-2.5 text-[11px] text-muted transition-colors hover:bg-surface hover:text-text"
-            >
-              <Icon name="rowActions" className="h-3.5 w-3.5" /> Open File Info
-            </button>
-          )}
+          {/* Actions: File Info (content-identity modal, files only) + system
+              open/reveal for the on-disk copy. */}
+          <div className="mt-2.5 grid gap-1.5">
+            {typeof onInspectFile === 'function' && inspected.kind === 'file' && (
+              <button
+                type="button"
+                onClick={() => onInspectFile(inspected)}
+                className={inspectorActionButtonClassName}
+              >
+                <Icon name="rowActions" className="h-3.5 w-3.5" /> Open File Info
+              </button>
+            )}
+            {(typeof onRevealFile === 'function' || typeof onOpenFile === 'function') && (
+              <div className="grid grid-cols-2 gap-1.5">
+                {typeof onRevealFile === 'function' && (
+                  <button
+                    type="button"
+                    onClick={() => onRevealFile(inspected)}
+                    className={inspectorActionButtonClassName}
+                    title="Reveal this copy in the system file explorer"
+                  >
+                    <Icon name="revealFile" className="h-3.5 w-3.5" /> Reveal File
+                  </button>
+                )}
+                {typeof onOpenFile === 'function' && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenFile(inspected)}
+                    className={inspectorActionButtonClassName}
+                    title="Open this copy with the system default app"
+                  >
+                    <Icon name="openFile" className="h-3.5 w-3.5" /> Open File
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           <InspectorSection
             label="Preview"
             open={previewOpen}
@@ -122,9 +206,29 @@ export default function InspectorPanel({
                 <img
                   src={inspectedPreview.thumbnail.data_url}
                   alt={inspected.name}
-                  className="max-h-48 w-full rounded-ui border border-border object-contain"
+                  className="w-full rounded-ui border border-border object-contain"
+                  style={{ height: `${previewHeight}px` }}
                 />
-                <p className="mb-0 mt-1 text-[10px] text-text-tertiary">
+                {/* Drag handle: resize the preview area vertically. */}
+                <div
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label="Resize preview"
+                  aria-valuemin={PREVIEW_MIN_HEIGHT}
+                  aria-valuemax={PREVIEW_MAX_HEIGHT}
+                  aria-valuenow={previewHeight}
+                  tabIndex={0}
+                  className="group -my-0.5 flex h-2.5 w-full cursor-row-resize touch-none items-center justify-center focus-visible:outline-none"
+                  onKeyDown={handlePreviewResizeKeyDown}
+                  onLostPointerCapture={finishPreviewResize}
+                  onPointerCancel={finishPreviewResize}
+                  onPointerDown={startPreviewResize}
+                  onPointerMove={movePreviewResize}
+                  onPointerUp={finishPreviewResize}
+                >
+                  <span className="h-[3px] w-8 rounded-full bg-border transition-colors group-hover:bg-accent-line group-focus-visible:bg-accent-line" />
+                </div>
+                <p className="mb-0 mt-0.5 text-[10px] text-text-tertiary">
                   {inspectedPreview.thumbnail.width} × {inspectedPreview.thumbnail.height}
                   {inspectedPreview.thumbnail.cached ? ' · cached' : ' · freshly built'}
                 </p>

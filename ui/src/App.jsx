@@ -1913,6 +1913,27 @@ export default function App() {
     setInspected(entry);
   }, []);
 
+  // System open/reveal for a grid/inspector entry (falls back to the selected
+  // scan). Stable identities so the memoized FileGrid keeps skipping renders.
+  const openFileInSystem = useCallback(async (entry) => {
+    const scanId = entry?.scan_id || latest.current.selectedScanId;
+    if (!scanId || !entry?.path) return;
+    try {
+      await rpc('files.open', { scan_id: scanId, path: entry.path });
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }, [rpc]);
+  const revealFileInSystem = useCallback(async (entry) => {
+    const scanId = entry?.scan_id || latest.current.selectedScanId;
+    if (!scanId || !entry?.path) return;
+    try {
+      await rpc('files.reveal', { scan_id: scanId, path: entry.path });
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }, [rpc]);
+
   // Verdicts TSV export. Web: browser download via the HTTP endpoint.
   // Desktop: no HTTP server, so a native save dialog writes the file.
   async function exportVerdicts({ scanId, path, backup, scope }) {
@@ -2239,6 +2260,8 @@ export default function App() {
     onLoadMoreDirectoryTree: loadMoreDirectoryTree,
     onOpenGridEntry: openGridEntry,
     onInspectFile: inspectFile,
+    onOpenFileSystem: openFileInSystem,
+    onRevealFileSystem: revealFileInSystem,
     onExportVerdicts: exportVerdicts,
     onLoadFolderChildren: loadFolderChildren,
     inspected,
@@ -2630,6 +2653,8 @@ export default function App() {
           activeScan={selectedScanView}
           onClose={() => setInspectorOpen(false)}
           onInspectFile={inspectFile}
+          onOpenFile={openFileInSystem}
+          onRevealFile={revealFileInSystem}
           onLoadFilePreview={loadFilePreview}
         />
       ) : null}

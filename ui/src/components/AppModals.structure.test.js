@@ -23,7 +23,7 @@ test('file details occurrences are grouped by location/scan with compact actions
   assert.match(modalSource, /representative/);
   assert.match(modalSource, /onOpenOccurrence\(occurrence\)[\s\S]*?>Open<\/Button>/);
   assert.match(modalSource, /onRevealOccurrence\(occurrence\)[\s\S]*?>Reveal<\/Button>/);
-  assert.match(modalSource, /Reveal in scan/);
+  assert.match(modalSource, /Reveal File/);
   // Scope toggle: representative scans only (default) vs all scans.
   assert.match(modalSource, /onSetFileOccurrenceScope/);
   assert.match(modalSource, /All scans/);
