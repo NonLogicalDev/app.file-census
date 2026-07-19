@@ -276,6 +276,23 @@ pub struct TreePage {
     pub has_more: bool,
     pub next_offset: Option<u32>,
     pub duplicate_cache: DuplicateCacheStatus,
+    /// The BROWSED folder's own unique-content rollup (not the sum of its
+    /// children, which would double-count content shared across sibling
+    /// folders). `None` at the scan root or when no cache is ready.
+    #[serde(default)]
+    pub folder_summary: Option<FolderBackupSummary>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FolderBackupSummary {
+    pub file_count: u64,
+    pub distinct_count: u64,
+    pub safe_count: u64,
+    pub warn_count: u64,
+    pub unsafe_count: u64,
+    pub int_safe_count: u64,
+    pub int_warn_count: u64,
+    pub int_unsafe_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2092,6 +2109,7 @@ impl Database {
             .min(entries.len());
         let has_more = end < entries.len();
         let next_offset = has_more.then(|| u32::try_from(end).unwrap_or(u32::MAX));
+        let folder_summary = folder_summary_from_cache(&tx, ready_run_id, scan_id, &normalized)?;
         let page = TreePage {
             entries: entries.into_iter().skip(start).take(end - start).collect(),
             limit,
@@ -2100,6 +2118,7 @@ impl Database {
             has_more,
             next_offset,
             duplicate_cache,
+            folder_summary,
         };
         tx.commit()?;
         Ok(page)
@@ -2346,6 +2365,8 @@ impl Database {
         let end = offset as usize + entries.len();
         let has_more = (end as u64) < total;
         let next_offset = has_more.then(|| end as u32);
+        let folder_summary =
+            folder_summary_from_cache(&tx, ready_run_id.as_deref(), scan_id, &normalized)?;
         let page = TreePage {
             entries,
             limit,
@@ -2354,6 +2375,7 @@ impl Database {
             has_more,
             next_offset,
             duplicate_cache,
+            folder_summary,
         };
         tx.commit()?;
         Ok(page)
@@ -3576,6 +3598,47 @@ fn scan_tree_immediate_children(
         }
     }
     scan_tree_immediate_children_aggregate(conn, scan_id, normalized_prefix, ready_run_id)
+}
+
+/// The browsed folder's OWN unique-content rollup from the cache (not the sum of
+/// its children). `None` at the root (no single dir row) or when absent.
+/// `prefix` is the normalized tree prefix (may have a trailing slash).
+fn folder_summary_from_cache(
+    conn: &Connection,
+    run_id: Option<&str>,
+    scan_id: &str,
+    prefix: &str,
+) -> Result<Option<FolderBackupSummary>> {
+    let run_id = match run_id {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+    let dir = prefix.strip_suffix('/').unwrap_or(prefix);
+    if dir.is_empty() {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT file_count, distinct_count, safe_file_count, warn_file_count, unsafe_file_count, \
+                int_safe_file_count, int_warn_file_count, int_unsafe_file_count \
+         FROM duplicate_cache_path_counts \
+         WHERE run_id = ?1 AND scan_id = ?2 AND path = ?3 AND kind = 'dir'",
+        params![run_id, scan_id, dir],
+        |row| {
+            let g = |i: usize| -> rusqlite::Result<u64> { Ok(row.get::<_, i64>(i)?.max(0) as u64) };
+            Ok(FolderBackupSummary {
+                file_count: g(0)?,
+                distinct_count: g(1)?,
+                safe_count: g(2)?,
+                warn_count: g(3)?,
+                unsafe_count: g(4)?,
+                int_safe_count: g(5)?,
+                int_warn_count: g(6)?,
+                int_unsafe_count: g(7)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// True when the ready cache run has materialized rows for this scan, so the

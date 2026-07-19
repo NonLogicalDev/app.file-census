@@ -70,6 +70,10 @@ export default function App() {
   const [results, setResults] = useState([]);
   const [scanProgress, setScanProgress] = useState({});
   const [treeEntries, setTreeEntries] = useState([]);
+  // The browsed folder's own backup rollup (from scans.tree), used for the top
+  // backup-filter counts so they don't double-count content shared across
+  // sibling folders. Null at root / no cache.
+  const [folderSummary, setFolderSummary] = useState(null);
   const [directoryTreeNodes, setDirectoryTreeNodes] = useState({});
   const [directoryTreeScope, setDirectoryTreeScope] = useState('');
   const [directoryTreeExpandedPaths, setDirectoryTreeExpandedPaths] = useState(['']);
@@ -601,6 +605,7 @@ export default function App() {
     }
     if (requestId !== treeRequestId.current || latest.current.selectedScanId !== requestedScanId || latest.current.selectedPath !== requestedPath) return;
     setTreeEntries(treePage.entries);
+    setFolderSummary(treePage.folder_summary || null);
   }, [rpc, routeTo]);
   loadTreeRef.current = loadTree;
 
@@ -2046,6 +2051,7 @@ export default function App() {
 
   const commonLocationProps = {
     onLoadFlat: loadFlatPage,
+    folderSummary,
     deleteCheckSet,
     deleteCheckValidation,
     onAddDeleteCheck: addToDeleteCheck,

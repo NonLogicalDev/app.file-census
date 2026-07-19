@@ -28,6 +28,7 @@ export default function FileExplorer(props) {
     showScanActions = true,
     deleteCheck,
     deleteCheckPath,
+    folderSummary = null,
     deleteCheckSet = [],
     deleteCheckValidation = null,
     onAddDeleteCheck,
@@ -198,6 +199,15 @@ export default function FileExplorer(props) {
   };
 
   const backupTotals = useMemo(() => {
+    // Prefer the browsed folder's OWN unique-content rollup (from the backend) so
+    // the totals don't double-count content shared across sibling subfolders. It
+    // is null at the scan root / when no cache is ready — then fall back to
+    // summing the visible rows (best available at the root).
+    if (folderSummary) {
+      return scope === 'internal'
+        ? { safe: folderSummary.int_safe_count || 0, warn: folderSummary.int_warn_count || 0, unsafe: folderSummary.int_unsafe_count || 0 }
+        : { safe: folderSummary.safe_count || 0, warn: folderSummary.warn_count || 0, unsafe: folderSummary.unsafe_count || 0 };
+    }
     const totals = { unsafe: 0, warn: 0, safe: 0 };
     for (const row of visibleGridRows) {
       if (row.kind === 'parent') continue;
@@ -207,7 +217,7 @@ export default function FileExplorer(props) {
     }
     return totals;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleGridRows, scope]);
+  }, [visibleGridRows, scope, folderSummary]);
   const hasBackupData = backupTotals.unsafe + backupTotals.warn + backupTotals.safe > 0;
 
   // Delete Check mode shows the staged-set panel; it does NOT hide rows from the
