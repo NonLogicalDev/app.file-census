@@ -103,12 +103,25 @@ export default function FileExplorer(props) {
   const deleteCheckMode = Boolean(props.deleteCheckMode);
   const onSetDeleteCheckMode = props.onSetDeleteCheckMode;
   const [inspected, setInspected] = useState(null);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // Both side panels are manually toggled and persisted. Inspector defaults
+  // CLOSED so the table keeps its width; Folders defaults open.
+  const [inspectorOpen, setInspectorOpen] = useState(
+    () => globalThis.localStorage?.getItem('locations-inspector-open') === '1'
+  );
+  const [foldersOpen, setFoldersOpen] = useState(
+    () => globalThis.localStorage?.getItem('locations-folders-open') !== '0'
+  );
+  useEffect(() => {
+    globalThis.localStorage?.setItem('locations-inspector-open', inspectorOpen ? '1' : '0');
+  }, [inspectorOpen]);
+  useEffect(() => {
+    globalThis.localStorage?.setItem('locations-folders-open', foldersOpen ? '1' : '0');
+  }, [foldersOpen]);
   // Stable handler so the memoized FileGrid isn't re-rendered by a fresh
-  // function identity on every FileExplorer render.
+  // function identity on every FileExplorer render. Sets the inspected file but
+  // does NOT auto-open the panel (manual expand only).
   const handleInspectRow = useCallback((entry) => {
     setInspected(entry);
-    setInspectorOpen(true);
   }, []);
   // Exact staged member paths (for membership-aware row menus).
   const stagedMemberPaths = useMemo(() => new Set(deleteCheckSet.map((m) => m.path)), [deleteCheckSet]);
@@ -522,9 +535,19 @@ export default function FileExplorer(props) {
           </button>
           <button
             type="button"
+            className={`${ctrlBtn} ${foldersOpen ? 'bg-surface text-text' : ''}`}
+            onClick={() => setFoldersOpen((open) => !open)}
+            aria-pressed={foldersOpen}
+            title={foldersOpen ? 'Collapse the Folders pane' : 'Show the Folders pane'}
+          >
+            <Icon name="folder" className="h-3.5 w-3.5" /> Folders
+          </button>
+          <button
+            type="button"
             className={`${ctrlBtn} ${inspectorOpen ? 'bg-surface text-text' : ''}`}
             onClick={() => setInspectorOpen((open) => !open)}
             aria-pressed={inspectorOpen}
+            title={inspectorOpen ? 'Collapse the Inspector panel' : 'Show the Inspector panel (details for the clicked row)'}
           >
             <Icon name="sidebarOpen" className="h-3.5 w-3.5" /> Inspector
           </button>
@@ -709,29 +732,40 @@ export default function FileExplorer(props) {
           {breadcrumbBar}
           <div
             className="grid min-h-0 flex-1"
-            style={{ gridTemplateColumns: inspectorOpen ? `${foldersWidth}px minmax(0,1fr) 320px` : `${foldersWidth}px minmax(0,1fr)` }}
+            style={{
+              // Both side panels are optional: [folders?] table [inspector?].
+              gridTemplateColumns: [
+                foldersOpen ? `${foldersWidth}px` : null,
+                'minmax(0,1fr)',
+                inspectorOpen ? '320px' : null
+              ]
+                .filter(Boolean)
+                .join(' ')
+            }}
           >
-            <div className="relative flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
-              <DirectoryTree
-                nodes={directoryTreeNodes}
-                expandedPaths={directoryTreeExpandedPaths}
-                loadingPaths={directoryTreeLoadingPaths}
-                selectedPath={selectedPath}
-                onToggle={onToggleDirectoryTree}
-                onSelect={onLoadTree}
-                onLoadMore={onLoadMoreDirectoryTree}
-              />
-              {/* Drag handle to resize the Folders pane. */}
-              <div
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize folders pane"
-                onMouseDown={startFoldersResize}
-                className="group absolute -right-1 top-0 z-[3] h-full w-2 cursor-col-resize select-none"
-              >
-                <span className="absolute right-[3px] top-0 h-full w-px bg-border-strong transition-colors group-hover:w-[2px] group-hover:bg-accent" />
+            {foldersOpen && (
+              <div className="relative flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar-bg">
+                <DirectoryTree
+                  nodes={directoryTreeNodes}
+                  expandedPaths={directoryTreeExpandedPaths}
+                  loadingPaths={directoryTreeLoadingPaths}
+                  selectedPath={selectedPath}
+                  onToggle={onToggleDirectoryTree}
+                  onSelect={onLoadTree}
+                  onLoadMore={onLoadMoreDirectoryTree}
+                />
+                {/* Drag handle to resize the Folders pane. */}
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize folders pane"
+                  onMouseDown={startFoldersResize}
+                  className="group absolute -right-1 top-0 z-[3] h-full w-2 cursor-col-resize select-none"
+                >
+                  <span className="absolute right-[3px] top-0 h-full w-px bg-border-strong transition-colors group-hover:w-[2px] group-hover:bg-accent" />
+                </div>
               </div>
-            </div>
+            )}
             <section className="flex min-w-0 flex-col">
               {deleteCheckMode && deleteCheckBar}
               {resultsTable}

@@ -354,6 +354,18 @@ Decisions:
 - Row menu becomes membership-aware: staged member rows offer "Remove from
   Delete Check", others "Add to Delete Check".
 
+## Collapsible side panels (user steering 2026-07-19 ~15:00, corrected)
+
+Steering: the Inspector takes too much width from the table — make it a
+separate RIGHT-side panel that must be manually expanded (default closed).
+The Folders pane must be collapsible too.
+Decisions: Inspector stays a right column but defaults CLOSED and only opens
+via the toolbar toggle (persisted `locations-inspector-open`); row-click sets
+the inspected file but does NOT auto-open the panel. Folders gets a toolbar
+toggle too (default open, persisted `locations-folders-open`); collapsed, the
+left column disappears entirely. Grid columns are built dynamically from the
+two toggles, so with both closed the table spans the full width.
+
 ## Mode-rework work log 2026-07-19 (~14:40) — CDP-verified live (`80900c6`)
 
 - [x] deleteCheckBar above the table (Browse+Flat); side panel removed;
