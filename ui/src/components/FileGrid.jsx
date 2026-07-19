@@ -816,7 +816,7 @@ function NameCell({ fullPathName, row, value, expandableFolders = false, onToggl
   const expanded = canExpand && row.getIsExpanded();
   return (
     <span className={fileNameCellClassName({ kind: entry.kind })} style={indent}>
-      {canExpand && (
+      {canExpand ? (
         <button
           type="button"
           aria-label={`${expanded ? 'Collapse' : 'Expand'} ${entry.name} inline`}
@@ -831,7 +831,11 @@ function NameCell({ fullPathName, row, value, expandableFolders = false, onToggl
         >
           <Icon name={expanded ? 'chevronDown' : 'chevronRight'} className="h-3 w-3" />
         </button>
-      )}
+      ) : expandableFolders && !fullPathName ? (
+        // Non-expandable rows (files, ../) reserve the chevron's slot so every
+        // icon in the column lines up regardless of row kind.
+        <span className="h-4 w-4 flex-none" aria-hidden="true" />
+      ) : null}
       <Icon name={iconName} className={fileKindIconClassName} />
       <span className={fileNameLabelClassName}>{label}</span>
     </span>
