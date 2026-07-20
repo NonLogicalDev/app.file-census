@@ -336,7 +336,17 @@ function FileInfoModal(props) {
         <div className={panelTitleClassName}>
           <div className={panelTitleTextClassName}>
             <h2>File info</h2>
-            <p className={panelTitleSubtextClassName}>{occurrenceCount} known {occurrenceCount === 1 ? 'copy' : 'copies'}</p>
+            <p className={panelTitleSubtextClassName}>
+              {occurrenceCount} known {occurrenceCount === 1 ? 'copy' : 'copies'}
+              {!fileInfo.file.blake3 && (
+                <span
+                  className="ml-2 inline-flex items-center gap-1 rounded-full border border-warning bg-warning-soft px-2 py-[1px] text-[10px] font-bold uppercase tracking-[0.03em] text-warning"
+                  title="This file was sparse-hashed — copies are matched by sparse fingerprint + size, not proven byte-identical."
+                >
+                  <Icon name="warning" className="h-3 w-3" /> Sparse match
+                </span>
+              )}
+            </p>
           </div>
           <Toolbar className={actionToolbarClassName}>
             <Button type="button" variant="secondary" onClick={() => props.onRevealFileInScan?.(fileInfo.file)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal File</Button>
@@ -347,9 +357,9 @@ function FileInfoModal(props) {
         <SegmentedTabs role="tablist" aria-label="File details sections">
           {[
             ['preview', 'Preview'],
+            ['locations', 'Locations'],
             ['metadata', 'Metadata'],
-            ['exif', 'EXIF'],
-            ['locations', 'Locations']
+            ['exif', 'EXIF']
           ].map(([id, label]) => (
             <SegmentedTab
               key={id}
@@ -475,16 +485,29 @@ function FileInfoModal(props) {
                               {scan.occurrences.length} {scan.occurrences.length === 1 ? 'path' : 'paths'}
                             </span>
                           </button>
-                          {!scanCollapsed && scan.occurrences.map((occurrence) => (
-                            <div className={occurrencePathRowClassName} key={occurrence.path}>
-                              <code className={occurrencePathTextClassName}>{occurrence.path}</code>
-                              <span className="whitespace-nowrap text-[11px] text-text-tertiary">{when(occurrence.mtime)}</span>
-                              <Toolbar className={actionToolbarClassName}>
-                                <Button type="button" variant="secondary" onClick={() => props.onOpenOccurrence(occurrence)} disabled={busy} icon={<Icon name="openFile" />}>Open</Button>
-                                <Button type="button" variant="secondary" onClick={() => props.onRevealOccurrence(occurrence)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal</Button>
-                              </Toolbar>
+                          {!scanCollapsed && (
+                            <div className="overflow-hidden rounded-ui border border-border">
+                              {/* Column header row */}
+                              <div className="grid grid-cols-[minmax(0,1fr)_130px_150px] items-center gap-3 border-b border-border bg-surface-muted px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.05em] text-text-tertiary max-[720px]:grid-cols-[minmax(0,1fr)_auto]">
+                                <span>Path</span>
+                                <span className="max-[720px]:hidden">Modified</span>
+                                <span className="text-right">Actions</span>
+                              </div>
+                              {scan.occurrences.map((occurrence, index) => (
+                                <div
+                                  key={occurrence.path}
+                                  className={`grid grid-cols-[minmax(0,1fr)_130px_150px] items-center gap-3 px-2.5 py-1.5 max-[720px]:grid-cols-[minmax(0,1fr)_auto] ${index % 2 ? 'bg-surface' : 'bg-surface-subtle'}`}
+                                >
+                                  <code className="min-w-0 truncate font-mono text-[11px] text-muted-strong" title={occurrence.path}>{occurrence.path}</code>
+                                  <span className="whitespace-nowrap text-[11px] text-text-tertiary max-[720px]:hidden">{when(occurrence.mtime)}</span>
+                                  <Toolbar className={`${actionToolbarClassName} justify-end`}>
+                                    <Button type="button" size="sm" variant="secondary" onClick={() => props.onOpenOccurrence(occurrence)} disabled={busy} icon={<Icon name="openFile" />}>Open</Button>
+                                    <Button type="button" size="sm" variant="secondary" onClick={() => props.onRevealOccurrence(occurrence)} disabled={busy} icon={<Icon name="revealFile" />}>Reveal</Button>
+                                  </Toolbar>
+                                </div>
+                              ))}
                             </div>
-                          ))}
+                          )}
                         </div>
                       );
                     })}
