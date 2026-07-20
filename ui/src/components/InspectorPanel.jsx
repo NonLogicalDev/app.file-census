@@ -16,7 +16,11 @@ export default function InspectorPanel({
   onInspectFile,
   onOpenFile,
   onRevealFile,
-  onLoadFilePreview
+  onLoadFilePreview,
+  onLoadAnnotations,
+  onSaveAnnotations,
+  onDeleteNote,
+  onSetKeyedNote
 }) {
   // Preview/EXIF disclosure sections, persisted. Data loads lazily: only
   // while a section is expanded, and only for fully hashed file rows
@@ -84,6 +88,119 @@ export default function InspectorPanel({
     const step = event.shiftKey ? 48 : 16;
     const direction = event.key === 'ArrowDown' ? 1 : -1;
     setPreviewHeight((current) => clampPreviewHeight(current + direction * step));
+  }
+
+  // Tags + namespaced notes for the inspected occurrence. Fetch is debounced
+  // like the preview so held arrow keys don't fire a request per row; edits
+  // save through files.annotations.set and take the server response as truth.
+  const [annotationsOpen, setAnnotationsOpen] = useState(
+    () => globalThis.localStorage?.getItem('locations-inspector-annotations-open') !== '0'
+  );
+  useEffect(() => {
+    globalThis.localStorage?.setItem('locations-inspector-annotations-open', annotationsOpen ? '1' : '0');
+  }, [annotationsOpen]);
+  const [annotations, setAnnotations] = useState(null);
+  const [tagDraft, setTagDraft] = useState('');
+  const [noteDraft, setNoteDraft] = useState('');
+  const annotationsKey = inspected && (inspected.kind === 'file' || inspected.kind === 'dir')
+    ? `${inspected.scan_id || ''}:${inspected.path}`
+    : null;
+  const annotationsKeyRef = useRef(null);
+  const noteSaveTimer = useRef(null);
+  useEffect(() => {
+    if (!annotationsOpen || !annotationsKey) return undefined;
+    if (typeof onLoadAnnotations !== 'function') return undefined;
+    if (annotationsKeyRef.current === annotationsKey) return undefined;
+    let stale = false;
+    const timer = setTimeout(() => {
+      if (stale) return;
+      annotationsKeyRef.current = annotationsKey;
+      onLoadAnnotations(inspected)
+        .then((data) => {
+          if (stale || !data) return;
+          setAnnotations({ key: annotationsKey, ...data });
+          setTagDraft('');
+          setNoteDraft(data.notes?.find((note) => note.key === '')?.content || '');
+          setKeyedDrafts({});
+          setAddingNote(false);
+        })
+        .catch(() => {
+          if (!stale) annotationsKeyRef.current = null;
+        });
+    }, 180);
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- inspected is keyed by annotationsKey
+  }, [annotationsOpen, annotationsKey, onLoadAnnotations]);
+  const currentAnnotations = annotations && annotations.key === annotationsKey ? annotations : null;
+  function applyAnnotations(data) {
+    if (data) {
+      setAnnotations({ key: annotationsKey, ...data });
+    }
+  }
+  function commitTags(nextTags) {
+    onSaveAnnotations?.(inspected, { tags: nextTags }).then(applyAnnotations).catch(() => {});
+  }
+  function addTagFromDraft() {
+    const tag = tagDraft.trim();
+    if (!tag || !currentAnnotations) return;
+    setTagDraft('');
+    if (currentAnnotations.tags.includes(tag)) return;
+    commitTags([...currentAnnotations.tags, tag]);
+  }
+  function scheduleNoteSave(value) {
+    setNoteDraft(value);
+    if (noteSaveTimer.current) clearTimeout(noteSaveTimer.current);
+    noteSaveTimer.current = setTimeout(() => {
+      onSaveAnnotations?.(inspected, { note: value }).then(applyAnnotations).catch(() => {});
+    }, 600);
+  }
+  function flushNoteSave() {
+    if (noteSaveTimer.current) {
+      clearTimeout(noteSaveTimer.current);
+      noteSaveTimer.current = null;
+      onSaveAnnotations?.(inspected, { note: noteDraft }).then(applyAnnotations).catch(() => {});
+    }
+  }
+  // Keyed TEXT notes are editable in place (binary stays delete-only) and new
+  // keyed notes can be added via the inline form.
+  const [keyedDrafts, setKeyedDrafts] = useState({});
+  const keyedSaveTimers = useRef({});
+  const [addingNote, setAddingNote] = useState(false);
+  const [newNoteKey, setNewNoteKey] = useState('');
+  const [newNoteContent, setNewNoteContent] = useState('');
+  function keyedDraftValue(note) {
+    return keyedDrafts[note.key] !== undefined ? keyedDrafts[note.key] : note.content || '';
+  }
+  function scheduleKeyedSave(key, value) {
+    setKeyedDrafts((drafts) => ({ ...drafts, [key]: value }));
+    if (keyedSaveTimers.current[key]) clearTimeout(keyedSaveTimers.current[key]);
+    keyedSaveTimers.current[key] = setTimeout(() => {
+      delete keyedSaveTimers.current[key];
+      onSetKeyedNote?.(inspected, key, value).then(applyAnnotations).catch(() => {});
+    }, 600);
+  }
+  function flushKeyedSave(key) {
+    if (keyedSaveTimers.current[key]) {
+      clearTimeout(keyedSaveTimers.current[key]);
+      delete keyedSaveTimers.current[key];
+      onSetKeyedNote?.(inspected, key, keyedDrafts[key] ?? '').then(applyAnnotations).catch(() => {});
+    }
+  }
+  function addKeyedNote() {
+    const key = newNoteKey.trim();
+    const content = newNoteContent.trim();
+    if (!key || !content) return;
+    onSetKeyedNote?.(inspected, key, content)
+      .then((data) => {
+        applyAnnotations(data);
+        setAddingNote(false);
+        setNewNoteKey('');
+        setNewNoteContent('');
+      })
+      .catch(() => {});
   }
 
   const [inspectedPreview, setInspectedPreview] = useState(null);
@@ -261,6 +378,140 @@ export default function InspectorPanel({
             <InspectorField label="Modified" value={formatInspectorDate(inspected.mtime)} />
             {activeScan && <InspectorField label="Scan" value={activeScan.nickname || activeScan.id} />}
           </dl>
+          <InspectorSection
+            label="Tags & Notes"
+            open={annotationsOpen}
+            onToggle={() => setAnnotationsOpen((open) => !open)}
+          >
+            {!currentAnnotations ? (
+              <p className="m-0 text-[11px] text-text-tertiary">Loading…</p>
+            ) : (
+              <div className="grid gap-2">
+                {/* Tag pills + inline add input (Enter/comma commits; Backspace
+                    on an empty input removes the last tag). */}
+                <div
+                  className="flex min-h-[30px] flex-wrap items-center gap-1 rounded-md border border-border bg-surface-subtle px-1.5 py-1"
+                  onClick={(event) => event.currentTarget.querySelector('input')?.focus()}
+                >
+                  {currentAnnotations.tags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-accent-line bg-accent-soft px-2 py-[1px] text-[11px] text-accent"
+                    >
+                      <span className="min-w-0 truncate">{tag}</span>
+                      <button
+                        type="button"
+                        aria-label={`Remove tag ${tag}`}
+                        className="grid h-3.5 w-3.5 flex-none place-items-center rounded-full text-accent transition-colors hover:bg-accent hover:text-white"
+                        onClick={() => commitTags(currentAnnotations.tags.filter((existing) => existing !== tag))}
+                      >
+                        <Icon name="close" className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    className="min-w-[72px] flex-1 border-0 bg-transparent text-[11px] text-text outline-none placeholder:text-text-tertiary"
+                    placeholder={currentAnnotations.tags.length ? 'Add tag…' : 'Add tags (Enter to add)…'}
+                    value={tagDraft}
+                    onChange={(event) => setTagDraft(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ',') {
+                        event.preventDefault();
+                        addTagFromDraft();
+                      } else if (event.key === 'Backspace' && !tagDraft && currentAnnotations.tags.length) {
+                        commitTags(currentAnnotations.tags.slice(0, -1));
+                      }
+                      event.stopPropagation();
+                    }}
+                    onBlur={addTagFromDraft}
+                  />
+                </div>
+                {/* Default note (key ''): autosaves as you type. */}
+                <textarea
+                  className="min-h-[64px] w-full resize-y rounded-md border border-border bg-surface-subtle px-2 py-1.5 text-[11px] leading-relaxed text-text outline-none placeholder:text-text-tertiary focus:border-border-strong"
+                  placeholder="Add a note for this file…"
+                  value={noteDraft}
+                  onChange={(event) => scheduleNoteSave(event.currentTarget.value)}
+                  onBlur={flushNoteSave}
+                  onKeyDown={(event) => event.stopPropagation()}
+                />
+                {/* Add a new keyed text note. */}
+                {addingNote ? (
+                  <div className="grid gap-1.5 rounded-md border border-border bg-surface px-2 py-1.5">
+                    <input
+                      className="rounded border border-border bg-surface-subtle px-1.5 py-1 text-[11px] text-text outline-none placeholder:text-text-tertiary focus:border-border-strong"
+                      placeholder="key (e.g. review/verdict)"
+                      value={newNoteKey}
+                      onChange={(event) => setNewNoteKey(event.currentTarget.value)}
+                      onKeyDown={(event) => event.stopPropagation()}
+                    />
+                    <textarea
+                      className="min-h-[44px] resize-y rounded border border-border bg-surface-subtle px-1.5 py-1 text-[11px] text-text outline-none placeholder:text-text-tertiary focus:border-border-strong"
+                      placeholder="note text…"
+                      value={newNoteContent}
+                      onChange={(event) => setNewNoteContent(event.currentTarget.value)}
+                      onKeyDown={(event) => event.stopPropagation()}
+                    />
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        className="inline-flex h-6 items-center gap-1 rounded-md border border-border bg-surface-subtle px-2 text-[11px] text-muted transition-colors hover:bg-surface hover:text-text disabled:opacity-40"
+                        disabled={!newNoteKey.trim() || !newNoteContent.trim()}
+                        onClick={addKeyedNote}
+                      >
+                        <Icon name="check" className="h-3 w-3" /> Add note
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex h-6 items-center rounded-md px-2 text-[11px] text-text-tertiary transition-colors hover:text-text"
+                        onClick={() => setAddingNote(false)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="inline-flex h-6 w-fit items-center gap-1 rounded-md px-1 text-[11px] text-text-tertiary transition-colors hover:text-text"
+                    onClick={() => setAddingNote(true)}
+                  >
+                    <Icon name="add" className="h-3 w-3" /> Add keyed note
+                  </button>
+                )}
+                {/* Namespaced notes: TEXT notes edit in place; binary notes
+                    show existence only — delete is the sole action. */}
+                {currentAnnotations.notes.filter((note) => note.key !== '').map((note) => (
+                  <div key={note.key} className="rounded-md border border-border bg-surface px-2 py-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <code className="min-w-0 truncate text-[10px] text-muted-strong">{note.key}</code>
+                      <span className="flex-none rounded-full border border-border px-1.5 text-[9px] uppercase text-text-tertiary">{note.content_type}</span>
+                      <button
+                        type="button"
+                        aria-label={`Delete note ${note.key}`}
+                        className="ml-auto grid h-4 w-4 flex-none place-items-center rounded text-text-tertiary transition-colors hover:text-danger"
+                        onClick={() => onDeleteNote?.(inspected, note.key).then(applyAnnotations).catch(() => {})}
+                      >
+                        <Icon name="delete" className="h-3 w-3" />
+                      </button>
+                    </div>
+                    {note.content_type === 'text' ? (
+                      <textarea
+                        className="mt-1 min-h-[44px] w-full resize-y rounded border border-transparent bg-transparent px-1 py-0.5 text-[11px] leading-relaxed text-muted-strong outline-none focus:border-border-strong focus:bg-surface-subtle"
+                        aria-label={`Note ${note.key}`}
+                        value={keyedDraftValue(note)}
+                        onChange={(event) => scheduleKeyedSave(note.key, event.currentTarget.value)}
+                        onBlur={() => flushKeyedSave(note.key)}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      />
+                    ) : (
+                      <p className="mb-0 mt-1 text-[10px] italic text-text-tertiary">Binary content (not rendered)</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </InspectorSection>
           <InspectorSection
             label="EXIF"
             open={exifOpen}

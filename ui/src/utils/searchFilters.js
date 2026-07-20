@@ -6,6 +6,7 @@ export const SEARCH_FILTER_TERMS = [
   { value: 'location_slug', label: 'Location slug', type: 'location' },
   { value: 'location_name', label: 'Location name', type: 'string' },
   { value: 'kind', label: 'Kind', type: 'kind' },
+  { value: 'tag', label: 'Tag', type: 'string' },
   { value: 'mtime', label: 'Modified', type: 'date' },
   { value: 'ctime', label: 'Created', type: 'date' }
 ];

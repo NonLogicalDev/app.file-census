@@ -410,6 +410,42 @@ impl AppCore {
                 let params: FileOccurrencesParams = decode_params(params)?;
                 file_details_page(&self.db, &params)
             }
+            "files.annotations.get" => {
+                let params: FilePathActionParams = decode_params(params)?;
+                Ok(serde_json::to_value(
+                    self.db.file_annotations(&params.scan_id, &params.path)?,
+                )?)
+            }
+            "files.annotations.set" => {
+                let params: FileAnnotationsSetParams = decode_params(params)?;
+                Ok(serde_json::to_value(self.db.set_file_annotations(
+                    &params.scan_id,
+                    &params.path,
+                    params.tags.as_deref(),
+                    params.note.as_deref(),
+                )?)?)
+            }
+            "files.note.set" => {
+                let params: FileNoteSetParams = decode_params(params)?;
+                self.db.set_file_note(
+                    &params.scan_id,
+                    &params.path,
+                    &params.key,
+                    "text",
+                    params.content.as_bytes(),
+                )?;
+                Ok(serde_json::to_value(
+                    self.db.file_annotations(&params.scan_id, &params.path)?,
+                )?)
+            }
+            "files.note.delete" => {
+                let params: FileNoteDeleteParams = decode_params(params)?;
+                self.db
+                    .set_file_note(&params.scan_id, &params.path, &params.key, "text", b"")?;
+                Ok(serde_json::to_value(
+                    self.db.file_annotations(&params.scan_id, &params.path)?,
+                )?)
+            }
             "files.preview" => {
                 let params: FileOccurrencesParams = decode_params(params)?;
                 Ok(serde_json::to_value(media::file_preview(
@@ -899,6 +935,28 @@ struct TreeRpcParams {
 struct FindQuery {
     q: String,
     limit: Option<u32>,
+}
+#[derive(Deserialize)]
+struct FileNoteDeleteParams {
+    scan_id: String,
+    path: String,
+    key: String,
+}
+#[derive(Deserialize)]
+struct FileNoteSetParams {
+    scan_id: String,
+    path: String,
+    key: String,
+    content: String,
+}
+#[derive(Deserialize)]
+struct FileAnnotationsSetParams {
+    scan_id: String,
+    path: String,
+    /// None = leave tags untouched; Some(list) = replace the whole set.
+    tags: Option<Vec<String>>,
+    /// None = leave note untouched; Some("") = delete the note.
+    note: Option<String>,
 }
 #[derive(Deserialize)]
 struct FileOccurrencesParams {

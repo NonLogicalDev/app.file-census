@@ -1951,6 +1951,29 @@ export default function App() {
     }
   }, [rpc]);
 
+  // Per-occurrence tags + namespaced notes (Inspector "Tags & Notes"). All
+  // stable identities; the panel debounces fetches itself.
+  const loadFileAnnotations = useCallback((entry) => {
+    const scanId = entry?.scan_id || latest.current.selectedScanId;
+    if (!scanId || !entry?.path) return Promise.resolve(null);
+    return rpc('files.annotations.get', { scan_id: scanId, path: entry.path });
+  }, [rpc]);
+  const saveFileAnnotations = useCallback((entry, patch) => {
+    const scanId = entry?.scan_id || latest.current.selectedScanId;
+    if (!scanId || !entry?.path) return Promise.resolve(null);
+    return rpc('files.annotations.set', { scan_id: scanId, path: entry.path, ...patch });
+  }, [rpc]);
+  const deleteFileNote = useCallback((entry, key) => {
+    const scanId = entry?.scan_id || latest.current.selectedScanId;
+    if (!scanId || !entry?.path) return Promise.resolve(null);
+    return rpc('files.note.delete', { scan_id: scanId, path: entry.path, key });
+  }, [rpc]);
+  const setKeyedFileNote = useCallback((entry, key, content) => {
+    const scanId = entry?.scan_id || latest.current.selectedScanId;
+    if (!scanId || !entry?.path) return Promise.resolve(null);
+    return rpc('files.note.set', { scan_id: scanId, path: entry.path, key, content });
+  }, [rpc]);
+
   // Verdicts TSV export. Web: browser download via the HTTP endpoint.
   // Desktop: no HTTP server, so a native save dialog writes the file.
   async function exportVerdicts({ scanId, path, backup, scope }) {
@@ -2673,6 +2696,10 @@ export default function App() {
           onOpenFile={openFileInSystem}
           onRevealFile={revealFileInSystem}
           onLoadFilePreview={loadFilePreview}
+          onLoadAnnotations={loadFileAnnotations}
+          onSaveAnnotations={saveFileAnnotations}
+          onDeleteNote={deleteFileNote}
+          onSetKeyedNote={setKeyedFileNote}
         />
       ) : null}
       rightRailOpen={inspectorOpen}

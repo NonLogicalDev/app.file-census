@@ -44,6 +44,7 @@ pub enum FileSearchTerm {
     LocationSlug,
     LocationName,
     Kind,
+    Tag,
     Ctime,
     Mtime,
 }

@@ -70,6 +70,10 @@ pub enum Command {
     Dupes(DupesArgs),
     /// Show exact content duplicate groups.
     Duplicates(DuplicatesCommand),
+    /// Query user tags on files (add them in the UI Inspector).
+    Tags(TagsCommand),
+    /// Query user notes on files (add them in the UI Inspector).
+    Notes(NotesCommand),
     /// Build cached thumbnails.
     Thumbnails(ThumbnailsCommand),
     /// Run optional file enrichment processors (currently unavailable).
@@ -665,6 +669,14 @@ pub fn run_cli(cli: Cli, db_path: PathBuf) -> Result<RunOutcome> {
             run_duplicates(Database::open(&db_path)?, command, cli.json)?;
             Ok(RunOutcome::Done)
         }
+        Command::Tags(command) => {
+            run_tags(Database::open(&db_path)?, command, cli.json)?;
+            Ok(RunOutcome::Done)
+        }
+        Command::Notes(command) => {
+            run_notes(Database::open(&db_path)?, command, cli.json)?;
+            Ok(RunOutcome::Done)
+        }
         Command::Thumbnails(command) => {
             run_thumbnails(Database::open(&db_path)?, command, cli.json)?;
             Ok(RunOutcome::Done)
@@ -772,6 +784,14 @@ fn command_path(command: &Command) -> &'static str {
             DuplicatesSubcommand::List(_) => "duplicates.list",
             DuplicatesSubcommand::Rebuild => "duplicates.rebuild",
         },
+        Command::Tags(command) => match &command.command {
+            TagsSubcommand::List => "tags.list",
+            TagsSubcommand::Find(_) => "tags.find",
+        },
+        Command::Notes(command) => match &command.command {
+            NotesSubcommand::List => "notes.list",
+            NotesSubcommand::Set(_) => "notes.set",
+        },
         Command::Thumbnails(command) => match &command.command {
             ThumbnailsSubcommand::Build(_) => "thumbnails.build",
         },
@@ -779,6 +799,112 @@ fn command_path(command: &Command) -> &'static str {
             FileExtraInfoSubcommand::Exif(_) => "file-extra-info.exif",
         },
         Command::Serve(_) => "serve",
+    }
+}
+
+#[derive(Args)]
+pub struct TagsCommand {
+    #[command(subcommand)]
+    command: TagsSubcommand,
+}
+
+#[derive(Subcommand)]
+enum TagsSubcommand {
+    /// List every tag with how many files carry it.
+    List,
+    /// List every tagged occurrence (location, scan, path, note) for a tag.
+    Find(TagsFindArgs),
+}
+
+#[derive(Args)]
+struct TagsFindArgs {
+    /// The tag to search for (any UTF-8 string).
+    tag: String,
+}
+
+#[derive(Args)]
+pub struct NotesCommand {
+    #[command(subcommand)]
+    command: NotesSubcommand,
+}
+
+#[derive(Subcommand)]
+enum NotesSubcommand {
+    /// List every note (text previews; binary notes show key + type only).
+    List,
+    /// Write (or clear, with empty content) a text note on one occurrence.
+    Set(NotesSetArgs),
+}
+
+#[derive(Args)]
+struct NotesSetArgs {
+    /// Scan id the path belongs to.
+    scan_id: String,
+    /// Scan-relative path to annotate.
+    path: String,
+    /// Note text; empty deletes the note at this key.
+    content: String,
+    /// Note namespace; '' is the default Inspector note.
+    #[arg(long, default_value = "")]
+    key: String,
+}
+
+fn run_tags(db: Database, command: TagsCommand, json: bool) -> Result<()> {
+    match command.command {
+        TagsSubcommand::List => {
+            let rows = db.tags_overview()?;
+            emit(&rows, json, |rows| {
+                for (tag, count) in rows {
+                    println!("{count}\t{tag}");
+                }
+                Ok(())
+            })
+        }
+        TagsSubcommand::Find(args) => {
+            let rows = db.files_with_tag(&args.tag)?;
+            emit(&rows, json, |rows| {
+                for row in rows {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        row.location_slug,
+                        row.scan_id,
+                        row.path,
+                        row.note.as_deref().unwrap_or("")
+                    );
+                }
+                Ok(())
+            })
+        }
+    }
+}
+
+fn run_notes(db: Database, command: NotesCommand, json: bool) -> Result<()> {
+    match command.command {
+        NotesSubcommand::List => {
+            let rows = db.notes_overview()?;
+            emit(&rows, json, |rows| {
+                for row in rows {
+                    println!(
+                        "{}\t{}\t{}\t[{}:{}]\t{}",
+                        row.location_slug,
+                        row.scan_id,
+                        row.path,
+                        if row.key.is_empty() { "default" } else { &row.key },
+                        row.content_type,
+                        row.note.as_deref().unwrap_or("<binary>")
+                    );
+                }
+                Ok(())
+            })
+        }
+        NotesSubcommand::Set(args) => {
+            db.set_file_note(&args.scan_id, &args.path, &args.key, "text", args.content.as_bytes())?;
+            let annotations = db.file_annotations(&args.scan_id, &args.path)?;
+            emit(&annotations, json, |annotations| {
+                println!("{} notes on {}", annotations.notes.len(), args.path);
+                Ok(())
+            })
+        }
     }
 }
 

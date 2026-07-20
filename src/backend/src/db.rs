@@ -140,6 +140,10 @@ pub struct FileRow {
     pub mtime: Option<String>,
     pub mode: Option<u32>,
     pub error: Option<String>,
+    /// User tags for this occurrence; populated only when a search filter
+    /// references the `tag` term (kept empty otherwise to avoid per-row cost).
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -443,6 +447,43 @@ pub struct UpdateScanSeed {
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct FileAnnotations {
+    pub tags: Vec<String>,
+    /// All namespaced notes; key '' is the default user note. Binary notes
+    /// list their key/content_type with `content: None` (only text renders).
+    pub notes: Vec<FileNote>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct FileNote {
+    pub key: String,
+    pub content_type: String,
+    pub content: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TaggedFileRow {
+    pub scan_id: String,
+    pub location_slug: String,
+    pub path: String,
+    pub blake3: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NoteRow {
+    pub scan_id: String,
+    pub location_slug: String,
+    pub path: String,
+    pub key: String,
+    pub content_type: String,
+    /// Text content; None for binary notes.
+    pub note: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct Overview {
     pub location_count: u64,
     pub scan_count: u64,
@@ -641,6 +682,35 @@ impl Database {
                 fingerprint TEXT NOT NULL,
                 built_at TEXT NOT NULL
             );
+
+            -- User annotations, keyed by a SINGLE occurrence (scan + path):
+            -- a tag or note marks this file at this path in this scan, so
+            -- offline organization can then be queried via CLI to delete,
+            -- reorganize, or move exactly the marked paths. Any UTF-8 string
+            -- is a valid tag (spaces, unicode, emoji).
+            CREATE TABLE IF NOT EXISTS file_tags (
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (scan_id, path, tag)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag);
+
+            -- Namespaced notes: key '' is the default user note edited in
+            -- the Inspector; external tools may write to their own key
+            -- namespace (content_type 'text' or 'binary'; only text renders
+            -- in the UI).
+            CREATE TABLE IF NOT EXISTS file_notes (
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                key TEXT NOT NULL DEFAULT '',
+                content_type TEXT NOT NULL DEFAULT 'text',
+                content BLOB NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (scan_id, path, key)
+            ) WITHOUT ROWID;
 
             CREATE TABLE IF NOT EXISTS duplicate_cache_runs (
                 id TEXT PRIMARY KEY,
@@ -2150,7 +2220,15 @@ impl Database {
                 selected_location_id.as_deref(),
             )?);
             prepare_excluded_file_ids(&tx, visibility_scan_ids)?;
-            let rows = scan_tree_source_rows(&tx, scan_id, &normalized, ready_run_id)?;
+            let mut rows = scan_tree_source_rows(&tx, scan_id, &normalized, ready_run_id)?;
+            if filter.map(filter_uses_tag).unwrap_or(false) {
+                let tag_map = load_all_file_tags(&tx)?;
+                for row in &mut rows {
+                    if let Some(tags) = tag_map.get(&(row.file.scan_id.clone(), row.file.path.clone())) {
+                        row.file.tags = tags.clone();
+                    }
+                }
+            }
             build_tree_page_entries(rows, &normalized, depth, filter)?
         };
         // Delete Check scope filter: applied before counting/pagination so the
@@ -3096,6 +3174,18 @@ impl Database {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             x
         };
+        let rows = if query.filter.as_ref().map(filter_uses_tag).unwrap_or(false) {
+            let tag_map = load_all_file_tags(&tx)?;
+            let mut rows = rows;
+            for file in &mut rows {
+                if let Some(tags) = tag_map.get(&(file.scan_id.clone(), file.path.clone())) {
+                    file.tags = tags.clone();
+                }
+            }
+            rows
+        } else {
+            rows
+        };
         let mut matches = Vec::new();
         for file in rows {
             let matched = query
@@ -3502,6 +3592,184 @@ impl Database {
         }
         tx.commit()?;
         Ok(out)
+    }
+
+    /// Tags + note for a single occurrence (scan + path). Any UTF-8 string is
+    /// a valid tag (spaces, unicode, emoji); ordering is insertion order.
+    pub fn file_annotations(&self, scan_id: &str, path: &str) -> Result<FileAnnotations> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT tag FROM file_tags WHERE scan_id = ?1 AND path = ?2 ORDER BY position, tag",
+        )?;
+        let tags = stmt
+            .query_map(params![scan_id, path], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut notes_stmt = conn.prepare(
+            "SELECT key, content_type,
+                    CASE WHEN content_type = 'text' THEN CAST(content AS TEXT) END,
+                    updated_at
+             FROM file_notes WHERE scan_id = ?1 AND path = ?2 ORDER BY key",
+        )?;
+        let notes = notes_stmt
+            .query_map(params![scan_id, path], |row| {
+                Ok(FileNote {
+                    key: row.get(0)?,
+                    content_type: row.get(1)?,
+                    content: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(FileAnnotations { tags, notes })
+    }
+
+    /// Writes (or deletes, when `content` is empty) one namespaced note.
+    /// key '' is the default Inspector note; external tools use their own key.
+    pub fn set_file_note(
+        &self,
+        scan_id: &str,
+        path: &str,
+        key: &str,
+        content_type: &str,
+        content: &[u8],
+    ) -> Result<()> {
+        let conn = self.connect()?;
+        if content.is_empty() || (content_type == "text" && String::from_utf8_lossy(content).trim().is_empty()) {
+            conn.execute(
+                "DELETE FROM file_notes WHERE scan_id = ?1 AND path = ?2 AND key = ?3",
+                params![scan_id, path, key],
+            )?;
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO file_notes (scan_id, path, key, content_type, content, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(scan_id, path, key) DO UPDATE SET content_type = excluded.content_type, content = excluded.content, updated_at = excluded.updated_at",
+            params![scan_id, path, key, content_type, content, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Replaces the tag set and/or note for an occurrence. `tags: None` leaves
+    /// tags untouched; `note: None` leaves the note untouched; an empty or
+    /// whitespace-only note deletes it. Tags are trimmed and deduplicated;
+    /// empty tags are dropped.
+    pub fn set_file_annotations(
+        &self,
+        scan_id: &str,
+        path: &str,
+        tags: Option<&[String]>,
+        note: Option<&str>,
+    ) -> Result<FileAnnotations> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        if let Some(tags) = tags {
+            tx.execute(
+                "DELETE FROM file_tags WHERE scan_id = ?1 AND path = ?2",
+                params![scan_id, path],
+            )?;
+            let created_at = Utc::now().to_rfc3339();
+            let mut seen = std::collections::HashSet::new();
+            let mut position: i64 = 0;
+            for tag in tags {
+                let tag = tag.trim();
+                if tag.is_empty() || !seen.insert(tag.to_string()) {
+                    continue;
+                }
+                tx.execute(
+                    "INSERT INTO file_tags (scan_id, path, tag, position, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![scan_id, path, tag, position, created_at],
+                )?;
+                position += 1;
+            }
+        }
+        if let Some(note) = note {
+            if note.trim().is_empty() {
+                tx.execute(
+                    "DELETE FROM file_notes WHERE scan_id = ?1 AND path = ?2 AND key = ''",
+                    params![scan_id, path],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO file_notes (scan_id, path, key, content_type, content, updated_at) VALUES (?1, ?2, '', 'text', ?3, ?4)
+                     ON CONFLICT(scan_id, path, key) DO UPDATE SET content_type = excluded.content_type, content = excluded.content, updated_at = excluded.updated_at",
+                    params![scan_id, path, note.as_bytes(), Utc::now().to_rfc3339()],
+                )?;
+            }
+        }
+        tx.commit()?;
+        self.file_annotations(scan_id, path)
+    }
+
+    /// Every distinct tag with how many occurrences carry it (CLI: `tags list`).
+    pub fn tags_overview(&self) -> Result<Vec<(String, u64)>> {
+        let conn = self.connect()?;
+        let mut stmt =
+            conn.prepare("SELECT tag, COUNT(*) FROM file_tags GROUP BY tag ORDER BY COUNT(*) DESC, tag")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Every occurrence carrying `tag`, with its location and any note
+    /// (CLI: `tags find <tag>` for delete/reorganize/move workflows).
+    pub fn files_with_tag(&self, tag: &str) -> Result<Vec<TaggedFileRow>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT t.scan_id, l.slug, t.path,
+                   (SELECT f.blake3 FROM files f WHERE f.scan_id = t.scan_id AND f.path = t.path) AS blake3,
+                   (SELECT CASE WHEN n.content_type = 'text' THEN CAST(n.content AS TEXT) END
+                    FROM file_notes n WHERE n.scan_id = t.scan_id AND n.path = t.path AND n.key = '') AS note
+            FROM file_tags t
+            JOIN scans s ON s.id = t.scan_id
+            JOIN locations l ON l.id = s.location_id
+            WHERE t.tag = ?1
+            ORDER BY l.slug, t.path
+            "#,
+        )?;
+        let rows = stmt
+            .query_map([tag], |row| {
+                Ok(TaggedFileRow {
+                    scan_id: row.get(0)?,
+                    location_slug: row.get(1)?,
+                    path: row.get(2)?,
+                    blake3: row.get(3)?,
+                    note: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Every note with its occurrence (CLI: `notes list`).
+    pub fn notes_overview(&self) -> Result<Vec<NoteRow>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT n.scan_id, l.slug, n.path, n.key, n.content_type,
+                   CASE WHEN n.content_type = 'text' THEN CAST(n.content AS TEXT) END,
+                   n.updated_at
+            FROM file_notes n
+            JOIN scans s ON s.id = n.scan_id
+            JOIN locations l ON l.id = s.location_id
+            ORDER BY n.updated_at DESC
+            "#,
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(NoteRow {
+                    scan_id: row.get(0)?,
+                    location_slug: row.get(1)?,
+                    path: row.get(2)?,
+                    key: row.get(3)?,
+                    content_type: row.get(4)?,
+                    note: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Cached overview, stale-while-revalidate. Returns the stored snapshot
@@ -4795,6 +5063,7 @@ fn scan_tree_source_rows(
                 mtime: row.get(10)?,
                 mode: row.get(11)?,
                 error: row.get(12)?,
+                tags: Vec::new(),
             },
             duplicate_file_count: row.get(13)?,
             original_file_count: row.get(14)?,
@@ -5944,6 +6213,36 @@ fn filter_matches(filter: &FileSearchFilter, file: &FileRow) -> Result<bool> {
     }
 }
 
+/// True when any node of the filter tree references the `tag` term — the
+/// signal to hydrate FileRow.tags before matching.
+fn filter_uses_tag(filter: &FileSearchFilter) -> bool {
+    if matches!(filter.term, FileSearchTerm::Tag) {
+        return true;
+    }
+    match &filter.expression {
+        FileSearchExpression::Filters(items) => items.iter().any(filter_uses_tag),
+        FileSearchExpression::Filter(inner) => filter_uses_tag(inner),
+        _ => false,
+    }
+}
+
+/// Loads every (scan_id, path) -> tags mapping. The tags table is user-scale
+/// (not scan-scale), so loading it whole is cheap.
+fn load_all_file_tags(conn: &Connection) -> Result<std::collections::HashMap<(String, String), Vec<String>>> {
+    let mut stmt =
+        conn.prepare("SELECT scan_id, path, tag FROM file_tags ORDER BY scan_id, path, position")?;
+    let mut map: std::collections::HashMap<(String, String), Vec<String>> =
+        std::collections::HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    for row in rows {
+        let (scan_id, path, tag) = row?;
+        map.entry((scan_id, path)).or_default().push(tag);
+    }
+    Ok(map)
+}
+
 fn string_filter_matches(filter: &FileSearchFilter, file: &FileRow) -> Result<bool> {
     let expression = search_expression_string("string", &filter.expression)?;
     let normalized_extension;
@@ -6025,6 +6324,7 @@ fn string_values_for_term(term: &FileSearchTerm, file: &FileRow) -> Result<Vec<S
         FileSearchTerm::LocationSlug => vec![file.location_slug.clone()],
         FileSearchTerm::LocationName => vec![file.location_name.clone()],
         FileSearchTerm::Kind => vec![file.kind.clone()],
+        FileSearchTerm::Tag => file.tags.clone(),
         FileSearchTerm::Filter | FileSearchTerm::Ctime | FileSearchTerm::Mtime => {
             anyhow::bail!("unsupported string term")
         }
@@ -6258,6 +6558,7 @@ fn file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         mtime: row.get(10)?,
         mode: row.get(11)?,
         error: row.get(12)?,
+        tags: Vec::new(),
     })
 }
 
@@ -6351,6 +6652,92 @@ mod tests {
             assert_eq!(scan.started_at, started_at.to_rfc3339());
             assert_eq!(scan.status, "running");
         }
+    }
+
+    #[test]
+    fn file_annotations_attach_to_a_single_occurrence() {
+        let root = test_root("file-annotations");
+        let db = Database::open(root.join("state.db")).unwrap();
+        let location = db
+            .add_location(LocationInput {
+                kind: LocationType::Local,
+                name: "Photos".to_string(),
+                slug: "photos".to_string(),
+                root_path: root.join("photos"),
+                notes: None,
+            })
+            .unwrap();
+        let scan_id = db.start_scan(&location, Path::new("/")).unwrap();
+
+        // Empty by default.
+        let empty = db.file_annotations(&scan_id, "a/one.jpg").unwrap();
+        assert!(empty.tags.is_empty());
+        assert!(empty.notes.is_empty());
+
+        // Any UTF-8 works; trims + dedupes; default note (key '') round-trips.
+        let saved = db
+            .set_file_annotations(
+                &scan_id,
+                "a/one.jpg",
+                Some(&[
+                    "keep 📸".to_string(),
+                    "  family photos  ".to_string(),
+                    "keep 📸".to_string(),
+                    "".to_string(),
+                ]),
+                Some("move to /archive next weekend"),
+            )
+            .unwrap();
+        assert_eq!(saved.tags, vec!["keep 📸", "family photos"]);
+        assert_eq!(saved.notes.len(), 1);
+        assert_eq!(saved.notes[0].key, "");
+        assert_eq!(saved.notes[0].content_type, "text");
+        assert_eq!(saved.notes[0].content.as_deref(), Some("move to /archive next weekend"));
+
+        // Scoped to the single occurrence: a sibling path stays clean.
+        let other = db.file_annotations(&scan_id, "a/two.jpg").unwrap();
+        assert!(other.tags.is_empty() && other.notes.is_empty());
+
+        // Namespaced notes: external tools write their own keys; binary notes
+        // are listed (key + type) with content elided.
+        db.set_file_note(&scan_id, "a/one.jpg", "ml/labels", "text", b"cat, beach").unwrap();
+        db.set_file_note(&scan_id, "a/one.jpg", "ml/embedding", "binary", &[1u8, 2, 3]).unwrap();
+        let annotated = db.file_annotations(&scan_id, "a/one.jpg").unwrap();
+        assert_eq!(annotated.notes.len(), 3);
+        let embedding = annotated.notes.iter().find(|n| n.key == "ml/embedding").unwrap();
+        assert_eq!(embedding.content_type, "binary");
+        assert!(embedding.content.is_none());
+        let labels = annotated.notes.iter().find(|n| n.key == "ml/labels").unwrap();
+        assert_eq!(labels.content.as_deref(), Some("cat, beach"));
+
+        // Deleting a namespaced note (empty content) removes just that key;
+        // tags: None leaves tags; empty default note deletes only key ''.
+        db.set_file_note(&scan_id, "a/one.jpg", "ml/embedding", "binary", &[]).unwrap();
+        let cleared = db
+            .set_file_annotations(&scan_id, "a/one.jpg", None, Some("   "))
+            .unwrap();
+        assert_eq!(cleared.tags, vec!["keep 📸", "family photos"]);
+        assert_eq!(cleared.notes.len(), 1);
+        assert_eq!(cleared.notes[0].key, "ml/labels");
+
+        // CLI queries: overview counts + find returns the occurrence.
+        db.set_file_annotations(&scan_id, "a/two.jpg", Some(&["keep 📸".to_string()]), None)
+            .unwrap();
+        let overview = db.tags_overview().unwrap();
+        assert_eq!(overview[0], ("keep 📸".to_string(), 2));
+        let found = db.files_with_tag("keep 📸").unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].location_slug, "photos");
+        assert!(found.iter().any(|row| row.path == "a/one.jpg"));
+        let notes = db.notes_overview().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].key, "ml/labels");
+
+        // Replacing with an empty list clears tags.
+        let none = db
+            .set_file_annotations(&scan_id, "a/one.jpg", Some(&[]), None)
+            .unwrap();
+        assert!(none.tags.is_empty());
     }
 
     #[test]
