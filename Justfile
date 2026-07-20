@@ -69,6 +69,22 @@ desktop-build-appimage:
 desktop-check:
     {{dev}} /bin/sh -c 'npm --prefix ui run build && cargo build -p file-census-native-app'
 
+# Install the release CLI binary into ~/.local/bin (override with PREFIX).
+install-cli prefix=env_var_or_default("PREFIX", `echo "$HOME/.local/bin"`): release
+    mkdir -p "{{prefix}}"
+    install -m 755 target/release/file-census "{{prefix}}/file-census"
+    @echo "installed {{prefix}}/file-census ($("{{prefix}}/file-census" --version 2>/dev/null || echo ok))"
+
+# Build the macOS desktop app bundle and install it into /Applications.
+install-desktop: desktop-build-app
+    #!/usr/bin/env sh
+    set -e
+    APP=$(find target src/native_app/target -type d -name "file-census.app" -path "*bundle/macos*" 2>/dev/null | head -1)
+    if [ -z "$APP" ]; then echo "error: file-census.app bundle not found after build" >&2; exit 1; fi
+    rm -rf /Applications/file-census.app
+    cp -R "$APP" /Applications/
+    echo "installed /Applications/file-census.app (from $APP)"
+
 # Run explicit ignored performance gates for scan/tree/delete hot paths.
 perf-gates:
     {{dev}} cargo test -p file-census-backend --features perf-gates --test perf_gates --release -- --ignored --nocapture
