@@ -29,10 +29,13 @@ test('backup filter is always-on, and the Delete Check SET is a distinct staged 
   assert.match(fileExplorerSource, /dc_safe/);
   assert.match(fileExplorerSource, /would lose last copy/);
   assert.match(fileExplorerSource, /onAddDeleteCheck/);
-  // The Inspector is an app-level right rail; the explorer only hosts the
-  // toggle and forwards row clicks.
-  assert.match(fileExplorerSource, /onToggleInspector/);
+  // The Inspector is an app-level right rail pinned from its own header (no
+  // toggle button in the explorer); the explorer only forwards row clicks.
+  const inspectorPanelSource = readFileSync(join(componentsDir, 'InspectorPanel.jsx'), 'utf8');
+  assert.doesNotMatch(fileExplorerSource, /onToggleInspector/);
   assert.doesNotMatch(fileExplorerSource, /inspectorPane/);
+  assert.match(inspectorPanelSource, /onTogglePin/);
+  assert.match(inspectorPanelSource, /Pin the Inspector open/);
 });
 
 test('clear set is an icon-only confirmed action beside Add to Delete Check', () => {

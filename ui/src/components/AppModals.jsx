@@ -162,6 +162,17 @@ export default function AppModals(props) {
         />
       )}
       {props.showBuildThumbnails && props.buildThumbnailRequest && <BuildThumbnailsModal {...props} />}
+      {props.showFileInfo && !props.fileInfo && (
+        <Modal onClose={() => props.setShowFileInfo(false)}>
+          <ModalSurface className="gap-3">
+            <h2>File info</h2>
+            <p className="flex items-center gap-2 text-muted-strong leading-[1.45]">
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-border-strong" aria-hidden="true" />
+              Loading file details… (Esc to cancel)
+            </p>
+          </ModalSurface>
+        </Modal>
+      )}
       {props.showFileInfo && props.fileInfo && <FileInfoModal {...props} />}
     </>
   );

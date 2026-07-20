@@ -35,7 +35,7 @@ const fileColumns = [
   ['name', 'Name'],
   ['size', 'Size'],
   ['file_count', 'Files'],
-  ['distinct_count', 'Uniq'],
+  ['distinct_count', 'Unique'],
   ['blake3', 'Hash Full'],
   ['blake3_light', 'Hash Light'],
   ['ctime', 'CTime'],
@@ -1883,7 +1883,15 @@ export default function App() {
   async function inspectFile(entry, { allScans = latest.current.fileOccAllScans } = {}) {
     const scanId = entry?.scan_id || latest.current.selectedScanId;
     if (!scanId || !entry?.path || entry.kind !== 'file' || !entry.blake3 || entry.size == null) return;
-    setBusy(true);
+    // Deliberately NOT the global busy flag: files.details can take seconds on
+    // high-occurrence content and must not freeze keyboard nav or the rest of
+    // the UI. The modal opens immediately in a loading state; closing it (or
+    // inspecting something else) invalidates this request's token so a late
+    // response can't pop the modal back open.
+    const token = ++fileInfoRequestToken.current;
+    setFileInfo(null);
+    latest.current.fileInfo = null;
+    setShowFileInfo(true);
     try {
       const details = await rpc('files.details', {
         scan_id: scanId,
@@ -1892,16 +1900,21 @@ export default function App() {
         size: entry.size,
         representative_only: !allScans
       });
+      if (fileInfoRequestToken.current !== token) return;
       const nextFileInfo = { ...details, file: { ...entry, scan_id: scanId } };
       setFileInfo(nextFileInfo);
       latest.current.fileInfo = nextFileInfo;
-      setShowFileInfo(true);
     } catch (error) {
+      if (fileInfoRequestToken.current !== token) return;
       setMessage(error.message);
-    } finally {
-      setBusy(false);
+      setShowFileInfo(false);
     }
   }
+  const fileInfoRequestToken = useRef(0);
+  const closeFileInfo = useCallback((value) => {
+    if (!value) fileInfoRequestToken.current += 1;
+    setShowFileInfo(Boolean(value));
+  }, []);
 
   // Inspector right rail (app-level, docked like the sidebar). The inspected
   // row is App state so the rail survives view re-renders; the handler is
@@ -2269,8 +2282,6 @@ export default function App() {
     onExportVerdicts: exportVerdicts,
     onLoadFolderChildren: loadFolderChildren,
     inspected,
-    inspectorOpen,
-    onToggleInspector: () => setInspectorOpen((open) => !open),
     onInspectRow: handleInspectRow,
     onRequestExcludePath: requestExcludePath,
     onRequestDeletePath: requestDeletePath
@@ -2644,6 +2655,7 @@ export default function App() {
       canChooseDatabase={desktopRuntime}
       onChooseDatabase={chooseDatabaseLocation}
       locationList={locationList}
+      locationsLoading={refreshing || wsStatus === 'connecting'}
       selectedLocationSlug={selectedLocationSlug}
       selectedScanId={selectedScanId}
       onChooseLocation={chooseLocation}
@@ -2655,7 +2667,8 @@ export default function App() {
         <InspectorPanel
           inspected={inspected}
           activeScan={selectedScanView}
-          onClose={() => setInspectorOpen(false)}
+          pinned={inspectorOpen}
+          onTogglePin={() => setInspectorOpen((open) => !open)}
           onInspectFile={inspectFile}
           onOpenFile={openFileInSystem}
           onRevealFile={revealFileInSystem}
@@ -2748,7 +2761,7 @@ export default function App() {
         showScanExcludes={showScanExcludes}
         setShowScanExcludes={setShowScanExcludes}
         showFileInfo={showFileInfo}
-        setShowFileInfo={setShowFileInfo}
+        setShowFileInfo={closeFileInfo}
         showBuildThumbnails={showBuildThumbnails}
         setShowBuildThumbnails={setShowBuildThumbnails}
         confirmDeleteScanId={confirmDeleteScanId}

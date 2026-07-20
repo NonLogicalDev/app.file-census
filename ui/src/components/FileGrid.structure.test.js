@@ -15,7 +15,8 @@ test('scan file browser exposes folder descendant file counts as a default Files
   assert.match(appSource, /const defaultColumns = \[[^\]]*'size', 'file_count'/);
   assert.match(fileGridSource, /accessorKey: 'file_count'/);
   assert.match(fileGridSource, /header: 'Files'/);
-  assert.match(fileGridSource, /kind === 'parent' \|\| row\.original\.kind === 'placeholder'\) \? '' : getValue\(\) \?\? 0/);
+  // Files renders with locale separators like the Unique column.
+  assert.match(fileGridSource, /kind === 'parent' \|\| row\.original\.kind === 'placeholder'\) \? '' : Number\(getValue\(\) \?\? 0\)\.toLocaleString\(\)/);
 });
 
 test('file grid numeric columns align headers with numeric cell values', () => {

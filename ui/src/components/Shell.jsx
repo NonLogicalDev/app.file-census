@@ -110,6 +110,7 @@ export default function Shell({
   canChooseDatabase,
   onChooseDatabase,
   locationList = [],
+  locationsLoading = false,
   selectedLocationSlug,
   selectedScanId,
   onChooseLocation,
@@ -492,7 +493,16 @@ export default function Shell({
               onSelectScan={(scanId) => onSelectScan(scanId, location.slug)}
             />
           ))}
-          {!locationList.length && <p className="px-[7px] py-2 text-[11px] text-text-tertiary">No locations yet.</p>}
+          {!locationList.length && (
+            locationsLoading ? (
+              <p className="flex items-center gap-1.5 px-[7px] py-2 text-[11px] text-text-tertiary">
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-border-strong" aria-hidden="true" />
+                Loading locations…
+              </p>
+            ) : (
+              <p className="px-[7px] py-2 text-[11px] text-text-tertiary">No locations yet.</p>
+            )
+          )}
         </div>
 
         {/* Running task chip */}

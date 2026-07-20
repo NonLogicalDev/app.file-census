@@ -11,7 +11,8 @@ const inspectorActionButtonClassName =
 export default function InspectorPanel({
   inspected,
   activeScan,
-  onClose,
+  pinned = false,
+  onTogglePin,
   onInspectFile,
   onOpenFile,
   onRevealFile,
@@ -94,27 +95,33 @@ export default function InspectorPanel({
     if ((!previewOpen && !exifOpen) || !previewKey) return undefined;
     if (typeof onLoadFilePreview !== 'function') return undefined;
     if (inspectedPreviewKeyRef.current === previewKey) return undefined;
-    inspectedPreviewKeyRef.current = previewKey;
     let stale = false;
-    setInspectedPreview({ key: previewKey, loading: true });
-    onLoadFilePreview(inspected)
-      .then((data) => {
-        if (stale) return;
-        setInspectedPreview({
-          key: previewKey,
-          loading: false,
-          thumbnail: data?.thumbnail || null,
-          exif: data?.exif || null
+    // Debounced: fetch only after the selection settles, so holding an arrow
+    // key skims rows without queueing a preview request per traversed row.
+    const timer = setTimeout(() => {
+      if (stale) return;
+      inspectedPreviewKeyRef.current = previewKey;
+      setInspectedPreview({ key: previewKey, loading: true });
+      onLoadFilePreview(inspected)
+        .then((data) => {
+          if (stale) return;
+          setInspectedPreview({
+            key: previewKey,
+            loading: false,
+            thumbnail: data?.thumbnail || null,
+            exif: data?.exif || null
+          });
+        })
+        .catch((error) => {
+          if (stale) return;
+          // Allow a retry on the next expand/selection instead of pinning the error.
+          inspectedPreviewKeyRef.current = null;
+          setInspectedPreview({ key: previewKey, loading: false, error: error.message });
         });
-      })
-      .catch((error) => {
-        if (stale) return;
-        // Allow a retry on the next expand/selection instead of pinning the error.
-        inspectedPreviewKeyRef.current = null;
-        setInspectedPreview({ key: previewKey, loading: false, error: error.message });
-      });
+    }, 180);
     return () => {
       stale = true;
+      clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- inspected is keyed by previewKey
   }, [previewOpen, exifOpen, previewKey, onLoadFilePreview]);
@@ -125,11 +132,13 @@ export default function InspectorPanel({
         <span>Inspector</span>
         <button
           type="button"
-          onClick={onClose}
-          className="grid h-5 w-5 place-items-center rounded text-text-tertiary transition-colors hover:text-text"
-          aria-label="Close inspector"
+          onClick={onTogglePin}
+          className={`grid h-5 w-5 place-items-center rounded transition-colors hover:text-text ${pinned ? 'text-accent' : 'text-text-tertiary'}`}
+          aria-pressed={pinned}
+          aria-label={pinned ? 'Unpin inspector (show on hover only)' : 'Pin inspector open'}
+          title={pinned ? 'Unpin — the Inspector collapses to the right edge and shows on hover' : 'Pin the Inspector open as a docked panel'}
         >
-          <Icon name="close" className="h-3.5 w-3.5" />
+          <Icon name="pin" className={`h-3.5 w-3.5 ${pinned ? '' : 'rotate-45'}`} />
         </button>
       </div>
       {inspected ? (

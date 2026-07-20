@@ -14,6 +14,32 @@ import {
 } from './ui/index.jsx';
 import { bytes, isActiveStatus, statusLabel } from '../utils/format.js';
 
+// Becomes true only after `active` has been continuously true for `delay` ms:
+// fast loads never flash an overlay, slow ones get a clear waiting state.
+function useDelayedFlag(active, delay = 200) {
+  const [delayed, setDelayed] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setDelayed(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setDelayed(true), delay);
+    return () => clearTimeout(timer);
+  }, [active, delay]);
+  return delayed;
+}
+
+// Blocking overlay for a table area while a slow directory load resolves.
+function LoadingOverlay({ label = 'Loading folder…' }) {
+  return (
+    <div className="absolute inset-0 z-[5] grid place-items-center bg-bg/70 backdrop-blur-[1px]" aria-busy="true" role="status">
+      <span className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-[12px] text-muted-strong shadow-md">
+        <span className="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-accent" aria-hidden="true" /> {label}
+      </span>
+    </div>
+  );
+}
+
 // Prototype (location.css) chrome, translated to the shared token palette.
 const ctrlBtn =
   'inline-flex h-[30px] items-center gap-1.5 rounded-md border border-border bg-surface-subtle px-2.5 text-[11px] text-muted transition-colors hover:bg-surface hover:text-text disabled:cursor-default disabled:opacity-40 disabled:hover:bg-surface-subtle disabled:hover:text-muted';
@@ -101,12 +127,10 @@ export default function FileExplorer(props) {
   // staged set when it is on); this component only toggles + renders it.
   const deleteCheckMode = Boolean(props.deleteCheckMode);
   const onSetDeleteCheckMode = props.onSetDeleteCheckMode;
-  // The Inspector is an APP-LEVEL right rail now (docked like the sidebar);
-  // this component only reads the inspected row for the highlight, forwards
-  // row clicks, and hosts the toggle button. Folders stays local + persisted.
+  // The Inspector is an APP-LEVEL right rail (docked like the sidebar, pinned
+  // via its own header button); this component only reads the inspected row
+  // for the highlight and forwards row clicks. Folders stays local + persisted.
   const inspected = props.inspected || null;
-  const inspectorOpen = Boolean(props.inspectorOpen);
-  const onToggleInspector = props.onToggleInspector;
   const handleInspectRow = props.onInspectRow;
   const [foldersOpen, setFoldersOpen] = useState(
     () => globalThis.localStorage?.getItem('locations-folders-open') !== '0'
@@ -183,6 +207,11 @@ export default function FileExplorer(props) {
       cancelled = true;
     };
   }, [viewMode, flatKey, flatOffset, onLoadFlat, activeScan, selectedPath, backupFilter, scope, deleteCheckMode]);
+
+  // Slow-navigation waiting states (>200ms): a visible blocking overlay until
+  // the new directory page resolves. Hooks live above the early return.
+  const treeWaiting = useDelayedFlag(Boolean(filesLoading));
+  const flatWaiting = useDelayedFlag(flatLoading && flatOffset === 0);
 
   if (!activeScan) return <p className={emptyTextClassName}>Select or run a scan to browse this location.</p>;
   const selectedCount = selectedGridEntries.length;
@@ -403,6 +432,7 @@ export default function FileExplorer(props) {
       {breadcrumbBar}
       {deleteCheckMode && deleteCheckBar}
       <div className="relative min-h-0 flex-1 overflow-auto">
+        {flatWaiting && <LoadingOverlay label="Loading files…" />}
         <FileGrid
           storageKey="locations-flat"
           rows={flatRows}
@@ -451,6 +481,7 @@ export default function FileExplorer(props) {
 
   const resultsTable = (
     <div className="relative block min-h-[420px] flex-1 overflow-auto bg-bg">
+      {treeWaiting && <LoadingOverlay />}
       <FileGrid
         storageKey="locations-files"
         rows={gridRowsWithChildren}
@@ -568,15 +599,6 @@ export default function FileExplorer(props) {
           </button>
           <button type="button" className={`${ctrlBtn} ${showColumns ? 'bg-surface text-text' : ''}`} onClick={onToggleColumns} aria-expanded={showColumns}>
             <Icon name="columns" className="h-3.5 w-3.5" /> Columns
-          </button>
-          <button
-            type="button"
-            className={`${ctrlBtn} ${inspectorOpen ? 'bg-surface text-text' : ''}`}
-            onClick={() => onToggleInspector?.()}
-            aria-pressed={inspectorOpen}
-            title={inspectorOpen ? 'Collapse the Inspector panel' : 'Show the Inspector panel (details for the clicked row)'}
-          >
-            <Icon name="sidebarOpen" className="h-3.5 w-3.5" /> Inspector
           </button>
         </div>
       </div>

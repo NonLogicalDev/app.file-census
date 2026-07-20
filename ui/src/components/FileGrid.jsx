@@ -833,11 +833,11 @@ function baseColumns(options) {
       size: 76,
       minSize: 60,
       meta: numericColumnMeta,
-      cell: ({ row, getValue }) => (row.original.kind === 'parent' || row.original.kind === 'placeholder') ? '' : getValue() ?? 0
+      cell: ({ row, getValue }) => (row.original.kind === 'parent' || row.original.kind === 'placeholder') ? '' : Number(getValue() ?? 0).toLocaleString()
     },
     {
       accessorKey: 'distinct_count',
-      header: 'Uniq',
+      header: 'Unique',
       size: 72,
       minSize: 56,
       meta: { ...numericColumnMeta, tooltip: 'Distinct contents (unique hashes) in this folder' },
