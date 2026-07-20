@@ -734,6 +734,26 @@ sparse_match; lone→unsafe_last_copy); UI badges Safe/Sparse/Unique on the
 sparse scan; new unit test; 77 backend / 147 UI. NOTE: existing DBs migrate
 on next open + the duplicate cache auto-rebuilds (scope fingerprint changed).
 
+## Task errors + sparse visibility 2026-07-20 (~16:30) — verified (`8ebabee`, `09642ec`)
+
+Batch of user asks: (1) per-task error log on the Tasks page — scans.errors
+RPC pages persisted files.error rows; Errors strip in the task detail pane;
+Tasks page now SEEDED from the scans table so finished scans + their error
+logs survive reload (was session-only); Stop/Pause gated to active statuses.
+(2) Worker-pool bars hidden once a scan is no longer active (they lingered).
+(3) Stale-cache "—" fix: scans.delete/delete_path/locations.delete now spawn
+cache rebuilds (web+native) and the UI reloads the tree on
+duplicate_cache_ready. (4) Sparse threshold takes human units (500MB/1GB/
+1.5gb, bare=MB; CLI takes decimals). (5) Amendment: sparse matching must be
+(hash, exact size) tuples — confirmed already enforced everywhere (plan-064).
+(6) Sparse-only VISIBILITY: cache column sparse_file_count rolled into every
+dir (all three browse paths), scans.sparse_file_count (finalize + backfill),
+"Sparse" table column (default-visible, amber), and a loud amber "N SPARSE"
+pill in the scan header whenever even one sparse-only file exists.
+Receipts: errors strip shows locked.bin permission error after full reload;
+pool bars absent on Ready scans; header pill "1 SPARSE"; SAFE ×2 / SPARSE /
+UNIQUE pills on the fixture. Tests: 77 backend / 147 UI.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
