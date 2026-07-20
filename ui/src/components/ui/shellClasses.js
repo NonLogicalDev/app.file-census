@@ -148,7 +148,11 @@ export function appSidebarClassName({ sidebarHidden = false, sidebarPeeking = fa
     'after:border-r after:border-[var(--sidebar-border)] after:bg-[var(--sidebar-bg)] after:content-[\'\']',
     overlayMode
       ? cn(
-        'fixed left-0 shadow-lg hover:translate-x-0 focus-within:translate-x-0 hover:after:opacity-0 focus-within:after:opacity-0',
+        // Purely JS-state driven (mouse enter/leave -> sidebarPeeking), like the
+        // Inspector rail. No CSS :hover, which otherwise fought the state and
+        // made hover-out feel abrupt/inconsistent. focus-within still opens it
+        // for keyboard users.
+        'fixed left-0 shadow-lg focus-within:translate-x-0 focus-within:after:opacity-0',
         compactSidebar ? 'h-[100dvh] w-[min(var(--sidebar-width),calc(100vw-44px))]' : 'h-screen w-[var(--sidebar-width)]',
         sidebarPeeking ? 'translate-x-0 after:opacity-0' : 'translate-x-[calc(-100%+var(--sidebar-peek-width))] after:opacity-100'
       )
