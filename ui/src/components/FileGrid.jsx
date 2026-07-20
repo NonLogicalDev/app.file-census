@@ -72,12 +72,13 @@ function compactCount(n) {
   return `${(n / 1_000_000).toFixed(1)}M`.replace('.0M', 'M');
 }
 
-// A tiny "×N" copies chip (N = total copies of this content), truncation-safe.
+// Inline "·N copies" count (N = total copies of this content), truncation-safe.
+// Matches the "·N off-disk" style; the "(pill) ×N" chip form is retired.
 function CopiesChip({ count, title }) {
   if (count <= 1) return null;
   return (
     <span className="ml-1 shrink-0 text-[10px] text-muted tabular-nums" title={title}>
-      ×{compactCount(count)}
+      ·{compactCount(count)} copies
     </span>
   );
 }
@@ -842,12 +843,11 @@ function baseColumns(options) {
       minSize: 60,
       meta: { ...numericColumnMeta, tooltip: 'Files with only a sparse hash (no exact hash) — exact-duplicate matching cannot see them' },
       cell: ({ row, getValue }) => {
+        // Like the Files column: numeric sparse-only count per row (1 for a
+        // sparse file, the subtree total for a folder), blank when there are none.
         const count = Number(getValue() ?? 0);
-        if (row.original.kind !== 'dir' && row.original.kind !== 'file') return '';
-        if (!count) return '';
-        return row.original.kind === 'file'
-          ? <span className="font-semibold text-warning">sparse</span>
-          : <span className="text-warning">{count.toLocaleString()}</span>;
+        if ((row.original.kind !== 'dir' && row.original.kind !== 'file') || !count) return '';
+        return <span className="text-warning">{count.toLocaleString()}</span>;
       }
     },
     {

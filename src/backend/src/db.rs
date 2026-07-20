@@ -3292,7 +3292,7 @@ impl Database {
     pub fn file_occurrences(&self, blake3: &str, size: u64) -> Result<Vec<FileOccurrence>> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let scan_ids = scan_ids_with_file_occurrence(&tx, blake3, size)?;
+        let scan_ids = scan_ids_with_file_occurrence(&tx, "blake3", blake3, size)?;
         prepare_excluded_file_ids(&tx, scan_ids)?;
         let occurrences = {
             let mut stmt = tx.prepare(
@@ -3337,21 +3337,15 @@ impl Database {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         ensure_scan_exists(&tx, scan_id)?;
-        // Anti-join the persistent per-scan exclusion sets instead of copying
-        // every excluded id of every scan containing this content into a temp
-        // table (that made file-info hang for content present in many scans).
-        let mut visibility_scan_ids = scan_ids_with_file_occurrence(&tx, blake3, size)?;
-        if !visibility_scan_ids.iter().any(|candidate| candidate == scan_id) {
-            visibility_scan_ids.push(scan_id.to_string());
-        }
-        for visible_scan in &visibility_scan_ids {
-            ensure_scan_exclusion_cache_ready(&tx, visible_scan)?;
-        }
 
+        // Resolve the origin file's identity from the DB. Exact-hashed files
+        // group by (blake3, size); sparse-only files (empty blake3) group by
+        // (blake3_light, size) — never by the empty exact hash, which would
+        // lump unrelated same-size sparse files together.
         let origin = tx
             .query_row(
                 r#"
-                SELECT f.kind, f.blake3, f.size
+                SELECT f.kind, f.blake3, f.blake3_light, f.size
                 FROM files f
                 LEFT JOIN scan_excluded_files excluded_f
                   ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id
@@ -3365,7 +3359,8 @@ impl Database {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, u64>(2)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, u64>(3)?,
                     ))
                 },
             )
@@ -3374,29 +3369,54 @@ impl Database {
         if origin.0 != "file" {
             anyhow::bail!("file occurrence origin must be a file");
         }
-        if origin.1 != blake3 || origin.2 != size {
+        if origin.3 != size {
+            anyhow::bail!("file occurrence origin does not match the requested content size");
+        }
+        let sparse_identity = origin.1.is_empty();
+        // The identity hash: the exact blake3 when present, else the sparse
+        // fingerprint. The requested `blake3` may be empty for a sparse row.
+        let identity_hash = if sparse_identity { origin.2.clone() } else { origin.1.clone() };
+        if sparse_identity {
+            if identity_hash.is_empty() {
+                anyhow::bail!("sparse file occurrence has no sparse fingerprint");
+            }
+        } else if origin.1 != blake3 {
             anyhow::bail!("file occurrence origin does not match the requested content hash");
+        }
+        let (identity_where, identity_col) = if sparse_identity {
+            ("f.blake3 = '' AND f.blake3_light = ?1 AND f.size = ?2", "blake3_light")
+        } else {
+            ("f.blake3 = ?1 AND f.size = ?2", "blake3")
+        };
+
+        // Anti-join the persistent per-scan exclusion sets instead of copying
+        // every excluded id of every scan containing this content into a temp
+        // table (that made file-info hang for content present in many scans).
+        let mut visibility_scan_ids =
+            scan_ids_with_file_occurrence(&tx, identity_col, &identity_hash, size)?;
+        if !visibility_scan_ids.iter().any(|candidate| candidate == scan_id) {
+            visibility_scan_ids.push(scan_id.to_string());
+        }
+        for visible_scan in &visibility_scan_ids {
+            ensure_scan_exclusion_cache_ready(&tx, visible_scan)?;
         }
 
         let occurrences = {
-            let mut stmt = tx.prepare(
-                r#"
-                SELECT f.scan_id, s.started_at, s.finished_at, s.status, l.slug, l.name,
-                       f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error
-                FROM files f
-                LEFT JOIN scan_excluded_files excluded_f
-                  ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id
-                JOIN scans s ON s.id = f.scan_id
-                JOIN locations l ON l.id = s.location_id
-                WHERE excluded_f.file_id IS NULL
-                  AND f.kind = 'file'
-                  AND f.error IS NULL
-                  AND f.blake3 = ?1
-                  AND f.size = ?2
-                ORDER BY l.slug, s.started_at DESC, f.path
-                "#,
-            )?;
-            let x = stmt.query_map(params![blake3, size], occurrence_from_row)?
+            let mut stmt = tx.prepare(&format!(
+                "SELECT f.scan_id, s.started_at, s.finished_at, s.status, l.slug, l.name, \
+                        f.kind, f.path, f.name, f.size, f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.error \
+                 FROM files f \
+                 LEFT JOIN scan_excluded_files excluded_f \
+                   ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id \
+                 JOIN scans s ON s.id = f.scan_id \
+                 JOIN locations l ON l.id = s.location_id \
+                 WHERE excluded_f.file_id IS NULL \
+                   AND f.kind = 'file' \
+                   AND f.error IS NULL \
+                   AND {identity_where} \
+                 ORDER BY l.slug, s.started_at DESC, f.path"
+            ))?;
+            let x = stmt.query_map(params![identity_hash, size], occurrence_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             x
         };
@@ -6190,17 +6210,22 @@ fn scan_ids_matching_file_query(conn: &Connection, like: &str) -> Result<Vec<Str
 
 fn scan_ids_with_file_occurrence(
     conn: &Connection,
-    blake3: &str,
+    identity_col: &str,
+    identity_hash: &str,
     size: u64,
 ) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT DISTINCT scan_id
-        FROM files
-        WHERE kind = 'file' AND error IS NULL AND blake3 = ?1 AND size = ?2
-        "#,
-    )?;
-    let rows = stmt.query_map(params![blake3, size], |row| row.get::<_, String>(0))?;
+    // identity_col is "blake3" (exact) or "blake3_light" (sparse), chosen by
+    // the caller — never interpolated from untrusted input.
+    let where_clause = if identity_col == "blake3_light" {
+        "blake3 = '' AND blake3_light = ?1 AND size = ?2"
+    } else {
+        "blake3 = ?1 AND size = ?2"
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT scan_id FROM files \
+         WHERE kind = 'file' AND error IS NULL AND {where_clause}"
+    ))?;
+    let rows = stmt.query_map(params![identity_hash, size], |row| row.get::<_, String>(0))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
 }

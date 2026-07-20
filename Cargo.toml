@@ -6,5 +6,8 @@ members = [
 resolver = "2"
 
 [profile.release]
-lto = true
+# Thin LTO keeps nearly all of fat-LTO's runtime speed but is dramatically
+# faster to (re)link — a UI-only change re-embeds assets and forces a release
+# relink, so fat LTO made every UI tweak a ~70s+ rebuild.
+lto = "thin"
 strip = true

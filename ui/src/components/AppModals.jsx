@@ -382,8 +382,9 @@ function FileInfoModal(props) {
           <section className={metadataGridClassName()}>
             <div className={metadataItemClassName()}><span className={metadataLabelClassName}>Name</span><strong className={metadataValueClassName}>{fileInfo.file.name}</strong></div>
             <div className={metadataItemClassName()}><span className={metadataLabelClassName}>Size</span><strong className={metadataValueClassName}>{bytes(fileInfo.file.size)}</strong></div>
-            <div className={metadataItemClassName()}><span className={metadataLabelClassName}>BLAKE3</span><code className={metadataValueClassName}>{fileInfo.file.blake3}</code></div>
-            <div className={metadataItemClassName()}><span className={metadataLabelClassName}>SHA-256</span><code className={metadataValueClassName}>{fileInfo.file.sha256}</code></div>
+            <div className={metadataItemClassName()}><span className={metadataLabelClassName}>BLAKE3 (exact)</span><code className={metadataValueClassName}>{fileInfo.file.blake3 || <span className="text-warning">— sparse scan (no exact hash)</span>}</code></div>
+            <div className={metadataItemClassName()}><span className={metadataLabelClassName}>Sparse hash</span><code className={metadataValueClassName}>{fileInfo.file.blake3_light || '—'}</code></div>
+            <div className={metadataItemClassName()}><span className={metadataLabelClassName}>SHA-256</span><code className={metadataValueClassName}>{fileInfo.file.sha256 || '—'}</code></div>
             <div className={metadataItemClassName()}><span className={metadataLabelClassName}>CTime</span><strong className={metadataValueClassName}>{when(fileInfo.file.ctime)}</strong></div>
             <div className={metadataItemClassName()}><span className={metadataLabelClassName}>Modified</span><strong className={metadataValueClassName}>{when(fileInfo.file.mtime)}</strong></div>
             <div className={metadataItemClassName()}><span className={metadataLabelClassName}>Mode</span><strong className={metadataValueClassName}>{fileInfo.file.mode || ''}</strong></div>

@@ -32,23 +32,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=FILE_CENSUS_LIGHT_HASH_HEAD_SLICE_WIDTH");
     println!("cargo:rerun-if-env-changed=FILE_CENSUS_LIGHT_HASH_TAIL_SLICE_WIDTH");
 
+    // Only `ui/dist` is embedded (rust-embed `#[folder="../../ui/dist/"]`), so
+    // that is the ONLY thing the backend must rebuild for. Editing `ui/src`
+    // does not change the binary until `vite build` regenerates `ui/dist`, so
+    // watching `ui/src` here only produced spurious backend recompiles.
     println!("cargo:rerun-if-changed=../../ui/dist");
-    println!("cargo:rerun-if-changed=../../ui/src");
-    println!("cargo:rerun-if-changed=../../ui/index.html");
-    println!("cargo:rerun-if-changed=../../ui/package.json");
-    println!("cargo:rerun-if-changed=../../ui/postcss.config.js");
-    println!("cargo:rerun-if-changed=../../ui/tailwind.config.js");
-    println!("cargo:rerun-if-changed=../../ui/vite.config.js");
-
-    for root in ["../../ui/dist", "../../ui/src"] {
-        if let Ok(entries) = walkdir::WalkDir::new(root)
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-        {
-            for entry in entries {
-                if entry.file_type().is_file() {
-                    println!("cargo:rerun-if-changed={}", entry.path().display());
-                }
+    if let Ok(entries) = walkdir::WalkDir::new("../../ui/dist")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+    {
+        for entry in entries {
+            if entry.file_type().is_file() {
+                println!("cargo:rerun-if-changed={}", entry.path().display());
             }
         }
     }

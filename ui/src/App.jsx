@@ -1940,7 +1940,9 @@ export default function App() {
 
   async function inspectFile(entry, { allScans = latest.current.fileOccAllScans } = {}) {
     const scanId = entry?.scan_id || latest.current.selectedScanId;
-    if (!scanId || !entry?.path || entry.kind !== 'file' || !entry.blake3 || entry.size == null) return;
+    // Sparse-only files carry no exact hash but still have a path + size; the
+    // server resolves identity (exact or sparse) from the row itself.
+    if (!scanId || !entry?.path || entry.kind !== 'file' || entry.size == null) return;
     // Deliberately NOT the global busy flag: files.details can take seconds on
     // high-occurrence content and must not freeze keyboard nav or the rest of
     // the UI. The modal opens immediately in a loading state; closing it (or
@@ -1954,7 +1956,7 @@ export default function App() {
       const details = await rpc('files.details', {
         scan_id: scanId,
         path: entry.path,
-        blake3: entry.blake3,
+        blake3: entry.blake3 || '',
         size: entry.size,
         representative_only: !allScans
       });
