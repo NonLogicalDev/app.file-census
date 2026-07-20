@@ -612,6 +612,24 @@ only the tab page scrolls. (4) Folders toggle moved to nav row 1's far left,
 before Browse|Flat. (5) "Browse Folder" → "Reveal Folder" (reveal icon).
 Tests: 147 UI.
 
+## Filters + perf work log 2026-07-20 (~05:40) — CDP-verified live (`32c27c8`, `fa970f8`)
+
+(1) Editable filter rules (user + screenshot): clicking a rule label or "Edit
+rule" in its menu opens an inline term/operator/value editor (same controls as
+the Add-rule builder); replaceTermRule preserves the Match/Exclude wrapper.
+Verified: jpg → png in place. (2) Zombie-folder bug (user report): the inline
+expansion cache didn't clear on structured-filter changes — children fetched
+under the old rule lingered. Cleared on searchFilters now; verified 0 lingering
+depth>0 rows after a rule swap. (3) Slow sidebar on reload (task #35): root
+cause = /api/overview ~10s cold (full files-table aggregates) AND the events
+WS handled RPCs serially, so locations.list (18ms) queued behind it. Fixes:
+overview_cache row (fingerprint = location/scan roster + latest duplicate-
+cache ready_at) served stale-while-revalidate with a background refresh +
+overview_updated event (web + native parity); events_socket now runs each RPC
+in its own task behind an mpsc writer, so slow calls can't serialize fast
+ones. Receipts: overview 5.8s once → 16ms; locations 22ms concurrent;
+reload-to-sidebar ~1.6s (was 10s+). Tests: 147 UI / 75 backend.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
