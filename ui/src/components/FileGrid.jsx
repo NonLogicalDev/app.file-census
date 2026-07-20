@@ -836,6 +836,21 @@ function baseColumns(options) {
       cell: ({ row, getValue }) => (row.original.kind === 'parent' || row.original.kind === 'placeholder') ? '' : Number(getValue() ?? 0).toLocaleString()
     },
     {
+      accessorKey: 'sparse_count',
+      header: 'Sparse',
+      size: 80,
+      minSize: 60,
+      meta: { ...numericColumnMeta, tooltip: 'Files with only a sparse hash (no exact hash) — exact-duplicate matching cannot see them' },
+      cell: ({ row, getValue }) => {
+        const count = Number(getValue() ?? 0);
+        if (row.original.kind !== 'dir' && row.original.kind !== 'file') return '';
+        if (!count) return '';
+        return row.original.kind === 'file'
+          ? <span className="font-semibold text-warning">sparse</span>
+          : <span className="text-warning">{count.toLocaleString()}</span>;
+      }
+    },
+    {
       accessorKey: 'distinct_count',
       header: 'Unique',
       size: 72,

@@ -101,6 +101,10 @@ pub struct Scan {
     pub status: String,
     pub is_representative: bool,
     pub notes: Option<String>,
+    /// Files carrying only the sparse hash (no exact hash) — the mark that a
+    /// scan's exact-duplicate coverage is partial.
+    #[serde(default)]
+    pub sparse_file_count: u64,
 }
 
 /// The location and running scan reserved by a compatible bootstrap request.
@@ -144,6 +148,10 @@ pub struct FileRow {
     /// references the `tag` term (kept empty otherwise to avoid per-row cost).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Sparse fingerprint; populated by the tree-source path (used for the
+    /// sparse-only rollups). Empty where the query didn't select it.
+    #[serde(default)]
+    pub blake3_light: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -254,6 +262,10 @@ pub struct TreeEntry {
     pub copies_here: u64,
     #[serde(default)]
     pub copies_away: u64,
+    /// Sparse-only file count: files carrying only the sparse hash (no
+    /// exact hash). Subtree instance count on dirs; 1/0 on files.
+    #[serde(default)]
+    pub sparse_count: u64,
 }
 
 /// A persisted-cache lifecycle record for the effective duplicate comparison
@@ -784,6 +796,7 @@ impl Database {
                 int_safe_file_count INTEGER NOT NULL DEFAULT 0,
                 int_warn_file_count INTEGER NOT NULL DEFAULT 0,
                 int_unsafe_file_count INTEGER NOT NULL DEFAULT 0,
+                sparse_file_count INTEGER NOT NULL DEFAULT 0,
                 copies_here INTEGER NOT NULL DEFAULT 0,
                 copies_away INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (run_id, scan_id, path)
@@ -873,6 +886,21 @@ impl Database {
         if !column_exists(conn, "scans", "sparse_full_below")? {
             conn.execute("ALTER TABLE scans ADD COLUMN sparse_full_below INTEGER", [])?;
         }
+        if !column_exists(conn, "scans", "sparse_file_count")? {
+            conn.execute(
+                "ALTER TABLE scans ADD COLUMN sparse_file_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            // One-time backfill for existing scans.
+            conn.execute(
+                "UPDATE scans SET sparse_file_count = (
+                     SELECT COUNT(*) FROM files f
+                     WHERE f.scan_id = scans.id AND f.kind = 'file'
+                       AND f.blake3 = '' AND f.blake3_light != ''
+                 )",
+                [],
+            )?;
+        }
         // Legacy sparse ("light") scans stored the SPARSE hash in the exact
         // blake3/sha256 columns, which would let two sparse files exact-match
         // on sparse evidence alone. Re-encode once: above the whole-file
@@ -910,6 +938,7 @@ impl Database {
             "int_safe_file_count",
             "int_warn_file_count",
             "int_unsafe_file_count",
+            "sparse_file_count",
         ] {
             if !column_exists(conn, "duplicate_cache_path_counts", column)? {
                 conn.execute(
@@ -1060,7 +1089,7 @@ impl Database {
                 r#"
                 SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
                        s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
-                       COALESCE(l.representative_scan_id = s.id, 0), s.notes
+                       COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count
                 FROM scans s
                 JOIN locations l ON l.id = s.location_id
                 WHERE s.id = ?1
@@ -1194,7 +1223,7 @@ impl Database {
             r#"
             SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
                    s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
-                   COALESCE(l.representative_scan_id = s.id, 0), s.notes
+                   COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count
             FROM scans s
             JOIN locations l ON l.id = s.location_id
             WHERE s.id = ?1
@@ -2100,9 +2129,9 @@ impl Database {
                     (run_id, scan_id, path, parent_path, kind, file_count, total_size,
                      distinct_count, safe_file_count, warn_file_count, unsafe_file_count,
                      int_safe_file_count, int_warn_file_count, int_unsafe_file_count,
-                     copies_here, copies_away)
+                     copies_here, copies_away, sparse_file_count)
                 VALUES
-                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 ON CONFLICT(run_id, scan_id, path) DO UPDATE SET
                     parent_path = excluded.parent_path,
                     kind = excluded.kind,
@@ -2116,7 +2145,8 @@ impl Database {
                     int_warn_file_count = excluded.int_warn_file_count,
                     int_unsafe_file_count = excluded.int_unsafe_file_count,
                     copies_here = excluded.copies_here,
-                    copies_away = excluded.copies_away
+                    copies_away = excluded.copies_away,
+                    sparse_file_count = excluded.sparse_file_count
                 "#,
             )?;
             for ((scan_id, path), counts) in &path_counts {
@@ -2138,6 +2168,7 @@ impl Database {
                     counts.int_unsafe_file_count,
                     counts.copies_here,
                     counts.copies_away,
+                    counts.sparse_file_count,
                 ])?;
             }
         }
@@ -2179,7 +2210,7 @@ impl Database {
             r#"
             SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
                    s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
-                   COALESCE(l.representative_scan_id = s.id, 0), s.notes
+                   COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count
             FROM scans s
             JOIN locations l ON l.id = s.location_id
             ORDER BY s.started_at DESC
@@ -2694,6 +2725,11 @@ impl Database {
                         int_unsafe_count: 0,
                         copies_here: row.get::<_, i64>(11)?.max(0) as u64,
                         copies_away: row.get::<_, i64>(12)?.max(0) as u64,
+                        sparse_count: {
+                            let b3: String = row.get(3)?;
+                            let light: Option<String> = row.get(16)?;
+                            if b3.is_empty() && light.map_or(false, |value| !value.is_empty()) { 1 } else { 0 }
+                        },
                     })
                 },
             )?;
@@ -4864,7 +4900,7 @@ fn scan_tree_immediate_children_from_cache(
                f.blake3, f.sha256, f.ctime, f.mtime, f.mode, f.size,
                dc.distinct_count,
                dc.int_safe_file_count, dc.int_warn_file_count, dc.int_unsafe_file_count,
-               f.blake3_light
+               f.blake3_light, dc.sparse_file_count
         FROM duplicate_cache_path_counts dc
         LEFT JOIN files f ON f.scan_id = dc.scan_id AND f.path = dc.path
         WHERE dc.run_id = ?1 AND dc.scan_id = ?2 AND dc.parent_path = ?3
@@ -4899,6 +4935,7 @@ fn scan_tree_immediate_children_from_cache(
         let int_safe = row.get::<_, i64>(19)?.max(0) as u64;
         let int_warn = row.get::<_, i64>(20)?.max(0) as u64;
         let int_unsafe = row.get::<_, i64>(21)?.max(0) as u64;
+        let sparse = row.get::<_, i64>(23)?.max(0) as u64;
         let name = path
             .rsplit_once('/')
             .map(|(_, tail)| tail.to_string())
@@ -4930,6 +4967,7 @@ fn scan_tree_immediate_children_from_cache(
                 int_unsafe_count: int_unsafe,
                 copies_here: 0,
                 copies_away: 0,
+                sparse_count: sparse,
             })
         } else {
             Ok(TreeEntry {
@@ -4958,6 +4996,7 @@ fn scan_tree_immediate_children_from_cache(
                 int_unsafe_count: 0,
                 copies_here,
                 copies_away,
+                sparse_count: sparse,
             })
         }
     })?;
@@ -5000,7 +5039,8 @@ fn scan_tree_immediate_children_aggregate(
                 COALESCE(dc.warn_file_count, 0) AS wfc,
                 COALESCE(dc.unsafe_file_count, 0) AS ufc,
                 COALESCE(dc.copies_here, 0) AS ch,
-                COALESCE(dc.copies_away, 0) AS ca
+                COALESCE(dc.copies_away, 0) AS ca,
+                CASE WHEN f.kind = 'file' AND f.blake3 = '' AND f.blake3_light != '' THEN 1 ELSE 0 END AS sparse_only
             FROM files f
             LEFT JOIN scan_excluded_files excluded_f
                    ON excluded_f.scan_id = f.scan_id AND excluded_f.file_id = f.id
@@ -5037,7 +5077,8 @@ fn scan_tree_immediate_children_aggregate(
             MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN wfc END) AS file_warn,
             MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ufc END) AS file_unsafe,
             MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ch END) AS file_here,
-            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ca END) AS file_away
+            MAX(CASE WHEN kind = 'file' AND instr(rest, '/') = 0 THEN ca END) AS file_away,
+            SUM(sparse_only) AS sparse_sum
         FROM src
         WHERE rest <> ''
         GROUP BY child
@@ -5054,6 +5095,7 @@ fn scan_tree_immediate_children_aggregate(
         let same_dup = row.get::<_, i64>(6)?.max(0) as u64;
         let warn_sum = row.get::<_, i64>(17)?.max(0) as u64;
         let unsafe_sum = row.get::<_, i64>(18)?.max(0) as u64;
+        let sparse_sum = row.get::<_, i64>(24)?.max(0) as u64;
         if is_dir == 1 {
             Ok(TreeEntry {
                 path: format!("{normalized_prefix}{child}"),
@@ -5081,6 +5123,7 @@ fn scan_tree_immediate_children_aggregate(
                 int_unsafe_count: 0,
                 copies_here: 0,
                 copies_away: 0,
+                sparse_count: sparse_sum,
             })
         } else {
             let file_path: Option<String> = row.get(10)?;
@@ -5122,6 +5165,7 @@ fn scan_tree_immediate_children_aggregate(
                 int_unsafe_count: 0,
                 copies_here: row.get::<_, Option<i64>>(22)?.unwrap_or(0).max(0) as u64,
                 copies_away: row.get::<_, Option<i64>>(23)?.unwrap_or(0).max(0) as u64,
+                sparse_count: sparse_sum,
             })
         }
     })?;
@@ -5155,7 +5199,8 @@ fn scan_tree_source_rows(
                f.ctime, f.mtime, f.mode, f.error,
                COALESCE(dc.duplicate_file_count, 0),
                COALESCE(dc.original_file_count, 0),
-               COALESCE(dc.same_scan_duplicate_file_count, 0)
+               COALESCE(dc.same_scan_duplicate_file_count, 0),
+               f.blake3_light
         FROM files f
         LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
         JOIN scans s ON s.id = f.scan_id
@@ -5190,6 +5235,7 @@ fn scan_tree_source_rows(
                 mode: row.get(11)?,
                 error: row.get(12)?,
                 tags: Vec::new(),
+                blake3_light: row.get(16)?,
             },
             duplicate_file_count: row.get(13)?,
             original_file_count: row.get(14)?,
@@ -5280,6 +5326,7 @@ fn build_tree_page_entries(
                 int_unsafe_count: 0,
                 copies_here: 0,
                 copies_away: 0,
+                sparse_count: 0,
             });
             if !is_file && index == directory_parts {
                 entry.ctime = row.file.ctime.clone();
@@ -5289,6 +5336,9 @@ fn build_tree_page_entries(
             if is_file {
                 entry.size = entry.size.saturating_add(row.file.size);
                 entry.file_count = entry.file_count.saturating_add(1);
+                if row.file.blake3.is_empty() && !row.file.blake3_light.is_empty() {
+                    entry.sparse_count = entry.sparse_count.saturating_add(1);
+                }
                 entry.duplicate_file_count = entry
                     .duplicate_file_count
                     .saturating_add(duplicate_file_count);
@@ -5315,8 +5365,9 @@ fn build_tree_page_entries(
                     kind: "file".to_string(),
                     size: row.file.size,
                     file_count: 1,
+                    sparse_count: if row.file.blake3.is_empty() && !row.file.blake3_light.is_empty() { 1 } else { 0 },
                     blake3: Some(row.file.blake3),
-                    blake3_light: None,
+                    blake3_light: Some(row.file.blake3_light),
                     sha256: Some(row.file.sha256),
                     ctime: row.file.ctime,
                     mtime: row.file.mtime,
@@ -5633,6 +5684,8 @@ struct DuplicatePathCounts {
     // self), `away` in other locations. 0 on dir rows. Drives "[X copies exist]".
     copies_here: u64,
     copies_away: u64,
+    // Sparse-only file instances (no exact hash) in the subtree / own flag.
+    sparse_file_count: u64,
 }
 
 impl DuplicatePathCounts {
@@ -5975,6 +6028,7 @@ fn duplicate_cache_path_counts(
                     .sum()
             })
             .unwrap_or(0);
+        let sparse_only = if file.blake3.is_empty() && !file.blake3_light.is_empty() { 1 } else { 0 };
         let tier = external_tier(&file.blake3, &file.blake3_light, file.size, &file.location_id);
         let (safe, warn, unsafe_) = tier_one_hot(tier);
         let int_tier = internal_tier(&file.blake3, &file.blake3_light, file.size, &file.location_id);
@@ -5996,6 +6050,7 @@ fn duplicate_cache_path_counts(
         file_row.int_unsafe_file_count = int_unsafe;
         file_row.copies_here = here;
         file_row.copies_away = away;
+        file_row.sparse_file_count = sparse_only;
 
         // Instance rollup to ancestor dirs: file_count + total_size only. Tier
         // and distinct counts come from the unique-content pass below.
@@ -6008,6 +6063,7 @@ fn duplicate_cache_path_counts(
             }
             dir_row.file_count = dir_row.file_count.saturating_add(1);
             dir_row.total_size = dir_row.total_size.saturating_add(file.size);
+            dir_row.sparse_file_count = dir_row.sparse_file_count.saturating_add(sparse_only);
         }
 
         let content_key = if !file.blake3.is_empty() {
@@ -6102,6 +6158,15 @@ fn write_scan_terminal_state(
             "expected to finalize exactly one scan {scan_id}, but updated {updated} rows"
         );
     }
+    // Record how many files ended up sparse-only (no exact hash) — the scan's
+    // partial-exact-coverage mark shown in the UI.
+    conn.execute(
+        "UPDATE scans SET sparse_file_count = (
+             SELECT COUNT(*) FROM files f
+             WHERE f.scan_id = ?1 AND f.kind = 'file' AND f.blake3 = '' AND f.blake3_light != ''
+         ) WHERE id = ?1",
+        params![scan_id],
+    )?;
     Ok(())
 }
 
@@ -6548,7 +6613,7 @@ fn scan_by_id_from_conn(conn: &Connection, scan_id: &str) -> Result<Option<Scan>
         r#"
         SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
                s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
-               COALESCE(l.representative_scan_id = s.id, 0), s.notes
+               COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count
         FROM scans s
         JOIN locations l ON l.id = s.location_id
         WHERE s.id = ?1
@@ -6645,6 +6710,7 @@ fn scan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Scan> {
         status: row.get(11)?,
         is_representative: row.get(12)?,
         notes: row.get(13)?,
+        sparse_file_count: row.get::<_, i64>(14).unwrap_or(0).max(0) as u64,
     })
 }
 
@@ -6675,6 +6741,7 @@ fn tree_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeEntry> {
         int_unsafe_count: 0,
         copies_here: 0,
         copies_away: 0,
+        sparse_count: 0,
     })
 }
 
@@ -6696,6 +6763,7 @@ fn file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         mode: row.get(11)?,
         error: row.get(12)?,
         tags: Vec::new(),
+        blake3_light: String::new(),
     })
 }
 

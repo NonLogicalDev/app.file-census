@@ -545,6 +545,18 @@ export default function FileExplorer(props) {
           <span>{Number(activeScan.file_count || 0).toLocaleString()} files</span>
           <span className="h-3.5 w-px bg-border" aria-hidden="true" />
           <span>{bytes(activeScan.total_bytes)}</span>
+          {Number(activeScan.sparse_file_count || 0) > 0 && (
+            <>
+              <span className="h-3.5 w-px bg-border" aria-hidden="true" />
+              <span
+                className="inline-flex items-center gap-1 rounded-full border border-warning bg-warning-soft px-2 font-bold uppercase tracking-[0.03em] text-warning"
+                title={`${Number(activeScan.sparse_file_count).toLocaleString()} files in this scan carry only a sparse hash — exact-duplicate matching cannot see them. Re-scan with Full (or a higher sparse threshold) for exact coverage.`}
+              >
+                <Icon name="warning" className="h-3 w-3" />
+                {Number(activeScan.sparse_file_count).toLocaleString()} sparse
+              </span>
+            </>
+          )}
         </div>
       </header>
 

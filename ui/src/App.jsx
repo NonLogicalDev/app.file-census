@@ -36,6 +36,7 @@ const fileColumns = [
   ['size', 'Size'],
   ['file_count', 'Files'],
   ['distinct_count', 'Unique'],
+  ['sparse_count', 'Sparse'],
   ['blake3', 'Hash Full'],
   ['blake3_light', 'Hash Sparse'],
   ['ctime', 'CTime'],
@@ -44,7 +45,7 @@ const fileColumns = [
   ['sha256', 'SHA-256']
 ];
 
-const defaultColumns = ['name', 'size', 'file_count', 'distinct_count', 'mtime'];
+const defaultColumns = ['name', 'size', 'file_count', 'sparse_count', 'distinct_count', 'mtime'];
 const MAX_AUTO_DIRECTORY_TREE_DEPTH = 4;
 
 async function refreshAuthoritativelyAfterEventLag(refresh, refreshPromiseRef) {
