@@ -273,6 +273,10 @@ pub struct ScanArgs {
     /// Default and minimum = the combined sparse-slice size.
     #[arg(long)]
     sparse_full_below: Option<String>,
+    /// Gitignore-style pattern to exclude AT SCAN TIME (repeatable). Matches
+    /// are pruned from the walk and never indexed, e.g. --exclude node_modules/
+    #[arg(long = "exclude")]
+    exclude: Vec<String>,
 }
 
 #[derive(Args)]
@@ -297,6 +301,9 @@ struct ScanStartArgs {
     /// Default and minimum = the combined sparse-slice size.
     #[arg(long)]
     sparse_full_below: Option<String>,
+    /// Gitignore-style pattern to exclude AT SCAN TIME (repeatable).
+    #[arg(long = "exclude")]
+    exclude: Vec<String>,
 }
 
 #[derive(Args)]
@@ -767,6 +774,7 @@ fn prepare_compatible_scan_with_started_at(
         hash_workers,
         metadata_workers,
         sparse_full_below,
+        exclude,
     } = args;
     let sparse_full_below = sparse_full_below
         .as_deref()
@@ -785,6 +793,7 @@ fn prepare_compatible_scan_with_started_at(
     prepared
         .with_workers(hash_workers, metadata_workers)
         .with_sparse_full_below(sparse_full_below)
+        .map(|prepared| prepared.with_scan_time_excludes(exclude))
 }
 
 fn command_path(command: &Command) -> &'static str {
@@ -1178,7 +1187,8 @@ fn run_scans(
             let prepared =
                 scanner::prepare_scan_with_policy(&db, &args.slug, &args.offset, policy)?
                     .with_workers(args.hash_workers, args.metadata_workers)
-                    .with_sparse_full_below(sparse_full_below)?;
+                    .with_sparse_full_below(sparse_full_below)?
+                    .with_scan_time_excludes(args.exclude);
             run_prepared_scan_cli(&db, prepared, json)
         }
         ScanSubcommand::Update(args) => {

@@ -1233,7 +1233,7 @@ export default function App() {
       setMessage(`Cannot scan ${location.name || slug}: its path is disconnected or missing. Reconnect the drive or edit the location.`);
       return;
     }
-    setScanStartForm({ slug, offset: '/', hash_policy: 'full', hash_workers: '', metadata_workers: '', sparse_full_below: '' });
+    setScanStartForm({ slug, offset: '/', hash_policy: 'full', hash_workers: '', metadata_workers: '', sparse_full_below: '', scan_time_excludes: '' });
   }
 
   // Human size input: "500MB", "1GB", "1.5gb", bare number = MB.
@@ -1263,7 +1263,9 @@ export default function App() {
       hash_policy: form.hash_policy || 'full',
       hash_workers: parseWorkerCount(form.hash_workers),
       metadata_workers: parseWorkerCount(form.metadata_workers),
-      sparse_full_below: parseSizeInput(form.sparse_full_below)
+      sparse_full_below: parseSizeInput(form.sparse_full_below),
+      scan_time_excludes: String(form.scan_time_excludes || '')
+        .split('\n').map((line) => line.trim()).filter(Boolean)
     });
   }
 
@@ -1278,7 +1280,8 @@ export default function App() {
         hash_policy: options.hash_policy || 'full',
         ...(options.hash_workers ? { hash_workers: options.hash_workers } : {}),
         ...(options.metadata_workers ? { metadata_workers: options.metadata_workers } : {}),
-        ...(options.sparse_full_below ? { sparse_full_below: options.sparse_full_below } : {})
+        ...(options.sparse_full_below ? { sparse_full_below: options.sparse_full_below } : {}),
+        ...(options.scan_time_excludes?.length ? { scan_time_excludes: options.scan_time_excludes } : {})
       });
       const location = locationBySlug(slug);
       setActiveTab('locations');

@@ -548,6 +548,9 @@ pub struct PreparedScan {
     /// Sparse policy only: files SMALLER than this get full hashing (exact +
     /// sparse); None = the combined slice size (`sparse_whole_threshold`).
     pub sparse_full_below: Option<u64>,
+    /// Gitignore-style patterns applied AT SCAN TIME — matches are pruned from
+    /// the walk and never indexed, and baked into the scan row.
+    pub scan_time_excludes: Vec<String>,
 }
 
 impl PreparedScan {
@@ -580,6 +583,19 @@ impl PreparedScan {
             self.sparse_full_below = Some(threshold);
         }
         Ok(self)
+    }
+
+    /// Sets scan-time exclude patterns (trimmed; empties dropped).
+    pub fn with_scan_time_excludes(mut self, patterns: Vec<String>) -> Self {
+        let cleaned: Vec<String> = patterns
+            .into_iter()
+            .map(|pattern| pattern.trim().to_string())
+            .filter(|pattern| !pattern.is_empty())
+            .collect();
+        if !cleaned.is_empty() {
+            self.scan_time_excludes = cleaned;
+        }
+        self
     }
 }
 
@@ -745,6 +761,7 @@ pub fn prepare_bootstrap_scan_with_started_at(
         hash_workers: None,
         metadata_workers: None,
         sparse_full_below: None,
+        scan_time_excludes: Vec::new(),
     })
 }
 
@@ -784,6 +801,7 @@ fn prepare_scan_with_start(
         hash_workers: None,
         metadata_workers: None,
         sparse_full_below: None,
+        scan_time_excludes: Vec::new(),
     })
 }
 
@@ -804,6 +822,7 @@ pub fn prepare_update_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         hash_workers: None,
         metadata_workers: None,
         sparse_full_below: None,
+        scan_time_excludes: Vec::new(),
     })
 }
 
@@ -854,6 +873,7 @@ pub fn prepare_repair_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         hash_workers: None,
         metadata_workers: None,
         sparse_full_below: None,
+        scan_time_excludes: Vec::new(),
     })
 }
 
@@ -977,6 +997,10 @@ pub fn run_prepared_scan(
     // Excludes remain scan-scoped policy, but they must not suppress physical
     // indexing. Validate them here; query surfaces apply visibility later.
     let _ = build_scan_exclude_matcher(&exclude_patterns)?;
+    // SCAN-TIME excludes are different: they prune the walk so matches are
+    // never indexed at all (e.g. node_modules), and are baked into the scan
+    // row. Build the matcher once and share it with the discovery walker.
+    let scan_time_matcher = Arc::new(build_scan_exclude_matcher(&prepared.scan_time_excludes)?);
     // Pool sizing: per-run override > env var > auto. Hashing is the long
     // pole on fast media, so it is fully configurable (plan-036/071 history:
     // the old hard cap of 4 was too small for SSD/NAS sources).
@@ -997,6 +1021,11 @@ pub fn run_prepared_scan(
     if matches!(prepared.hash_policy, HashPolicy::Light) {
         // Record the effective rule on the scan row for later inspection.
         let _ = db.set_scan_sparse_full_below(&prepared.scan_id, sparse_full_below);
+    }
+    // Bake the scan-time excludes into the scan row so the UI/CLI can show what
+    // rule this scan ran under.
+    if !prepared.scan_time_excludes.is_empty() {
+        let _ = db.set_scan_time_excludes(&prepared.scan_id, &prepared.scan_time_excludes);
     }
     tracing::info!(
         target: "file_census::scanner",
@@ -1151,6 +1180,7 @@ pub fn run_prepared_scan(
             let discovery_result_tx = result_tx.clone();
             let discovery_discovered_files = Arc::clone(&discovered_files);
             let discovery_discovered_entries = Arc::clone(&discovered_entries);
+            let discovery_matcher = Arc::clone(&scan_time_matcher);
             scope.spawn(move || {
                 discovery_worker(
                     scan_root,
@@ -1160,6 +1190,7 @@ pub fn run_prepared_scan(
                     discovery_scan_id,
                     &discovery_discovered_files,
                     &discovery_discovered_entries,
+                    discovery_matcher.as_ref().as_ref(),
                 );
             });
             drop(result_tx);
@@ -1299,6 +1330,7 @@ fn discovery_worker(
     scan_id: String,
     discovered_files: &AtomicU64,
     discovered_entries: &AtomicU64,
+    exclude_matcher: Option<&ignore::gitignore::Gitignore>,
 ) {
     let walk_start = Instant::now();
     // Single-threaded walk on purpose: discovery shares the disk with the
@@ -1308,7 +1340,25 @@ fn discovery_worker(
     // Bookkeeping is lock-free — only atomics + an unbounded send — so the walk
     // never contends on the progress mutex; the main loop syncs the atomics into
     // the live snapshot.
-    for entry in WalkDir::new(scan_root).follow_links(false) {
+    // Scan-time excludes prune whole subtrees (e.g. node_modules) via
+    // filter_entry, so the walker never descends into them — matches are never
+    // indexed and the cost is never paid.
+    let mut walker = WalkDir::new(scan_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            let Some(matcher) = exclude_matcher else {
+                return true;
+            };
+            let relative = entry.path().strip_prefix(scan_root).unwrap_or(entry.path());
+            if relative.as_os_str().is_empty() {
+                return true;
+            }
+            !matcher
+                .matched_path_or_any_parents(relative, entry.file_type().is_dir())
+                .is_ignore()
+        });
+    while let Some(entry) = walker.next() {
         if progress
             .as_ref()
             .is_some_and(|progress| progress.is_stop_requested(&scan_id))
@@ -3096,6 +3146,7 @@ mod tests {
             hash_workers: None,
             metadata_workers: None,
             sparse_full_below: None,
+            scan_time_excludes: Vec::new(),
         };
         progress.start(&prepared);
         progress.finish(&ScanSummary {
@@ -3412,6 +3463,48 @@ mod tests {
         assert!(progress.active_operations_oldest_first(&scan_id).is_empty());
     }
 
+    #[test]
+    fn scan_time_excludes_prune_the_walk_and_bake_into_the_scan() {
+        let root = test_root("scan-time-excludes");
+        let location_root = root.join("location");
+        std::fs::create_dir_all(location_root.join("src")).unwrap();
+        std::fs::create_dir_all(location_root.join("node_modules/pkg")).unwrap();
+        std::fs::write(location_root.join("src/app.js"), b"keep").unwrap();
+        std::fs::write(location_root.join("readme.md"), b"keep").unwrap();
+        std::fs::write(location_root.join("node_modules/pkg/index.js"), b"skip").unwrap();
+        std::fs::write(location_root.join("build.log"), b"skip").unwrap();
+
+        let db = Database::open(root.join("state.db")).unwrap();
+        db.add_location(LocationInput {
+            kind: LocationType::Local,
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            root_path: location_root,
+            notes: None,
+        })
+        .unwrap();
+
+        let prepared = prepare_scan(&db, "test", Path::new("/"))
+            .unwrap()
+            .with_scan_time_excludes(vec![
+                "node_modules/".to_string(),
+                "  ".to_string(), // dropped
+                "*.log".to_string(),
+            ]);
+        let scan_id = prepared.scan_id.clone();
+        let progress = ScanProgressStore::default();
+        progress.start(&prepared);
+        let summary = run_prepared_scan(&db, prepared, Some(progress)).unwrap();
+
+        // Only src/app.js and readme.md are indexed; node_modules subtree and
+        // build.log are pruned before hashing.
+        assert_eq!(summary.file_count, 2, "excluded files must not be indexed");
+
+        // The patterns are baked into the scan row (trimmed, empties dropped).
+        let scan = db.scan_by_id(&scan_id).unwrap().unwrap();
+        assert_eq!(scan.scan_time_excludes, vec!["node_modules/", "*.log"]);
+    }
+
     fn progress_for_active_operation_test() -> (ScanProgressStore, String) {
         let scan_id = "active-operation-test".to_string();
         let progress = ScanProgressStore::default();
@@ -3438,6 +3531,7 @@ mod tests {
             hash_workers: None,
             metadata_workers: None,
             sparse_full_below: None,
+            scan_time_excludes: Vec::new(),
         });
         (progress, scan_id)
     }

@@ -121,6 +121,15 @@ export default function AppModals(props) {
                 />
               </label>
             )}
+            <label className={fieldLabelClassName}>Exclude at scan time (one gitignore-style pattern per line)
+              <textarea
+                className={textAreaClassName()}
+                value={props.scanStartForm.scan_time_excludes ?? ''}
+                onChange={(event) => props.setScanStartForm({ ...props.scanStartForm, scan_time_excludes: event.currentTarget.value })}
+                placeholder={'node_modules/\n*.log\n.git/'}
+              />
+            </label>
+            <ModalHelp>Matches are pruned from the walk and never indexed — the patterns are baked into this scan&rsquo;s metadata.</ModalHelp>
             <fieldset className="grid grid-cols-2 gap-2 rounded-ui border border-border bg-surface p-3 max-[720px]:grid-cols-1">
               <legend className="px-1 text-xs font-semibold uppercase tracking-[0.06em] text-muted">Worker pools</legend>
               <label className={fieldLabelClassName}>Hash workers

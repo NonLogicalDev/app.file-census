@@ -105,6 +105,10 @@ pub struct Scan {
     /// scan's exact-duplicate coverage is partial.
     #[serde(default)]
     pub sparse_file_count: u64,
+    /// Gitignore-style patterns this scan applied at scan time (pruned from the
+    /// walk, never indexed). Empty when none.
+    #[serde(default)]
+    pub scan_time_excludes: Vec<String>,
 }
 
 /// The location and running scan reserved by a compatible bootstrap request.
@@ -886,6 +890,9 @@ impl Database {
         if !column_exists(conn, "scans", "sparse_full_below")? {
             conn.execute("ALTER TABLE scans ADD COLUMN sparse_full_below INTEGER", [])?;
         }
+        if !column_exists(conn, "scans", "scan_time_excludes")? {
+            conn.execute("ALTER TABLE scans ADD COLUMN scan_time_excludes TEXT", [])?;
+        }
         if !column_exists(conn, "scans", "sparse_file_count")? {
             conn.execute(
                 "ALTER TABLE scans ADD COLUMN sparse_file_count INTEGER NOT NULL DEFAULT 0",
@@ -1089,7 +1096,7 @@ impl Database {
                 r#"
                 SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
                        s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
-                       COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count
+                       COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count, s.scan_time_excludes
                 FROM scans s
                 JOIN locations l ON l.id = s.location_id
                 WHERE s.id = ?1
@@ -1223,7 +1230,7 @@ impl Database {
             r#"
             SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
                    s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
-                   COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count
+                   COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count, s.scan_time_excludes
             FROM scans s
             JOIN locations l ON l.id = s.location_id
             WHERE s.id = ?1
@@ -2210,7 +2217,7 @@ impl Database {
             r#"
             SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
                    s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
-                   COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count
+                   COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count, s.scan_time_excludes
             FROM scans s
             JOIN locations l ON l.id = s.location_id
             ORDER BY s.started_at DESC
@@ -3901,6 +3908,16 @@ impl Database {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(ScanErrorPage { total, entries })
+    }
+
+    /// Bakes the scan-time exclude patterns into the scan row (newline-joined).
+    pub fn set_scan_time_excludes(&self, scan_id: &str, patterns: &[String]) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE scans SET scan_time_excludes = ?2 WHERE id = ?1",
+            params![scan_id, patterns.join("\n")],
+        )?;
+        Ok(())
     }
 
     /// Records the sparse full-hash threshold a sparse scan ran with.
@@ -6638,7 +6655,7 @@ fn scan_by_id_from_conn(conn: &Connection, scan_id: &str) -> Result<Option<Scan>
         r#"
         SELECT s.id, s.location_id, l.slug, l.name, s.offset_path, s.started_at, s.finished_at,
                s.file_count, s.dir_count, s.error_count, s.total_bytes, s.status,
-               COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count
+               COALESCE(l.representative_scan_id = s.id, 0), s.notes, s.sparse_file_count, s.scan_time_excludes
         FROM scans s
         JOIN locations l ON l.id = s.location_id
         WHERE s.id = ?1
@@ -6736,6 +6753,17 @@ fn scan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Scan> {
         is_representative: row.get(12)?,
         notes: row.get(13)?,
         sparse_file_count: row.get::<_, i64>(14).unwrap_or(0).max(0) as u64,
+        scan_time_excludes: row
+            .get::<_, Option<String>>(15)
+            .unwrap_or(None)
+            .map(|joined| {
+                joined
+                    .lines()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| !line.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
