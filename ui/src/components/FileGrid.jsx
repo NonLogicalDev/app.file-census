@@ -61,9 +61,9 @@ function deleteCheckRank(status) {
 const deleteCheckBadgeBase =
   'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.03em] whitespace-nowrap';
 
-const badgeRed = `${deleteCheckBadgeBase} border-danger/50 bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`;
-const badgeAmber = `${deleteCheckBadgeBase} border-warning/50 bg-warning-soft text-warning`;
-const badgeGreen = `${deleteCheckBadgeBase} border-success/40 bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`;
+const badgeRed = `${deleteCheckBadgeBase} border-danger bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`;
+const badgeAmber = `${deleteCheckBadgeBase} border-warning bg-warning-soft text-warning`;
+const badgeGreen = `${deleteCheckBadgeBase} border-success bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`;
 
 // Compact large counts so the Backup cell never overflows: 1_500 -> "1.5k".
 function compactCount(n) {
@@ -122,26 +122,32 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
   const copiesTitle = `${totalEverywhere.toLocaleString()} copies of this content exist (${here.toLocaleString()} more on this disk, ${away.toLocaleString()} on other locations)`;
 
   if (scope === 'internal') {
+    // Unified pill language: "N dup" (exact same-disk duplicates), "N dup
+    // (light)" (light-hash matches only), "Unique" (no duplicate on this disk).
     if (status === 'safe') {
       return wrap(
-        <span className={badgeGreen} title="Another exact copy of this content exists on this same disk."><Icon name="copy" className="h-3 w-3" /> Dup here</span>,
-        <CopiesChip count={1 + here} title={copiesTitle} />
+        <span className={badgeGreen} title={`Another exact copy of this content exists on this same disk. ${copiesTitle}`}>
+          <Icon name="copy" className="h-3 w-3" /> {compactCount(Math.max(here, 1))} dup
+        </span>,
+        null
       );
     }
     if (status === 'warn') {
       return wrap(
-        <span className={badgeAmber} title="A light-hash (same size) match exists on this disk — probably a duplicate."><Icon name="warning" className="h-3 w-3" /> Similar</span>,
-        <CopiesChip count={1 + here} title={copiesTitle} />
+        <span className={badgeAmber} title={`A light-hash (same size) match exists on this disk — probably a duplicate, not proven by full hash. ${copiesTitle}`}>
+          <Icon name="warning" className="h-3 w-3" /> {compactCount(Math.max(here, 1))} dup (light)
+        </span>,
+        null
       );
     }
     return wrap(
-      <span className={badgeRed} title="No duplicate of this content on this disk."><Icon name="warning" className="h-3 w-3" /> Unique here</span>,
+      <span className={badgeRed} title="No duplicate of this content on this disk."><Icon name="warning" className="h-3 w-3" /> Unique</span>,
       away > 0 ? <span className="ml-1 shrink-0 text-[10px] text-muted tabular-nums" title={`${away} copies on other locations`}>·{compactCount(away)} off-disk</span> : null
     );
   }
   if (status === 'unsafe') {
     // External: no copy on another location. If there are same-disk copies, say
-    // so rather than "last copy" (deleting one still leaves others on this disk).
+    // so rather than "unique" (deleting one still leaves others on this disk).
     if (here > 0) {
       return wrap(
         <span className={badgeRed} title="No copy on another location — duplicated on this disk only."><Icon name="warning" className="h-3 w-3" /> On-disk only</span>,
@@ -149,7 +155,7 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
       );
     }
     return wrap(
-      <span className={badgeRed} title="The only copy anywhere in scope. Deleting it loses the content."><Icon name="warning" className="h-3 w-3" /> Last copy</span>,
+      <span className={badgeRed} title="The only copy anywhere in scope. Deleting it loses the content."><Icon name="warning" className="h-3 w-3" /> Unique</span>,
       null
     );
   }
@@ -173,9 +179,9 @@ function FolderRollupBadge({ safe = 0, warn = 0, unsafe = 0 }) {
   const chip = 'inline-flex items-center rounded-full border px-1.5 py-[1px] text-[10px] font-bold tabular-nums';
   return (
     <span className="inline-flex flex-wrap items-center gap-1" title="Unique contents in this folder, by backup status">
-      {safe > 0 && <span className={`${chip} border-success/45 text-success`}>{safe.toLocaleString()} safe</span>}
-      {warn > 0 && <span className={`${chip} border-warning/50 text-warning`}>{warn.toLocaleString()} partial</span>}
-      {unsafe > 0 && <span className={`${chip} border-danger/50 text-danger`}>{unsafe.toLocaleString()} unsafe</span>}
+      {safe > 0 && <span className={`${chip} border-success text-success`}>{safe.toLocaleString()} safe</span>}
+      {warn > 0 && <span className={`${chip} border-warning text-warning`}>{warn.toLocaleString()} partial</span>}
+      {unsafe > 0 && <span className={`${chip} border-danger text-danger`}>{unsafe.toLocaleString()} unsafe</span>}
     </span>
   );
 }
