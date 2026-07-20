@@ -642,6 +642,23 @@ borders now full-strength color (was /40-/50 alpha). Receipts: external
 [Unique, On-disk only], internal [Unique, 142k dup], border rgb == text rgb.
 Screenshot: shot-pills.png.
 
+## Responsiveness batch 2026-07-20 (~07:30) — CDP-verified live (`72a5806`)
+
+Six rapid asks: (1) sidebar says "Loading locations…" during first load (no
+"No locations yet" flash — verified via 50ms polling during reload). (2) Files
+column locale-formatted like Unique; "Uniq" → "Unique". (3) File Info fetch no
+longer sets the global busy flag: modal opens instantly in a loading state,
+token-guarded so Esc/supersede cancels cleanly and a late response can't
+reopen it (verified on the 244k-occurrence file: disabled-button count
+unchanged, Esc closes, still closed 6s later). (4) Preview fetch debounced
+180ms — 10 rapid arrows = 1 files.preview request (was 10). (5) Directory
+navigation slower than 200ms shows a blocking "Loading folder…" overlay
+(browse + flat; fast loads never flash it — could not force a slow load in
+headless since CDP throttling doesn't touch WebSockets; mechanism verified by
+delayed-flag logic + overlay render path). (6) Inspector button removed; the
+rail pins itself via a header pin button — pinned=docked, unpinned=hover
+overlay (verified sticky↔fixed flip + hover zone). Tests: 147 UI.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
