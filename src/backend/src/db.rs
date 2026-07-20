@@ -538,6 +538,17 @@ struct TreeSourceRow {
     duplicate_file_count: u64,
     original_file_count: u64,
     same_scan_duplicate_file_count: u64,
+    // The file's own backup tiers (one-hot) + copy counts from the cache row,
+    // so the filtered/search fold path keeps backup markers (the fast browse
+    // path already reads these; without them, search dropped all pills).
+    safe: u64,
+    warn: u64,
+    unsafe_: u64,
+    int_safe: u64,
+    int_warn: u64,
+    int_unsafe: u64,
+    copies_here: u64,
+    copies_away: u64,
 }
 
 impl ScanVisibility {
@@ -5237,7 +5248,11 @@ fn scan_tree_source_rows(
                COALESCE(dc.duplicate_file_count, 0),
                COALESCE(dc.original_file_count, 0),
                COALESCE(dc.same_scan_duplicate_file_count, 0),
-               f.blake3_light
+               f.blake3_light,
+               COALESCE(dc.safe_file_count, 0), COALESCE(dc.warn_file_count, 0),
+               COALESCE(dc.unsafe_file_count, 0), COALESCE(dc.int_safe_file_count, 0),
+               COALESCE(dc.int_warn_file_count, 0), COALESCE(dc.int_unsafe_file_count, 0),
+               COALESCE(dc.copies_here, 0), COALESCE(dc.copies_away, 0)
         FROM files f
         LEFT JOIN excluded_file_ids excluded_f ON excluded_f.id = f.id
         JOIN scans s ON s.id = f.scan_id
@@ -5277,6 +5292,14 @@ fn scan_tree_source_rows(
             duplicate_file_count: row.get(13)?,
             original_file_count: row.get(14)?,
             same_scan_duplicate_file_count: row.get(15)?,
+            safe: row.get::<_, i64>(17)?.max(0) as u64,
+            warn: row.get::<_, i64>(18)?.max(0) as u64,
+            unsafe_: row.get::<_, i64>(19)?.max(0) as u64,
+            int_safe: row.get::<_, i64>(20)?.max(0) as u64,
+            int_warn: row.get::<_, i64>(21)?.max(0) as u64,
+            int_unsafe: row.get::<_, i64>(22)?.max(0) as u64,
+            copies_here: row.get::<_, i64>(23)?.max(0) as u64,
+            copies_away: row.get::<_, i64>(24)?.max(0) as u64,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -5291,6 +5314,17 @@ fn build_tree_page_entries(
 ) -> Result<Vec<TreeEntry>> {
     let mut directories = BTreeMap::<String, TreeEntry>::new();
     let mut files = BTreeMap::<String, TreeEntry>::new();
+    let tier_word = |safe: u64, warn: u64, unsafe_: u64| {
+        if unsafe_ > 0 {
+            "unsafe"
+        } else if warn > 0 {
+            "warn"
+        } else if safe > 0 {
+            "safe"
+        } else {
+            ""
+        }
+    };
 
     for row in rows {
         let matches = filter
@@ -5376,6 +5410,16 @@ fn build_tree_page_entries(
                 if row.file.blake3.is_empty() && !row.file.blake3_light.is_empty() {
                     entry.sparse_count = entry.sparse_count.saturating_add(1);
                 }
+                // Roll the file's own tier one-hots into the folder chip counts
+                // (instance-based here; the fast browse path uses unique-content
+                // counts, but a filtered subset showing per-instance tiers is
+                // still a correct, non-empty rollup).
+                entry.safe_count = entry.safe_count.saturating_add(row.safe);
+                entry.warn_count = entry.warn_count.saturating_add(row.warn);
+                entry.unsafe_count = entry.unsafe_count.saturating_add(row.unsafe_);
+                entry.int_safe_count = entry.int_safe_count.saturating_add(row.int_safe);
+                entry.int_warn_count = entry.int_warn_count.saturating_add(row.int_warn);
+                entry.int_unsafe_count = entry.int_unsafe_count.saturating_add(row.int_unsafe);
                 entry.duplicate_file_count = entry
                     .duplicate_file_count
                     .saturating_add(duplicate_file_count);
@@ -5413,16 +5457,16 @@ fn build_tree_page_entries(
                     original_file_count,
                     same_scan_duplicate_file_count,
                     distinct_count: 1,
-                    backup_status: String::new(),
+                    backup_status: tier_word(row.safe, row.warn, row.unsafe_).to_string(),
                     safe_count: 0,
                     unsafe_count: 0,
                     warn_count: 0,
-                    internal_status: String::new(),
+                    internal_status: tier_word(row.int_safe, row.int_warn, row.int_unsafe).to_string(),
                     int_safe_count: 0,
                     int_warn_count: 0,
                     int_unsafe_count: 0,
-                    copies_here: 0,
-                    copies_away: 0,
+                    copies_here: row.copies_here,
+                    copies_away: row.copies_away,
                 },
             );
         }
