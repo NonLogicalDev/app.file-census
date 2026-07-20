@@ -317,6 +317,7 @@ function FileInfoModal(props) {
           ))}
         </SegmentedTabs>
 
+        <div className="min-h-0 flex-1 overflow-auto">
         {tab === 'preview' && (
           <section className={filePreviewPanelClassName}>
             {thumbnail ? (
@@ -445,6 +446,7 @@ function FileInfoModal(props) {
             </div>
           </section>
         )}
+        </div>
       </ModalSurface>
     </Modal>
   );

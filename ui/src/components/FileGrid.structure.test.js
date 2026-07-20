@@ -74,7 +74,12 @@ test('rows are keyboard-navigable and folders are inspectable', () => {
   // (sorted + expanded), scrolling it into view; single click inspects files
   // AND folders (dbl-click still opens folders).
   assert.match(fileGridSource, /function handleGridKeyDown/);
-  assert.match(fileGridSource, /event\.key !== 'ArrowDown' && event\.key !== 'ArrowUp'/);
+  assert.match(fileGridSource, /key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'ArrowLeft' && key !== 'ArrowRight'/);
+  // Left/Right tree semantics: Right expands / steps into; Left collapses,
+  // and jumps to the parent row from files or collapsed folders.
+  assert.match(fileGridSource, /current\.toggleExpanded\(true\)/);
+  assert.match(fileGridSource, /current\.toggleExpanded\(false\)/);
+  assert.match(fileGridSource, /path\.split\('\/'\)\.slice\(0, -1\)\.join\('\/'\)/);
   assert.match(fileGridSource, /scrollIntoView\(\{ block: 'nearest' \}\)/);
   assert.match(fileGridSource, /data-path=\{row\.original\.path\}/);
   assert.match(fileGridSource, /if \(isSelectableRow\(row\.original\)\) onInspectRow\?\.\(row\.original\)/);
@@ -88,6 +93,13 @@ test('file grid uses stable path identities and routes file inspection separatel
   assert.match(fileGridSource, /selectedSet\.has\(row\.original\.path\)/);
   assert.match(fileGridSource, /if \(row\.original\.kind === 'file'\) onInspect\?\.\(row\.original\)/);
   assert.match(fileGridSource, /if \(row\.original\.kind === 'dir' \|\| row\.original\.kind === 'parent'\) onOpen\?\.\(row\.original\)/);
+});
+
+test('select column is checkbox-width with no select-all header', () => {
+  // Fixed 28px column; header intentionally empty — a select-all checkbox up
+  // top read as ambiguous (user request 2026-07-20).
+  assert.doesNotMatch(fileGridSource, /Select all visible rows/);
+  assert.match(fileGridSource, /id: 'select',[\s\S]{0,400}?size: 28,\s*minSize: 28,\s*maxSize: 28/);
 });
 
 test('column picker visibility leaves the identity columns available', () => {

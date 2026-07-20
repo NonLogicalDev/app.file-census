@@ -259,7 +259,6 @@ function FileGridInner({
   onInspect,
   onInspectRow,
   onToggleSelection,
-  onSetSelection,
   onBuildThumbnails,
   onExclude,
   onDelete,
@@ -275,11 +274,9 @@ function FileGridInner({
   // actually skips re-renders (unrelated parent state must not bump this).
   if (typeof window !== 'undefined') window.__fileGridRenders = (window.__fileGridRenders || 0) + 1;
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
-  const selectableRows = useMemo(() => rows.filter(isSelectableRow), [rows]);
-  const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedSet.has(row.path));
   const columns = useMemo(
-    () => baseColumns({ fullPathName, selectable, selectedSet, allSelected, selectableRows, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, onToggleSelection, onSetSelection }),
-    [allSelected, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, fullPathName, onSetSelection, onToggleSelection, selectable, selectableRows, selectedSet]
+    () => baseColumns({ fullPathName, selectable, selectedSet, deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, onToggleSelection }),
+    [deleteCheck, scope, dcMode, expandableFolders, onToggleFolderExpand, fullPathName, onToggleSelection, selectable, selectedSet]
   );
   const columnVisibility = useMemo(() => {
     return Object.fromEntries(columns.map((column) => {
@@ -327,29 +324,64 @@ function FileGridInner({
     };
   }, [contextMenu]);
 
-  // Keyboard navigation: ArrowUp/ArrowDown move the inspected row through the
-  // VISIBLE row order (sorted + expanded), skipping parent/placeholder rows.
+  // Keyboard navigation. Up/Down move the inspected row through the VISIBLE
+  // order (sorted + expanded, skipping parent/placeholder). Right expands the
+  // focused folder (or steps into its first child); Left collapses it, and on
+  // a file or an already-collapsed folder jumps to the parent row.
   const gridRootRef = useRef(null);
-  function handleGridKeyDown(event) {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    if (typeof onInspectRow !== 'function') return;
-    if (event.target.closest('input, [role=menu]')) return;
-    const visible = table.getRowModel().rows
-      .map((tableRow) => tableRow.original)
-      .filter(isSelectableRow);
-    if (!visible.length) return;
-    event.preventDefault();
-    const currentIndex = visible.findIndex((entry) => entry.path === inspectedPath);
-    const nextIndex = event.key === 'ArrowDown'
-      ? Math.min(visible.length - 1, currentIndex + 1)
-      : Math.max(0, currentIndex < 0 ? 0 : currentIndex - 1);
-    const next = visible[nextIndex];
-    if (!next || next.path === inspectedPath) return;
-    onInspectRow(next);
+  function inspectAndReveal(entry) {
+    onInspectRow(entry);
     requestAnimationFrame(() => {
-      const rowEl = gridRootRef.current?.querySelector(`tr[data-path="${window.CSS?.escape ? CSS.escape(next.path) : next.path}"]`);
+      const rowEl = gridRootRef.current?.querySelector(`tr[data-path="${window.CSS?.escape ? CSS.escape(entry.path) : entry.path}"]`);
       rowEl?.scrollIntoView({ block: 'nearest' });
     });
+  }
+  function handleGridKeyDown(event) {
+    const { key } = event;
+    if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'ArrowLeft' && key !== 'ArrowRight') return;
+    if (typeof onInspectRow !== 'function') return;
+    if (event.target.closest('input, [role=menu]')) return;
+    const tableRows = table.getRowModel().rows.filter((tableRow) => isSelectableRow(tableRow.original));
+    if (!tableRows.length) return;
+
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      event.preventDefault();
+      const currentIndex = tableRows.findIndex((tableRow) => tableRow.original.path === inspectedPath);
+      const nextIndex = key === 'ArrowDown'
+        ? Math.min(tableRows.length - 1, currentIndex + 1)
+        : Math.max(0, currentIndex < 0 ? 0 : currentIndex - 1);
+      const next = tableRows[nextIndex]?.original;
+      if (!next || next.path === inspectedPath) return;
+      inspectAndReveal(next);
+      return;
+    }
+
+    // Left/Right: tree semantics, Browse table only.
+    if (!expandableFolders || fullPathName) return;
+    const currentIndex = tableRows.findIndex((tableRow) => tableRow.original.path === inspectedPath);
+    const current = tableRows[currentIndex];
+    if (!current) return;
+    event.preventDefault();
+    if (key === 'ArrowRight') {
+      if (current.original.kind !== 'dir') return;
+      if (!current.getIsExpanded()) {
+        current.toggleExpanded(true);
+        onToggleFolderExpand?.(current.original.path, true);
+        return;
+      }
+      // Already expanded: step into the first visible child.
+      const next = tableRows[currentIndex + 1];
+      if (next && next.depth === current.depth + 1) inspectAndReveal(next.original);
+      return;
+    }
+    // ArrowLeft: collapse an expanded folder; otherwise jump to the parent row.
+    if (current.original.kind === 'dir' && current.getIsExpanded()) {
+      current.toggleExpanded(false);
+      return;
+    }
+    const parentPath = current.original.path.split('/').slice(0, -1).join('/');
+    const parent = tableRows.find((tableRow) => tableRow.original.path === parentPath);
+    if (parent) inspectAndReveal(parent.original);
   }
 
   // Live sort direction, read by the folders-first sorting fn to cancel
@@ -689,34 +721,25 @@ function baseColumns(options) {
     fullPathName,
     selectable,
     selectedSet,
-    allSelected,
-    selectableRows,
     deleteCheck,
     scope = 'external',
     dcMode = false,
     expandableFolders = false,
     onToggleFolderExpand,
-    onToggleSelection,
-    onSetSelection
+    onToggleSelection
   } = options;
   const columns = [];
 
   if (selectable) {
     columns.push({
       id: 'select',
-      header: () => (
-        <input
-          aria-label="Select all visible rows"
-          checked={allSelected}
-          className={fileGridCheckboxClassName}
-          disabled={!selectableRows.length}
-          type="checkbox"
-          onChange={() => onSetSelection?.(allSelected ? [] : selectableRows)}
-        />
-      ),
-      size: 42,
-      minSize: 42,
-      maxSize: 42,
+      // No header checkbox: a select-all control up top read as ambiguous
+      // (all rows? all descendants?). The header stays empty; the column is
+      // fixed at just enough width for the row checkboxes.
+      header: '',
+      size: 28,
+      minSize: 28,
+      maxSize: 28,
       enableSorting: false,
       enableResizing: false,
       meta: centeredControlColumnMeta,

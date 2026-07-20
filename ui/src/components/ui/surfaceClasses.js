@@ -6,7 +6,9 @@ export const modalOverlayClassName = cn(
 
 const modalSurfaceSizeClasses = {
   default: 'w-[min(520px,100%)]',
-  wide: 'w-[min(980px,100%)] max-h-[min(82vh,900px)] overflow-auto'
+  // Wide modals are a non-scrolling flex column: the header/tab strip stays
+  // put and the CONTENT area supplies its own overflow container.
+  wide: '!flex w-[min(980px,100%)] max-h-[min(82vh,900px)] flex-col overflow-hidden'
 };
 
 export function modalSurfaceClassName({ size = 'default', className } = {}) {

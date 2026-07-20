@@ -515,8 +515,17 @@ export default function FileExplorer(props) {
         </div>
       </header>
 
-      {/* Nav row 1: view switch + command actions */}
+      {/* Nav row 1: Folders pane toggle + view switch + command actions */}
       <div className="flex flex-wrap items-center gap-2 border-b border-sidebar-border py-2">
+        <button
+          type="button"
+          className={`${ctrlBtn} ${foldersOpen ? 'bg-surface text-text' : ''}`}
+          onClick={() => setFoldersOpen((open) => !open)}
+          aria-pressed={foldersOpen}
+          title={foldersOpen ? 'Collapse the Folders pane' : 'Show the Folders pane'}
+        >
+          <Icon name="folder" className="h-3.5 w-3.5" /> Folders
+        </button>
         <div className="inline-flex h-[30px] flex-none items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5" role="tablist" aria-label="Scan views">
           <BackupFilterChip label="Browse" active={viewMode === 'browse'} onClick={() => setViewMode('browse')} />
           <BackupFilterChip label="Flat" active={viewMode === 'flat'} onClick={() => setViewMode('flat')} />
@@ -528,8 +537,9 @@ export default function FileExplorer(props) {
             className={ctrlBtn}
             onClick={() => onBrowseCurrentFolder(location)}
             disabled={busy || !location.connected}
+            title="Reveal the currently browsed folder in the system file explorer"
           >
-            <Icon name="folder" className="h-3.5 w-3.5" /> Browse Folder
+            <Icon name="revealFile" className="h-3.5 w-3.5" /> Reveal Folder
           </button>
           <button
             type="button"
@@ -556,15 +566,6 @@ export default function FileExplorer(props) {
           </button>
           <button type="button" className={`${ctrlBtn} ${showColumns ? 'bg-surface text-text' : ''}`} onClick={onToggleColumns} aria-expanded={showColumns}>
             <Icon name="columns" className="h-3.5 w-3.5" /> Columns
-          </button>
-          <button
-            type="button"
-            className={`${ctrlBtn} ${foldersOpen ? 'bg-surface text-text' : ''}`}
-            onClick={() => setFoldersOpen((open) => !open)}
-            aria-pressed={foldersOpen}
-            title={foldersOpen ? 'Collapse the Folders pane' : 'Show the Folders pane'}
-          >
-            <Icon name="folder" className="h-3.5 w-3.5" /> Folders
           </button>
           <button
             type="button"

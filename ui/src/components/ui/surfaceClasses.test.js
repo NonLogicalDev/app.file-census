@@ -14,7 +14,10 @@ test('modal surface classes encode default and wide dialog geometry', () => {
   assert.match(modalOverlayClassName, /backdrop-blur/);
   assert.match(modalSurfaceClassName(), /w-\[min\(520px,100%\)\]/);
   assert.match(modalSurfaceClassName({ size: 'wide' }), /w-\[min\(980px,100%\)\]/);
-  assert.match(modalSurfaceClassName({ size: 'wide' }), /overflow-auto/);
+  // Wide surface itself never scrolls — the header/tab strip stays visible
+  // and the tab content supplies its own overflow container.
+  assert.match(modalSurfaceClassName({ size: 'wide' }), /overflow-hidden/);
+  assert.match(modalSurfaceClassName({ size: 'wide' }), /flex-col/);
   assert.match(modalSurfaceClassName({ className: 'custom-surface' }), /custom-surface/);
 });
 
