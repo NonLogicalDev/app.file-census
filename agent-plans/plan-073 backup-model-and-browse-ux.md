@@ -659,6 +659,27 @@ delayed-flag logic + overlay render path). (6) Inspector button removed; the
 rail pins itself via a header pin button — pinned=docked, unpinned=hover
 overlay (verified sticky↔fixed flip + hover zone). Tests: 147 UI.
 
+## Tags & Notes 2026-07-20 (~09:00) — CDP+CLI-verified live (`9d944bc`)
+
+AddTask: tag system (UTF-8 pills in Inspector) + notes, for offline
+organization then CLI-driven delete/reorganize/move. Steering during build:
+(1) tags attach to a SINGLE (scan, path) occurrence — NOT content identity;
+(2) same for notes; (3) notes are NAMESPACED (scan, path, key) →
+(content_type, content): key '' = default note, external apps use their own
+keys, text|binary, only text renders; (4) binary notes: show existence +
+delete only; (5) keyed TEXT notes addable/editable from UI; (6) tags are a
+search term in filter expressions; (7) "Add keyed note" sits right after the
+default note; (8) prototype UI before committing (two screenshot rounds sent).
+Shipped: schema (file_tags ordered/deduped + file_notes namespaced BLOB),
+annotations RPCs ×4 (web+native parity-tested), Inspector Tags & Notes
+section (pills editor, autosave note, keyed-note cards), `tag` filter term
+with lazy FileRow.tags hydration in search + browse paths, CLI tags/notes
+commands (TSV + --json). Receipts: emoji tag round-trips, filter narrows to
+exactly the tagged file, CLI find outputs location/scan/path/note. Tests: 76
+backend / 147 UI. Queued next: #37 just install-cli/install-desktop, #38
+publish to github.com/NonLogicalDev/app.file-census (will confirm before
+pushing publicly).
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
