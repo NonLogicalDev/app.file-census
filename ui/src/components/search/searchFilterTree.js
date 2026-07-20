@@ -111,6 +111,22 @@ export function convertTermToGroup(filters, path, operator = 'and') {
   });
 }
 
+/// Replaces the term rule at `path` with a new {term, operator, expression},
+/// preserving its Match/Exclude wrapper. Groups are left untouched.
+export function replaceTermRule(filters, path, rule) {
+  if (!Array.isArray(path) || path.length === 0) return normalizedRootFilters(filters);
+  return updateNodeAtPath(normalizedRootFilters(filters), path, (current) => {
+    const normalized = normalizeSearchFilter(current);
+    const display = getDisplayNode(normalized);
+    if (!display || display.isGroup) return normalized;
+    const nextRule = normalizeSearchFilter(rule);
+    if (!nextRule) return normalized;
+    return display.excluded
+      ? normalizeSearchFilter({ term: 'filter', operator: 'not', expression: nextRule })
+      : nextRule;
+  });
+}
+
 export function simplifySingleChildGroup(filters, path) {
   if (!Array.isArray(path) || path.length === 0) return normalizedRootFilters(filters);
   return updateNodeAtPath(normalizedRootFilters(filters), path, (current) => {

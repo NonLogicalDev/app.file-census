@@ -25,9 +25,11 @@ import {
   convertTermToGroup,
   createGroupNode,
   getDisplayNode,
+  getNodeAtPath,
   moveNodeToGroup,
   normalizedRootFilters,
   removeNode,
+  replaceTermRule,
   setGroupOperator,
   simplifySingleChildGroup,
   toggleNodeExcluded
@@ -135,8 +137,54 @@ export default function SearchFilterControls({
   function clearFilters() {
     if (!canMutate || !rootFilters.length) return;
     closeBuilder();
+    setEditing(null);
     replaceFilters([]);
   }
+
+  // Inline rule editing: existing term rules open in place with the same
+  // term/operator/value controls as the Add-rule builder.
+  const [editing, setEditing] = useState(null);
+  function beginEditRule(path) {
+    const display = getDisplayNode(getNodeAtPath(rootFilters, path));
+    if (!display || display.isGroup) return;
+    const rule = display.node;
+    const isBetween = rule.operator === 'between';
+    setEditing({
+      key: pathKey(path),
+      path,
+      term: rule.term,
+      operator: rule.operator,
+      value: isBetween ? String(rule.expression?.from ?? '') : String(rule.expression ?? ''),
+      secondValue: isBetween ? String(rule.expression?.to ?? '') : ''
+    });
+  }
+  function updateEditing(patch) {
+    setEditing((current) => (current ? { ...current, ...patch } : current));
+  }
+  function saveEditRule() {
+    if (!editing || !canMutate) return;
+    const valid = editing.operator === 'between'
+      ? editing.value.trim() && editing.secondValue.trim()
+      : editing.value.trim();
+    if (!valid) return;
+    replaceFilters(replaceTermRule(rootFilters, editing.path, {
+      term: editing.term,
+      operator: editing.operator,
+      expression: editing.operator === 'between'
+        ? { from: editing.value, to: editing.secondValue }
+        : editing.value
+    }));
+    setEditing(null);
+  }
+  const editController = {
+    editing,
+    canMutate,
+    locationOptions,
+    onBegin: beginEditRule,
+    onChange: updateEditing,
+    onSave: saveEditRule,
+    onCancel: () => setEditing(null)
+  };
 
   async function copyFilterJson() {
     if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
@@ -276,6 +324,7 @@ export default function SearchFilterControls({
                 busy={busy}
                 canMutate={canMutate}
                 dropTargetKey={dropTargetKey}
+                editController={editController}
                 onAddRule={(path) => openBuilder('rule', path)}
                 onAddGroup={(path) => openBuilder('group', path)}
                 onBeginDrag={beginDrag}
@@ -404,6 +453,7 @@ function FilterTreeNode({
   busy,
   canMutate,
   dropTargetKey,
+  editController,
   onAddRule,
   onAddGroup,
   onBeginDrag,
@@ -424,6 +474,7 @@ function FilterTreeNode({
   const isDropTarget = dropTargetKey === key;
   const canSimplify = display.isGroup && display.children.length === 1;
   const label = display.isGroup ? groupLabel(display) : chipLabel(display.node);
+  const isEditingThis = !display.isGroup && editController?.editing?.key === key;
 
   return (
     <div
@@ -470,8 +521,18 @@ function FilterTreeNode({
               <span className="truncate text-sm font-medium text-text">{label}</span>
               <span className="text-xs text-muted">{display.children.length} {display.children.length === 1 ? 'node' : 'nodes'}</span>
             </div>
+          ) : isEditingThis ? (
+            <RuleEditor controller={editController} />
           ) : (
-            <div className="truncate text-sm font-medium text-text">{label}</div>
+            <button
+              type="button"
+              className="block w-full truncate border-0 bg-transparent p-0 text-left text-sm font-medium text-text transition-colors hover:text-accent disabled:pointer-events-none"
+              disabled={busy || !editController?.canMutate}
+              title="Edit this rule"
+              onClick={() => editController?.onBegin(path)}
+            >
+              {label}
+            </button>
           )}
         </div>
         <NodeActionsMenu
@@ -482,6 +543,7 @@ function FilterTreeNode({
           onAddRule={() => onAddRule(path)}
           onAddGroup={() => onAddGroup(path)}
           onConvertTerm={() => onConvertTerm(path)}
+          onEditRule={() => editController?.onBegin(path)}
           onRemove={() => onRemove(path)}
           onSimplifyGroup={() => onSimplifyGroup(path)}
         />
@@ -496,6 +558,7 @@ function FilterTreeNode({
               busy={busy}
               canMutate={canMutate}
               dropTargetKey={dropTargetKey}
+              editController={editController}
               onAddRule={onAddRule}
               onAddGroup={onAddGroup}
               onBeginDrag={onBeginDrag}
@@ -524,6 +587,7 @@ function NodeActionsMenu({
   onAddRule,
   onAddGroup,
   onConvertTerm,
+  onEditRule,
   onRemove,
   onSimplifyGroup
 }) {
@@ -547,12 +611,74 @@ function NodeActionsMenu({
             <MenuItem disabled={!canSimplify} icon={<Icon name="repair" />} onClick={onSimplifyGroup}>Simplify single-child group</MenuItem>
           </>
         ) : (
-          <MenuItem icon={<Icon name="recursive" />} onClick={onConvertTerm}>Convert term to group</MenuItem>
+          <>
+            <MenuItem icon={<Icon name="edit" />} onClick={onEditRule}>Edit rule</MenuItem>
+            <MenuItem icon={<Icon name="recursive" />} onClick={onConvertTerm}>Convert term to group</MenuItem>
+          </>
         )}
         <MenuSeparator />
         <MenuItem variant="danger" icon={<Icon name="delete" />} onClick={onRemove}>Remove</MenuItem>
       </MenuContent>
     </Menu>
+  );
+}
+
+// Inline editor for an existing term rule: same term/operator/value controls
+// as the Add-rule builder, saving in place (Match/Exclude wrapper preserved).
+function RuleEditor({ controller }) {
+  const { editing, locationOptions, onChange, onSave, onCancel } = controller;
+  const termDefinition = SEARCH_FILTER_TERMS.find((term) => term.value === editing.term) || SEARCH_FILTER_TERMS[0];
+  const operators = operatorsForSearchTerm(editing.term);
+  const valid = editing.operator === 'between'
+    ? editing.value.trim() && editing.secondValue.trim()
+    : editing.value.trim();
+  return (
+    <form
+      className="flex min-w-0 flex-wrap items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave();
+      }}
+    >
+      <select
+        aria-label="Rule field"
+        className={compactFieldClassName}
+        value={editing.term}
+        onChange={(event) => {
+          const term = event.currentTarget.value;
+          onChange({ term, operator: defaultOperatorForSearchTerm(term), value: '', secondValue: '' });
+        }}
+      >
+        {SEARCH_FILTER_TERMS.map((term) => <option key={term.value} value={term.value}>{term.label}</option>)}
+      </select>
+      <select
+        aria-label="Rule operator"
+        className={compactFieldClassName}
+        value={editing.operator}
+        onChange={(event) => {
+          const operator = event.currentTarget.value;
+          // Keep the typed value unless the shape changes (between <-> scalar).
+          const shapeChanged = operator === 'between' || editing.operator === 'between';
+          onChange({ operator, ...(shapeChanged ? { value: '', secondValue: '' } : {}) });
+        }}
+      >
+        {operators.map((operator) => <option key={operator.value} value={operator.value}>{operator.label}</option>)}
+      </select>
+      <div className="min-w-[160px] flex-1">
+        <DraftValueField
+          draftTerm={editing.term}
+          draftOperator={editing.operator}
+          draftTermDefinition={termDefinition}
+          draftValue={editing.value}
+          draftSecondValue={editing.secondValue}
+          locationOptions={locationOptions}
+          onDraftValueChange={(value) => onChange({ value })}
+          onDraftSecondValueChange={(secondValue) => onChange({ secondValue })}
+        />
+      </div>
+      <Button type="submit" size="sm" disabled={!valid} icon={<Icon name="check" />}>Save</Button>
+      <Button type="button" size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+    </form>
   );
 }
 

@@ -263,7 +263,9 @@ export default function FileExplorer(props) {
   onLoadFolderChildrenRef.current = props.onLoadFolderChildren;
   useEffect(() => {
     setTableChildNodes({});
-  }, [selectedPath, activeScan?.id, deleteCheckMode, query]);
+    // searchFilters matters too: children fetched under an old structured
+    // filter otherwise linger as "zombie" rows after the rule changes.
+  }, [selectedPath, activeScan?.id, deleteCheckMode, query, searchFilters]);
   const handleToggleFolderExpand = useCallback((path, expand) => {
     if (!expand) return;
     if (typeof onLoadFolderChildrenRef.current !== 'function') return;

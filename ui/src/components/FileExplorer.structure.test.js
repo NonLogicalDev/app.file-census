@@ -77,7 +77,7 @@ test('browse table folders expand inline with lazy children', () => {
   assert.match(fileExplorerSource, /gridRowsWithChildren/);
   assert.match(fileExplorerSource, /onLoadFolderChildren/);
   assert.match(fileExplorerSource, /expandableFolders/);
-  assert.match(fileExplorerSource, /\[selectedPath, activeScan\?\.id, deleteCheckMode, query\]/);
+  assert.match(fileExplorerSource, /\[selectedPath, activeScan\?\.id, deleteCheckMode, query, searchFilters\]/);
   const fileGridSource = readFileSync(join(componentsDir, 'FileGrid.jsx'), 'utf8');
   assert.match(fileGridSource, /getExpandedRowModel/);
   assert.match(fileGridSource, /getSubRows: \(row\) => row\.subRows/);
