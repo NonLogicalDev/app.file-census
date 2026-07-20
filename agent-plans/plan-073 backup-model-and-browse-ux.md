@@ -691,6 +691,23 @@ pre-created it empty, public): main + redesign/shadcn-dark-shell both at
 19ac5cb, default=main, description + topics set, README rendering confirmed
 via API. No secrets in tree (scanned); DBs/targets ignored.
 
+## Worker pools 2026-07-20 (~11:30) — verified (`7730126`)
+
+User: "desperately need options for configuring size of worker pools, 3
+hashers is too small" + "reference prior plans". Prior-plan grounding:
+plan-036 (discovery parity; hashing/DB were the hidden slow paths, --threads
+flag precedent), plan-071 (two-phase scan: hash workers drain a buffered
+queue in phase 2 — more hashers directly shortens phase 2; ALSO the lesson
+that split default sources mask each other, so defaults live ONLY in
+scanner.rs), plan-069 (--hash-policy plumbing pattern: CLI flag → prepare fn
+→ RPC params web+native → UI modal). Shipped exactly that shape:
+PreparedScan.with_workers overrides > FILE_CENSUS_{HASH,METADATA}_WORKERS env
+> auto (hash auto-cap raised 4→8), clamp 1..64, sizes logged at scan start.
+Surfaces: `scan`/`scans start` CLI flags, scans.start RPC params (parity test
+covers), Start-scan modal "Worker pools" fieldset. Receipts: CLI 6/3 and env
+12 both logged; modal screenshot (had to use the local location — NLBackup
+currently shows Disconnected in the overview, drive likely unmounted).
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
