@@ -96,6 +96,27 @@ impl AppCore {
 
     pub async fn handle(&self, method: &str, params: Option<Value>) -> Result<Value> {
         match method {
+        "settings.get" => {
+                let (hash_workers, metadata_workers) = self.db.scan_worker_defaults()?;
+                Ok(serde_json::json!({
+                    "scan_hash_workers": hash_workers,
+                    "scan_metadata_workers": metadata_workers,
+                }))
+            }
+            "settings.set" => {
+                let params: SettingsSetParams = decode_params(params)?;
+                if let Some(value) = params.scan_hash_workers {
+                    self.db.set_app_setting("scan.hash_workers", worker_setting_value(&value).as_deref())?;
+                }
+                if let Some(value) = params.scan_metadata_workers {
+                    self.db.set_app_setting("scan.metadata_workers", worker_setting_value(&value).as_deref())?;
+                }
+                let (hash_workers, metadata_workers) = self.db.scan_worker_defaults()?;
+                Ok(serde_json::json!({
+                    "scan_hash_workers": hash_workers,
+                    "scan_metadata_workers": metadata_workers,
+                }))
+            }
             "overview.get" => {
                 // Stale-while-revalidate, parity with web.rs: serve the cached
                 // snapshot; refresh in the background when the fingerprint moved.
@@ -940,6 +961,23 @@ struct TreeRpcParams {
     #[serde(default)]
     delete_check: bool,
 }
+#[derive(Deserialize)]
+struct SettingsSetParams {
+    /// Absent = leave untouched; null = clear back to auto; number = set.
+    #[serde(default)]
+    scan_hash_workers: Option<Value>,
+    #[serde(default)]
+    scan_metadata_workers: Option<Value>,
+}
+
+/// Interprets a tri-state worker setting into a storable string.
+fn worker_setting_value(value: &Value) -> Option<String> {
+    value
+        .as_u64()
+        .filter(|count| *count >= 1)
+        .map(|count| count.min(64).to_string())
+}
+
 #[derive(Deserialize)]
 struct FindQuery {
     q: String,

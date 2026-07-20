@@ -712,6 +712,15 @@ impl Database {
                 PRIMARY KEY (scan_id, path, key)
             ) WITHOUT ROWID;
 
+            -- App-level user preferences (Options page). Simple KV. The
+            -- value_json column name matches a legacy table shape that still
+            -- exists in older databases.
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS duplicate_cache_runs (
                 id TEXT PRIMARY KEY,
                 fingerprint TEXT NOT NULL UNIQUE,
@@ -3770,6 +3779,45 @@ impl Database {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    pub fn app_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT value_json FROM app_settings WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Sets (or clears, with None) one app setting.
+    pub fn set_app_setting(&self, key: &str, value: Option<&str>) -> Result<()> {
+        let conn = self.connect()?;
+        match value {
+            Some(value) => {
+                conn.execute(
+                    "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                    params![key, value, Utc::now().to_rfc3339()],
+                )?;
+            }
+            None => {
+                conn.execute("DELETE FROM app_settings WHERE key = ?1", [key])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stored global defaults for the scan worker pools (Options page):
+    /// (hash_workers, metadata_workers). Absent/invalid entries are None.
+    pub fn scan_worker_defaults(&self) -> Result<(Option<usize>, Option<usize>)> {
+        let parse = |value: Option<String>| value.and_then(|v| v.trim().parse::<usize>().ok());
+        Ok((
+            parse(self.app_setting("scan.hash_workers")?),
+            parse(self.app_setting("scan.metadata_workers")?),
+        ))
     }
 
     /// Cached overview, stale-while-revalidate. Returns the stored snapshot

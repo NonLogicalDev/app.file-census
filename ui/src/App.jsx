@@ -1991,6 +1991,10 @@ export default function App() {
     return rpc('files.note.set', { scan_id: scanId, path: entry.path, key, content });
   }, [rpc]);
 
+  // Options page: global app settings (scan worker-pool defaults).
+  const loadAppSettings = useCallback(() => rpc('settings.get', {}), [rpc]);
+  const saveAppSettings = useCallback((patch) => rpc('settings.set', patch), [rpc]);
+
   // Verdicts TSV export. Web: browser download via the HTTP endpoint.
   // Desktop: no HTTP server, so a native save dialog writes the file.
   async function exportVerdicts({ scanId, path, backup, scope }) {
@@ -2749,6 +2753,8 @@ export default function App() {
           canChooseDatabase={desktopRuntime}
           busy={busy}
           onChooseDatabase={chooseDatabaseLocation}
+          onLoadSettings={loadAppSettings}
+          onSaveSettings={saveAppSettings}
         />
       )}
       {activeTab === 'duplicates' && (

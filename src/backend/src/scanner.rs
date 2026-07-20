@@ -957,13 +957,16 @@ pub fn run_prepared_scan(
     // Pool sizing: per-run override > env var > auto. Hashing is the long
     // pole on fast media, so it is fully configurable (plan-036/071 history:
     // the old hard cap of 4 was too small for SSD/NAS sources).
+    // Stored Options-page defaults slot between per-run overrides and env.
+    let (stored_hash_workers, stored_metadata_workers) =
+        db.scan_worker_defaults().unwrap_or((None, None));
     let metadata_workers = resolve_worker_count(
-        prepared.metadata_workers,
+        prepared.metadata_workers.or(stored_metadata_workers),
         "FILE_CENSUS_METADATA_WORKERS",
         2,
     );
     let hash_workers = resolve_worker_count(
-        prepared.hash_workers,
+        prepared.hash_workers.or(stored_hash_workers),
         "FILE_CENSUS_HASH_WORKERS",
         hash_worker_count(),
     );

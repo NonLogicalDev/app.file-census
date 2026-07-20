@@ -188,6 +188,27 @@ async fn handle_rpc_result(
     params: Option<Value>,
 ) -> anyhow::Result<Value> {
     match method {
+        "settings.get" => {
+            let (hash_workers, metadata_workers) = state.db.scan_worker_defaults()?;
+            Ok(serde_json::json!({
+                "scan_hash_workers": hash_workers,
+                "scan_metadata_workers": metadata_workers,
+            }))
+        }
+        "settings.set" => {
+            let params: SettingsSetParams = decode_params(params)?;
+            if let Some(value) = params.scan_hash_workers {
+                state.db.set_app_setting("scan.hash_workers", worker_setting_value(&value).as_deref())?;
+            }
+            if let Some(value) = params.scan_metadata_workers {
+                state.db.set_app_setting("scan.metadata_workers", worker_setting_value(&value).as_deref())?;
+            }
+            let (hash_workers, metadata_workers) = state.db.scan_worker_defaults()?;
+            Ok(serde_json::json!({
+                "scan_hash_workers": hash_workers,
+                "scan_metadata_workers": metadata_workers,
+            }))
+        }
         "overview.get" => Ok(serde_json::to_value(overview_stale_while_revalidate(&state)?)?),
         "locations.list" => Ok(serde_json::to_value(locations_with_liveness(&state.db)?)?),
         "locations.open_folder" => {
@@ -938,6 +959,23 @@ struct StartScanParams {
     hash_workers: Option<usize>,
     #[serde(default)]
     metadata_workers: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SettingsSetParams {
+    /// Absent = leave untouched; null = clear back to auto; number = set.
+    #[serde(default)]
+    scan_hash_workers: Option<Value>,
+    #[serde(default)]
+    scan_metadata_workers: Option<Value>,
+}
+
+/// Interprets a tri-state worker setting into a storable string.
+fn worker_setting_value(value: &Value) -> Option<String> {
+    value
+        .as_u64()
+        .filter(|count| *count >= 1)
+        .map(|count| count.min(64).to_string())
 }
 
 #[derive(Deserialize)]
