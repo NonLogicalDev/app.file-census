@@ -96,7 +96,29 @@ impl AppCore {
 
     pub async fn handle(&self, method: &str, params: Option<Value>) -> Result<Value> {
         match method {
-            "overview.get" => Ok(serde_json::to_value(self.db.overview()?)?),
+            "overview.get" => {
+                // Stale-while-revalidate, parity with web.rs: serve the cached
+                // snapshot; refresh in the background when the fingerprint moved.
+                let (cached, fresh) = self.db.overview_cached()?;
+                match cached {
+                    Some(overview) => {
+                        if !fresh {
+                            let db = (*self.db).clone();
+                            let events = self.events.clone();
+                            std::thread::spawn(move || match db.refresh_overview_cache() {
+                                Ok(overview) => {
+                                    events.emit("overview_updated", serde_json::json!(overview));
+                                }
+                                Err(error) => {
+                                    eprintln!("overview cache refresh failed: {error:#}");
+                                }
+                            });
+                        }
+                        Ok(serde_json::to_value(overview)?)
+                    }
+                    None => Ok(serde_json::to_value(self.db.refresh_overview_cache()?)?),
+                }
+            }
             "locations.list" => Ok(serde_json::to_value(locations_with_liveness(&self.db)?)?),
             "locations.open_folder" => {
                 let params: LocationFolderParams = decode_params(params)?;

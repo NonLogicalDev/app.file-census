@@ -245,6 +245,10 @@ export default function App() {
     if (appEvent.kind === 'scan_excludes_updated') {
       void refreshAfterScanExcludesUpdate(appEvent.payload?.scan_id);
     }
+    if (appEvent.kind === 'overview_updated' && appEvent.payload) {
+      // Background stale-while-revalidate refresh finished.
+      setOverview(appEvent.payload);
+    }
     if (
       appEvent.kind === 'delete_check_class_ready' &&
       appEvent.payload?.scan_id === latest.current.selectedScanId &&

@@ -81,7 +81,30 @@ pub async fn serve_listener(db_path: PathBuf, listener: tokio::net::TcpListener)
 }
 
 async fn overview(State(state): State<AppState>) -> ApiResult<Json<impl Serialize>> {
-    Ok(Json(state.db.overview()?))
+    Ok(Json(overview_stale_while_revalidate(&state)?))
+}
+
+/// Serves the cached overview instantly; when the cache is stale, the stale
+/// snapshot is returned and a background refresh emits `overview_updated`.
+/// Only a database with no snapshot at all pays the full aggregate cost inline.
+fn overview_stale_while_revalidate(state: &AppState) -> anyhow::Result<crate::db::Overview> {
+    let (cached, fresh) = state.db.overview_cached()?;
+    match cached {
+        Some(overview) => {
+            if !fresh {
+                let db = state.db.clone();
+                let events = state.events.clone();
+                std::thread::spawn(move || match db.refresh_overview_cache() {
+                    Ok(overview) => {
+                        events.emit("overview_updated", serde_json::json!(overview));
+                    }
+                    Err(error) => eprintln!("overview cache refresh failed: {error:#}"),
+                });
+            }
+            Ok(overview)
+        }
+        None => state.db.refresh_overview_cache(),
+    }
 }
 
 async fn locations(State(state): State<AppState>) -> ApiResult<Json<impl Serialize>> {
@@ -94,8 +117,20 @@ async fn events_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl 
 
 async fn events_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
+    // Requests are handled CONCURRENTLY: each RPC runs in its own task and
+    // responses funnel through this channel to the single socket writer, so a
+    // slow call (e.g. a cold overview) cannot serialize fast ones behind it.
+    // JSON-RPC ids let the client match out-of-order responses.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let writer = tokio::spawn(async move {
+        while let Some(text) = out_rx.recv().await {
+            if sender.send(Message::Text(text)).await.is_err() {
+                break;
+            }
+        }
+    });
     let hello = json_rpc_event("connected", serde_json::json!({}));
-    if sender.send(Message::Text(hello.to_string())).await.is_err() {
+    if out_tx.send(hello.to_string()).await.is_err() {
         return;
     }
     let mut rx = state.events.subscribe();
@@ -104,23 +139,27 @@ async fn events_socket(socket: WebSocket, state: AppState) {
             event = recv_app_event_tolerating_lag(&mut rx) => {
                 let Some(event) = event else { break; };
                 let notification = json_rpc_event(event.kind, event.payload);
-                if sender.send(Message::Text(notification.to_string())).await.is_err() {
+                if out_tx.send(notification.to_string()).await.is_err() {
                     break;
                 }
             }
             message = receiver.next() => {
                 let Some(Ok(message)) = message else { break; };
                 let Message::Text(text) = message else { continue; };
-                let response = match serde_json::from_str::<RpcRequest>(&text) {
-                    Ok(request) => handle_rpc(state.clone(), request).await,
-                    Err(error) => json_rpc_error(Value::Null, -32700, error.to_string()),
-                };
-                if sender.send(Message::Text(response.to_string())).await.is_err() {
-                    break;
-                }
+                let state = state.clone();
+                let out_tx = out_tx.clone();
+                tokio::spawn(async move {
+                    let response = match serde_json::from_str::<RpcRequest>(&text) {
+                        Ok(request) => handle_rpc(state, request).await,
+                        Err(error) => json_rpc_error(Value::Null, -32700, error.to_string()),
+                    };
+                    let _ = out_tx.send(response.to_string()).await;
+                });
             }
         }
     }
+    drop(out_tx);
+    let _ = writer.await;
 }
 
 #[derive(Deserialize)]
@@ -149,7 +188,7 @@ async fn handle_rpc_result(
     params: Option<Value>,
 ) -> anyhow::Result<Value> {
     match method {
-        "overview.get" => Ok(serde_json::to_value(state.db.overview()?)?),
+        "overview.get" => Ok(serde_json::to_value(overview_stale_while_revalidate(&state)?)?),
         "locations.list" => Ok(serde_json::to_value(locations_with_liveness(&state.db)?)?),
         "locations.open_folder" => {
             let params: LocationFolderParams = decode_params(params)?;

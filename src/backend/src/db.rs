@@ -442,7 +442,7 @@ pub struct UpdateScanSeed {
     pub reusable_files: HashMap<String, ReusableFile>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct Overview {
     pub location_count: u64,
     pub scan_count: u64,
@@ -3504,6 +3504,47 @@ impl Database {
         Ok(out)
     }
 
+    /// Cached overview, stale-while-revalidate. Returns the stored snapshot
+    /// (if any) plus whether it still matches the cheap change fingerprint
+    /// (scan roster + latest duplicate-cache run). The full `overview()`
+    /// aggregates scan the whole files table (multi-second on large DBs), so
+    /// request paths serve this and refresh in the background when stale.
+    pub fn overview_cached(&self) -> Result<(Option<Overview>, bool)> {
+        let conn = self.connect()?;
+        ensure_overview_cache_table(&conn)?;
+        let fingerprint = overview_fingerprint(&conn)?;
+        let row = conn
+            .query_row(
+                "SELECT fingerprint, payload FROM overview_cache WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((stored, payload)) => {
+                let overview = serde_json::from_str::<Overview>(&payload).ok();
+                let fresh = overview.is_some() && stored == fingerprint;
+                Ok((overview, fresh))
+            }
+            None => Ok((None, false)),
+        }
+    }
+
+    /// Recomputes the overview aggregates and stores them with the current
+    /// fingerprint. Returns the fresh snapshot.
+    pub fn refresh_overview_cache(&self) -> Result<Overview> {
+        let overview = self.overview()?;
+        let conn = self.connect()?;
+        ensure_overview_cache_table(&conn)?;
+        let fingerprint = overview_fingerprint(&conn)?;
+        conn.execute(
+            "INSERT INTO overview_cache (id, fingerprint, payload) VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET fingerprint = excluded.fingerprint, payload = excluded.payload",
+            params![fingerprint, serde_json::to_string(&overview)?],
+        )?;
+        Ok(overview)
+    }
+
     pub fn overview(&self) -> Result<Overview> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
@@ -3565,6 +3606,38 @@ impl Database {
 fn scalar_u64(conn: &Connection, sql: &str) -> Result<u64> {
     conn.query_row(sql, [], |row| row.get(0))
         .map_err(Into::into)
+}
+
+fn ensure_overview_cache_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS overview_cache (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            fingerprint TEXT NOT NULL,
+            payload TEXT NOT NULL
+        )",
+    )?;
+    Ok(())
+}
+
+/// Cheap change detector for the overview aggregates: the scan roster covers
+/// inventory totals; the latest duplicate-cache run covers duplicate_groups
+/// (exclude/representative changes always trigger a cache rebuild).
+fn overview_fingerprint(conn: &Connection) -> Result<String> {
+    let (scan_count, latest_scan): (u64, Option<String>) = conn.query_row(
+        "SELECT COUNT(*), MAX(started_at) FROM scans",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let latest_cache_run: Option<String> = conn
+        .query_row("SELECT MAX(ready_at) FROM duplicate_cache_runs", [], |row| row.get(0))
+        .optional()?
+        .flatten();
+    let location_count = scalar_u64(conn, "SELECT COUNT(*) FROM locations")?;
+    Ok(format!(
+        "{location_count}:{scan_count}:{}:{}",
+        latest_scan.unwrap_or_default(),
+        latest_cache_run.unwrap_or_default()
+    ))
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
