@@ -630,6 +630,18 @@ in its own task behind an mpsc writer, so slow calls can't serialize fast
 ones. Receipts: overview 5.8s once → 16ms; locations 22ms concurrent;
 reload-to-sidebar ~1.6s (was 10s+). Tests: 147 UI / 75 backend.
 
+## Pill unification 2026-07-20 (~06:20) — CDP-verified live (`7eccff5`)
+
+User: unify "LAST COPY" + "UNIQUE HERE" → "UNIQUE"; "DUP HERE" → "N dup" and
+"N dup (light)"; borders follow pill color. Shipped exactly that: internal
+unique-here and external last-copy both read UNIQUE (red); internal exact dup
+reads "N dup" (green, compact count, ×N chip dropped as redundant); light-only
+match reads "N dup (light)" (amber). External "On-disk only ×N" kept as a
+distinct state; DC-mode survival wording untouched. Badge + folder-chip
+borders now full-strength color (was /40-/50 alpha). Receipts: external
+[Unique, On-disk only], internal [Unique, 142k dup], border rgb == text rgb.
+Screenshot: shot-pills.png.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
