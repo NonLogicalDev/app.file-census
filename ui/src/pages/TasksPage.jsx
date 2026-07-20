@@ -145,6 +145,54 @@ function backgroundTask(task) {
   };
 }
 
+// Persisted per-scan error-log (files that recorded an error while indexing).
+// Fetched from the database, so it works for finished scans too.
+function ScanErrorLog({ scanId, errorCount, onLoadScanErrors }) {
+  const [page, setPage] = useState(null);
+  useEffect(() => {
+    if (typeof onLoadScanErrors !== 'function') return undefined;
+    let stale = false;
+    setPage(null);
+    onLoadScanErrors(scanId)
+      .then((data) => {
+        if (!stale && data) setPage(data);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [scanId, onLoadScanErrors]);
+  return (
+    <section
+      className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[34px_minmax(0,1fr)] overflow-hidden border-t border-sidebar-border"
+      aria-label="Scan errors"
+    >
+      <div className="flex items-center justify-between border-b border-sidebar-border bg-sidebar-bg px-3 text-[11px] font-medium text-warning">
+        <span className="inline-flex items-center gap-1.5">
+          <Icon name="warning" className="h-3.5 w-3.5" /> Errors ({Number(errorCount).toLocaleString()})
+        </span>
+        {page && page.entries.length < page.total && (
+          <small className="text-muted">showing first {page.entries.length.toLocaleString()} of {Number(page.total).toLocaleString()}</small>
+        )}
+      </div>
+      <div className="min-h-0 overflow-auto">
+        {!page ? (
+          <p className="m-0 px-3 py-2 text-[11px] text-text-tertiary">Loading errors…</p>
+        ) : page.entries.length ? (
+          page.entries.map((entry) => (
+            <div key={entry.path} className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)] gap-2 border-b border-surface px-3 py-1.5 text-[11px]">
+              <code className="min-w-0 truncate text-muted-strong" title={entry.path}>{entry.path}</code>
+              <span className="min-w-0 truncate text-warning" title={entry.error}>{entry.error}</span>
+            </div>
+          ))
+        ) : (
+          <p className="m-0 px-3 py-2 text-[11px] text-text-tertiary">No error rows recorded.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function StatusText({ status }) {
   return (
     <span className={`inline-flex flex-none items-center gap-1 text-[11px] font-medium ${statusTextClass(status)}`}>
@@ -180,7 +228,8 @@ export default function TasksPage({
   busy = false,
   onStopScan,
   onPauseScan,
-  onResumeScan
+  onResumeScan,
+  onLoadScanErrors
 }) {
   const canStopScan = typeof onStopScan === 'function';
 
@@ -435,7 +484,7 @@ export default function TasksPage({
                       Pause
                     </Button>
                   )}
-                  {selectedTask.isScan && canStopScan && selectedTask.status !== 'stopping' && (
+                  {selectedTask.isScan && canStopScan && ['running', 'paused', 'repairing'].includes(selectedTask.status) && (
                     <Button variant="warning" onClick={() => onStopScan(selectedTask.id)} disabled={busy} icon={<Icon name="stop" />}>
                       Stop
                     </Button>
@@ -497,7 +546,9 @@ export default function TasksPage({
                 </dl>
               </div>
 
-              {/* Body: worker pool | events */}
+              {/* Body: [worker pool | events] plus a persisted error-log strip
+                  when the selected scan recorded any errors. */}
+              <div className={`grid min-h-0 ${selectedTask.isScan && selectedTask.errors > 0 ? 'grid-rows-[minmax(0,1.4fr)_minmax(0,1fr)]' : 'grid-rows-[minmax(0,1fr)]'}`}>
               <div className="grid min-h-0 grid-cols-[minmax(0,1.25fr)_minmax(0,0.8fr)]">
                 <section className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[34px_minmax(0,1fr)] overflow-hidden border-r border-sidebar-border" aria-label="Worker pool">
                   <div className="flex items-center justify-between border-b border-sidebar-border bg-sidebar-bg px-3 text-[11px] font-medium text-muted-strong">
@@ -528,6 +579,14 @@ export default function TasksPage({
                 </section>
 
                 {eventsSection}
+              </div>
+              {selectedTask.isScan && selectedTask.errors > 0 && (
+                <ScanErrorLog
+                  scanId={selectedTask.id}
+                  errorCount={selectedTask.errors}
+                  onLoadScanErrors={onLoadScanErrors}
+                />
+              )}
               </div>
             </>
           ) : (

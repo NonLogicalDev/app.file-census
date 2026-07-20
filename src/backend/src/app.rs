@@ -189,6 +189,7 @@ impl AppCore {
                         "location_deleted",
                         serde_json::json!({ "slug": params.slug, "scan_ids": scan_ids }),
                     );
+                    crate::duplicate_cache::spawn_rebuild_if_stale(self.db.clone(), self.events.clone());
                 }
                 Ok(serde_json::json!({ "deleted": deleted }))
             }
@@ -271,6 +272,7 @@ impl AppCore {
                         "scan_deleted",
                         serde_json::json!({ "scan_id": params.scan_id }),
                     );
+                    crate::duplicate_cache::spawn_rebuild_if_stale(self.db.clone(), self.events.clone());
                 }
                 Ok(serde_json::json!({ "deleted": deleted }))
             }
@@ -279,6 +281,7 @@ impl AppCore {
                 let path = normalized_scan_path(&params.path)?;
                 let deleted = self.db.delete_visible_scan_path(&params.scan_id, &path)?;
                 if deleted > 0 {
+                    crate::duplicate_cache::spawn_rebuild_if_stale(self.db.clone(), self.events.clone());
                     self.events.emit(
                         "scan_path_deleted",
                         serde_json::json!({ "scan_id": params.scan_id, "path": path, "deleted": deleted }),
@@ -376,6 +379,14 @@ impl AppCore {
             "delete_check.validate" => {
                 let params: ScanIdParams = decode_params(params)?;
                 Ok(serde_json::to_value(self.db.delete_check_validate(&params.scan_id)?)?)
+            }
+        "scans.errors" => {
+                let params: ScanErrorsParams = decode_params(params)?;
+                Ok(serde_json::to_value(self.db.scan_error_files(
+                    &params.scan_id,
+                    params.limit.unwrap_or(200),
+                    params.offset.unwrap_or(0),
+                )?)?)
             }
             "scans.tree" => {
                 let params: TreeRpcParams = decode_params(params)?;
@@ -982,6 +993,13 @@ fn worker_setting_value(value: &Value) -> Option<String> {
         .as_u64()
         .filter(|count| *count >= 1)
         .map(|count| count.min(64).to_string())
+}
+
+#[derive(Deserialize)]
+struct ScanErrorsParams {
+    scan_id: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 #[derive(Deserialize)]

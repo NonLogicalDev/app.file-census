@@ -731,17 +731,28 @@ fn prepare_compatible_scan(db: &Database, args: ScanArgs) -> Result<scanner::Pre
     prepare_compatible_scan_with_started_at(db, args, Utc::now())
 }
 
-/// Parses a human size ("512M", "1G", "1048576") into bytes.
+/// Parses a human size ("500MB", "1.5G", "512m", "1048576") into bytes.
+/// Decimal amounts are allowed with a unit; a bare number is bytes.
 fn parse_size_arg(value: &str) -> Result<u64> {
     let trimmed = value.trim();
-    let (digits, multiplier) = match trimmed.chars().last() {
-        Some('k') | Some('K') => (&trimmed[..trimmed.len() - 1], 1024u64),
-        Some('m') | Some('M') => (&trimmed[..trimmed.len() - 1], 1024u64 * 1024),
-        Some('g') | Some('G') => (&trimmed[..trimmed.len() - 1], 1024u64 * 1024 * 1024),
-        _ => (trimmed, 1),
+    let lower = trimmed.to_ascii_lowercase();
+    let (amount_str, multiplier) = if let Some(stripped) = lower.strip_suffix("kb").or_else(|| lower.strip_suffix('k'.to_string().as_str())) {
+        (stripped.to_string(), 1024f64)
+    } else if let Some(stripped) = lower.strip_suffix("mb").or_else(|| lower.strip_suffix('m'.to_string().as_str())) {
+        (stripped.to_string(), 1024f64 * 1024.0)
+    } else if let Some(stripped) = lower.strip_suffix("gb").or_else(|| lower.strip_suffix('g'.to_string().as_str())) {
+        (stripped.to_string(), 1024f64 * 1024.0 * 1024.0)
+    } else {
+        (lower.clone(), 1.0)
     };
-    let base: u64 = digits.trim().parse().map_err(|_| anyhow::anyhow!("invalid size: {value}"))?;
-    Ok(base.saturating_mul(multiplier))
+    let amount: f64 = amount_str
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid size: {value}"))?;
+    if !amount.is_finite() || amount <= 0.0 {
+        anyhow::bail!("invalid size: {value}");
+    }
+    Ok((amount * multiplier).round() as u64)
 }
 
 fn prepare_compatible_scan_with_started_at(

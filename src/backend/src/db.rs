@@ -446,6 +446,18 @@ pub struct UpdateScanSeed {
     pub reusable_files: HashMap<String, ReusableFile>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ScanErrorPage {
+    pub total: u64,
+    pub entries: Vec<ScanErrorEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScanErrorEntry {
+    pub path: String,
+    pub error: String,
+}
+
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct FileAnnotations {
     pub tags: Vec<String>,
@@ -3807,6 +3819,32 @@ impl Database {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Per-scan error log: every indexed row that recorded an error (unreadable
+    /// files, permission failures, …). Persisted with the scan, so the Tasks
+    /// page can show errors for finished scans too.
+    pub fn scan_error_files(&self, scan_id: &str, limit: u32, offset: u32) -> Result<ScanErrorPage> {
+        let conn = self.connect()?;
+        let total: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE scan_id = ?1 AND error IS NOT NULL",
+            [scan_id],
+            |row| row.get(0),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT path, error FROM files
+             WHERE scan_id = ?1 AND error IS NOT NULL
+             ORDER BY path LIMIT ?2 OFFSET ?3",
+        )?;
+        let entries = stmt
+            .query_map(params![scan_id, limit.max(1), offset], |row| {
+                Ok(ScanErrorEntry {
+                    path: row.get(0)?,
+                    error: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ScanErrorPage { total, entries })
     }
 
     /// Records the sparse full-hash threshold a sparse scan ran with.

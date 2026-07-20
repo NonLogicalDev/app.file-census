@@ -839,7 +839,8 @@ export default function FileExplorer(props) {
         </div>
       )}
 
-      <ScanProgressPools progress={activeScan} />
+      {/* Worker-pool bars are live telemetry: only while the scan is active. */}
+      {activeScanStatus && <ScanProgressPools progress={activeScan} />}
 
       <section className={logPanelClassName}>
         <h3>Work log</h3>

@@ -262,6 +262,7 @@ async fn handle_rpc_result(
                         "scan_ids": scan_ids,
                     }),
                 );
+                crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
             }
             Ok(serde_json::json!({ "deleted": deleted }))
         }
@@ -347,6 +348,9 @@ async fn handle_rpc_result(
                     "scan_deleted",
                     serde_json::json!({ "scan_id": params.scan_id }),
                 );
+                // The duplicate scope changed: recompute backup markers so the
+                // browse UI does not sit on a stale/empty cache ("—" tiers).
+                crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
             }
             Ok(serde_json::json!({ "deleted": deleted }))
         }
@@ -357,6 +361,7 @@ async fn handle_rpc_result(
                 .db
                 .delete_visible_scan_path(&params.scan_id, &path)?;
             if deleted > 0 {
+                crate::duplicate_cache::spawn_rebuild_if_stale(state.db.clone(), state.events.clone());
                 state.events.emit(
                     "scan_path_deleted",
                     serde_json::json!({
@@ -462,6 +467,14 @@ async fn handle_rpc_result(
                         .delete_check(&params.scan_id, params.path.as_deref().unwrap_or(""))?
                 };
             Ok(serde_json::to_value(result)?)
+        }
+        "scans.errors" => {
+            let params: ScanErrorsParams = decode_params(params)?;
+            Ok(serde_json::to_value(state.db.scan_error_files(
+                &params.scan_id,
+                params.limit.unwrap_or(200),
+                params.offset.unwrap_or(0),
+            )?)?)
         }
         "scans.tree" => {
             let params: TreeRpcParams = decode_params(params)?;
@@ -980,6 +993,13 @@ fn worker_setting_value(value: &Value) -> Option<String> {
         .as_u64()
         .filter(|count| *count >= 1)
         .map(|count| count.min(64).to_string())
+}
+
+#[derive(Deserialize)]
+struct ScanErrorsParams {
+    scan_id: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 #[derive(Deserialize)]

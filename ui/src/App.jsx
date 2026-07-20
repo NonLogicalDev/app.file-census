@@ -245,6 +245,11 @@ export default function App() {
     if (appEvent.kind === 'scan_excludes_updated') {
       void refreshAfterScanExcludesUpdate(appEvent.payload?.scan_id);
     }
+    if (appEvent.kind === 'duplicate_cache_ready' && latest.current.selectedScanId) {
+      // Backup markers were recomputed (excludes/deletes/new scans): refresh
+      // the visible tree so tiers stop reading "—".
+      scheduleTreeReload();
+    }
     if (appEvent.kind === 'overview_updated' && appEvent.payload) {
       // Background stale-while-revalidate refresh finished.
       setOverview(appEvent.payload);
@@ -366,6 +371,27 @@ export default function App() {
   // shows the directory tree, so tree data loads independent of any subview.
   const browsingScan = activeTab === 'locations' && Boolean(selectedScanId);
   const runningProgress = useMemo(() => Object.values(scanProgress).filter((progress) => isActiveStatus(progress.status)), [scanProgress]);
+  // Tasks page feed: live progress plus HISTORICAL scans (persisted rows), so
+  // finished scans — and their persisted error logs — survive a reload.
+  const taskProgress = useMemo(() => {
+    const live = new Map(Object.entries(scanProgress).map(([id, progress]) => [id, progress]));
+    const historical = scans
+      .filter((scan) => !live.has(scan.id))
+      .map((scan) => ({
+        scan_id: scan.id,
+        location_slug: scan.location_slug,
+        location_name: scan.location_name || scan.location_slug,
+        status: scan.status,
+        file_count: scan.file_count,
+        dir_count: scan.dir_count,
+        error_count: scan.error_count,
+        total_bytes: scan.total_bytes,
+        started_at: scan.started_at,
+        current_path: null,
+        pools: null
+      }));
+    return [...Object.values(scanProgress), ...historical];
+  }, [scanProgress, scans]);
   const filteredDupes = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return dupes.filter((group) => {
@@ -1206,7 +1232,19 @@ export default function App() {
       setMessage(`Cannot scan ${location.name || slug}: its path is disconnected or missing. Reconnect the drive or edit the location.`);
       return;
     }
-    setScanStartForm({ slug, offset: '/', hash_policy: 'full', hash_workers: '', metadata_workers: '', sparse_full_below_mib: '' });
+    setScanStartForm({ slug, offset: '/', hash_policy: 'full', hash_workers: '', metadata_workers: '', sparse_full_below: '' });
+  }
+
+  // Human size input: "500MB", "1GB", "1.5gb", bare number = MB.
+  // Returns bytes, or undefined for blank/invalid (use the default).
+  function parseSizeInput(value) {
+    const match = String(value ?? '').trim().match(/^([0-9]+(?:\.[0-9]+)?)\s*(kb?|mb?|gb?)?$/i);
+    if (!match) return undefined;
+    const amount = Number.parseFloat(match[1]);
+    if (!Number.isFinite(amount) || amount <= 0) return undefined;
+    const unit = (match[2] || 'm').toLowerCase()[0];
+    const multiplier = unit === 'k' ? 1024 : unit === 'g' ? 1024 ** 3 : 1024 ** 2;
+    return Math.round(amount * multiplier);
   }
 
   // Worker-count inputs: blank/invalid means "use the default".
@@ -1224,10 +1262,7 @@ export default function App() {
       hash_policy: form.hash_policy || 'full',
       hash_workers: parseWorkerCount(form.hash_workers),
       metadata_workers: parseWorkerCount(form.metadata_workers),
-      sparse_full_below: (() => {
-        const mib = Number.parseInt(String(form.sparse_full_below_mib ?? '').trim(), 10);
-        return Number.isFinite(mib) && mib >= 1 ? mib * 1024 * 1024 : undefined;
-      })()
+      sparse_full_below: parseSizeInput(form.sparse_full_below)
     });
   }
 
@@ -1996,6 +2031,11 @@ export default function App() {
     return rpc('files.note.set', { scan_id: scanId, path: entry.path, key, content });
   }, [rpc]);
 
+  // Tasks page: persisted per-scan error log (files with recorded errors).
+  const loadScanErrors = useCallback((scanId, offset = 0) => (
+    rpc('scans.errors', { scan_id: scanId, limit: 200, offset })
+  ), [rpc]);
+
   // Options page: global app settings (scan worker-pool defaults).
   const loadAppSettings = useCallback(() => rpc('settings.get', {}), [rpc]);
   const saveAppSettings = useCallback((patch) => rpc('settings.set', patch), [rpc]);
@@ -2742,13 +2782,14 @@ export default function App() {
       )}
       {activeTab === 'tasks' && (
         <TasksPage
-          runningProgress={runningProgress}
+          runningProgress={taskProgress}
           backgroundTasks={[]}
           eventLog={eventLog}
           busy={busy}
           onStopScan={stopScan}
           onPauseScan={pauseScan}
           onResumeScan={resumeScan}
+          onLoadScanErrors={loadScanErrors}
         />
       )}
       {activeTab === 'locations' && <LocationsPage {...commonLocationProps} />}

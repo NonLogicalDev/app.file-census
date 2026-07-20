@@ -112,14 +112,12 @@ export default function AppModals(props) {
               ))}
             </fieldset>
             {props.scanStartForm.hash_policy === 'light' && (
-              <label className={fieldLabelClassName}>Full-hash files smaller than (MiB)
+              <label className={fieldLabelClassName}>Full-hash files smaller than
                 <input
                   className="h-9 rounded-ui border border-border bg-surface px-3 text-sm text-text outline-none focus:border-border-strong"
-                  type="number"
-                  min="28"
-                  placeholder="28 (combined slice size)"
-                  value={props.scanStartForm.sparse_full_below_mib ?? ''}
-                  onChange={(event) => props.setScanStartForm({ ...props.scanStartForm, sparse_full_below_mib: event.currentTarget.value })}
+                  placeholder="e.g. 500MB, 1.5GB — no units = MB (default: 28MB, the combined slice size)"
+                  value={props.scanStartForm.sparse_full_below ?? ''}
+                  onChange={(event) => props.setScanStartForm({ ...props.scanStartForm, sparse_full_below: event.currentTarget.value })}
                 />
               </label>
             )}
