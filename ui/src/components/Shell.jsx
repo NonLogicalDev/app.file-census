@@ -809,6 +809,14 @@ function SidebarLocationNode({ location, expanded, current, selectedScanId, onTo
               >
                 <span className={`h-1.5 w-1.5 rounded-full ${scanStateDot(scan.status)}`} />
                 <span className="truncate">{scanLabel(scan)}</span>
+                {Number(scan.sparse_file_count || 0) > 0 ? (
+                  <span
+                    className="inline-flex h-4 items-center rounded-[4px] border border-warning bg-warning-soft px-[5px] text-[10px] font-bold uppercase text-warning"
+                    title={`${Number(scan.sparse_file_count).toLocaleString()} sparse-only files — exact-duplicate matching cannot see them`}
+                  >
+                    sparse
+                  </span>
+                ) : null}
                 {scan.is_representative ? (
                   <span className="inline-flex h-4 items-center rounded-[4px] border border-border bg-surface-subtle px-[5px] text-[10px] font-medium text-text-tertiary">rep</span>
                 ) : null}

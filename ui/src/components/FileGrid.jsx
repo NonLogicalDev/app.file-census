@@ -584,6 +584,11 @@ function FileGridInner({
               })}${inspectedPath && row.original.path === inspectedPath ? ' !bg-surface-muted' : ''}`}
               data-path={row.original.path}
               onClick={() => {
+                // A "N more…" placeholder opens its folder to browse everything.
+                if (row.original.kind === 'placeholder' && row.original.openPath) {
+                  onOpen?.({ kind: 'dir', path: row.original.openPath, name: row.original.openPath });
+                  return;
+                }
                 // Files AND folders feed the Inspector; parent/placeholder don't.
                 if (isSelectableRow(row.original)) onInspectRow?.(row.original);
               }}
@@ -877,9 +882,15 @@ function NameCell({ fullPathName, row, value, expandableFolders = false, onToggl
   // 7px gap + 7.5px half-icon ≈ 30.5px into the parent's content).
   const indent = row.depth ? { paddingInlineStart: `${row.depth * 22}px` } : undefined;
   if (entry.kind === 'placeholder') {
+    const clickable = Boolean(entry.openPath);
     return (
       <span className={fileNameCellClassName({ kind: 'file' })} style={indent}>
-        <span className="text-[11px] italic text-text-tertiary">{entry.name}</span>
+        <span className={clickable
+          ? 'inline-flex items-center gap-1 text-[11px] font-medium text-accent'
+          : 'text-[11px] italic text-text-tertiary'}
+        >
+          {clickable && <Icon name="folder" className="h-3 w-3" />}{entry.name}
+        </span>
       </span>
     );
   }

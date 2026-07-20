@@ -345,7 +345,14 @@ export default function FileExplorer(props) {
       const children = attach(tierFilter(node.entries.filter((entry) => entry.kind !== 'parent')))
         .sort((a, b) => (a.kind === 'dir' ? 0 : 1) - (b.kind === 'dir' ? 0 : 1));
       const more = node.hasMore
-        ? [{ kind: 'placeholder', path: `${row.path}//more`, name: `Showing first ${node.entries.length} — open the folder for the rest` }]
+        ? [{
+            kind: 'placeholder',
+            path: `${row.path}//more`,
+            openPath: row.path,
+            name: node.total != null
+              ? `${(node.total - node.entries.length).toLocaleString()} more — open ${row.name} to see all ${node.total.toLocaleString()}`
+              : `More items — open ${row.name} to see them all`
+          }]
         : [];
       return { ...row, subRows: [...children, ...more] };
     });
