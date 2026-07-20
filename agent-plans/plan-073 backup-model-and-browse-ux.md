@@ -680,6 +680,17 @@ backend / 147 UI. Queued next: #37 just install-cli/install-desktop, #38
 publish to github.com/NonLogicalDev/app.file-census (will confirm before
 pushing publicly).
 
+## Published 2026-07-20 (~10:20) — (`19ac5cb`)
+
+User: "Lets publish." Shipped README.md (feature tour, nix+just quick start,
+CLI examples verified against --help) and Justfile install recipes:
+install-cli (release binary → ~/.local/bin, PREFIX override — verified
+installed+runs) and install-desktop (tauri .app → /Applications, resilient
+bundle lookup). Pushed to github.com/NonLogicalDev/app.file-census (user had
+pre-created it empty, public): main + redesign/shadcn-dark-shell both at
+19ac5cb, default=main, description + topics set, README rendering confirmed
+via API. No secrets in tree (scanned); DBs/targets ignored.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
