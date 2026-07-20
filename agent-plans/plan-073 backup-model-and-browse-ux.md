@@ -708,6 +708,32 @@ covers), Start-scan modal "Worker pools" fieldset. Receipts: CLI 6/3 and env
 12 both logged; modal screenshot (had to use the local location — NLBackup
 currently shows Disconnected in the overview, drive likely unmounted).
 
+## Sparse hashes 2026-07-20 (~13:30) — verified e2e (`1591cc2`)
+
+User steering (five messages, agreement round first): (1) size-dependent
+sparse mode — full-hash below a threshold, default+minimum = combined slice
+size, custom larger allowed; (2) "We should always consider matches from
+light hash runs… scans should not contain any policy information" (MusicBox
+scan had NO backup info — per-file matching: full match = safe, sparse match
+= sparse tier); (3) rename light→sparse; (4) every file carries both hash +
+sparse entries where possible; (5) full scans must compute the sparse
+variant (already true since plan-071 backfill).
+KEY DISCOVERY: legacy light rows stored the SPARSE value in blake3/sha256 —
+sparse↔sparse would exact-match falsely. New encoding: sparse-only rows have
+EMPTY exact columns; one-time migration on open re-encodes legacy rows
+(≤ whole-threshold keeps blake3 — the sampler read the whole file so it IS
+the true BLAKE3 — sha256 blanked; above: both blanked). Cache/classify made
+''-safe (no empty-key lumping; content identity = exact|sparse|path).
+All hash_policy gates removed from scope selection (7 sites). Surfaces:
+--hash-policy sparse (+light alias), --sparse-full-below SIZE, RPC param,
+Sparse radio + MiB threshold field in Start-scan. Renames: Sparse pill,
+"N dup (sparse)", "Sparse survives", Warn chip→Sparse, Hash Sparse column,
+TSV sparse_match / sparse_dup_on_disk. Receipts: e2e two-location fixture
+(2MB→safe_exact_elsewhere full-hashed inside sparse scan; 30MB→b3len=0
+sparse_match; lone→unsafe_last_copy); UI badges Safe/Sparse/Unique on the
+sparse scan; new unit test; 77 backend / 147 UI. NOTE: existing DBs migrate
+on next open + the duplicate cache auto-rebuilds (scope fingerprint changed).
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
