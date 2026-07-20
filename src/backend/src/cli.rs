@@ -263,6 +263,12 @@ pub struct ScanArgs {
     /// Optional subpath under the location/source root.
     #[arg(long, default_value = "/")]
     offset: PathBuf,
+    /// Hash worker pool size (default: FILE_CENSUS_HASH_WORKERS env, else cores-1 capped at 8).
+    #[arg(long)]
+    hash_workers: Option<usize>,
+    /// Metadata (stat) worker pool size (default: FILE_CENSUS_METADATA_WORKERS env, else 2).
+    #[arg(long)]
+    metadata_workers: Option<usize>,
 }
 
 #[derive(Args)]
@@ -277,6 +283,12 @@ struct ScanStartArgs {
     /// Light scans are excluded from exact duplicate/delete-check scope.
     #[arg(long, default_value = "full")]
     hash_policy: String,
+    /// Hash worker pool size (default: FILE_CENSUS_HASH_WORKERS env, else cores-1 capped at 8).
+    #[arg(long)]
+    hash_workers: Option<usize>,
+    /// Metadata (stat) worker pool size (default: FILE_CENSUS_METADATA_WORKERS env, else 2).
+    #[arg(long)]
+    metadata_workers: Option<usize>,
 }
 
 #[derive(Args)]
@@ -720,8 +732,10 @@ fn prepare_compatible_scan_with_started_at(
         location_or_source,
         volume_slug,
         offset,
+        hash_workers,
+        metadata_workers,
     } = args;
-    match volume_slug {
+    let prepared = match volume_slug {
         Some(volume_slug) => scanner::prepare_bootstrap_scan_with_started_at(
             db,
             Path::new(&location_or_source),
@@ -730,7 +744,8 @@ fn prepare_compatible_scan_with_started_at(
             started_at,
         ),
         None => scanner::prepare_scan(db, &location_or_source, &offset),
-    }
+    }?;
+    Ok(prepared.with_workers(hash_workers, metadata_workers))
 }
 
 fn command_path(command: &Command) -> &'static str {
@@ -1117,7 +1132,8 @@ fn run_scans(
             }
             let policy = scanner::HashPolicy::from_label(Some(&args.hash_policy));
             let prepared =
-                scanner::prepare_scan_with_policy(&db, &args.slug, &args.offset, policy)?;
+                scanner::prepare_scan_with_policy(&db, &args.slug, &args.offset, policy)?
+                    .with_workers(args.hash_workers, args.metadata_workers);
             run_prepared_scan_cli(&db, prepared, json)
         }
         ScanSubcommand::Update(args) => {

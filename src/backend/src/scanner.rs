@@ -540,6 +540,28 @@ pub struct PreparedScan {
     seeded_total_bytes: u64,
     /// Hash work this scan performs (Full or Light).
     pub hash_policy: HashPolicy,
+    /// Worker-pool overrides for this run; None falls back to the
+    /// FILE_CENSUS_HASH_WORKERS / FILE_CENSUS_METADATA_WORKERS env vars,
+    /// then the built-in auto sizing.
+    pub hash_workers: Option<usize>,
+    pub metadata_workers: Option<usize>,
+}
+
+impl PreparedScan {
+    /// Applies per-run worker-pool overrides (None leaves the default).
+    pub fn with_workers(
+        mut self,
+        hash_workers: Option<usize>,
+        metadata_workers: Option<usize>,
+    ) -> Self {
+        if hash_workers.is_some() {
+            self.hash_workers = hash_workers;
+        }
+        if metadata_workers.is_some() {
+            self.metadata_workers = metadata_workers;
+        }
+        self
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -701,6 +723,8 @@ pub fn prepare_bootstrap_scan_with_started_at(
         seeded_file_count: 0,
         seeded_total_bytes: 0,
         hash_policy: HashPolicy::Full,
+        hash_workers: None,
+        metadata_workers: None,
     })
 }
 
@@ -737,6 +761,8 @@ fn prepare_scan_with_start(
         seeded_file_count: 0,
         seeded_total_bytes: 0,
         hash_policy: policy,
+        hash_workers: None,
+        metadata_workers: None,
     })
 }
 
@@ -754,6 +780,8 @@ pub fn prepare_update_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         seeded_file_count: 0,
         seeded_total_bytes: 0,
         hash_policy: HashPolicy::Full,
+        hash_workers: None,
+        metadata_workers: None,
     })
 }
 
@@ -801,6 +829,8 @@ pub fn prepare_repair_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         seeded_file_count,
         seeded_total_bytes,
         hash_policy: HashPolicy::Full,
+        hash_workers: None,
+        metadata_workers: None,
     })
 }
 
@@ -924,8 +954,26 @@ pub fn run_prepared_scan(
     // Excludes remain scan-scoped policy, but they must not suppress physical
     // indexing. Validate them here; query surfaces apply visibility later.
     let _ = build_scan_exclude_matcher(&exclude_patterns)?;
-    let metadata_workers = 2;
-    let hash_workers = hash_worker_count();
+    // Pool sizing: per-run override > env var > auto. Hashing is the long
+    // pole on fast media, so it is fully configurable (plan-036/071 history:
+    // the old hard cap of 4 was too small for SSD/NAS sources).
+    let metadata_workers = resolve_worker_count(
+        prepared.metadata_workers,
+        "FILE_CENSUS_METADATA_WORKERS",
+        2,
+    );
+    let hash_workers = resolve_worker_count(
+        prepared.hash_workers,
+        "FILE_CENSUS_HASH_WORKERS",
+        hash_worker_count(),
+    );
+    tracing::info!(
+        target: "file_census::scanner",
+        scan_id = %prepared.scan_id,
+        metadata_workers,
+        hash_workers,
+        "scan worker pools sized"
+    );
 
     // Two-phase scan (plan-071): discovery + metadata run to completion first,
     // buffering every file hash job in an UNBOUNDED channel so the walker never
@@ -1732,8 +1780,16 @@ fn update_progress_counts(
 
 fn hash_worker_count() -> usize {
     std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get().saturating_sub(1).clamp(1, 4))
+        .map(|parallelism| parallelism.get().saturating_sub(1).clamp(1, 8))
         .unwrap_or(2)
+}
+
+/// Explicit per-run override > env var > default, clamped to a sane range.
+fn resolve_worker_count(explicit: Option<usize>, env_key: &str, default: usize) -> usize {
+    explicit
+        .or_else(|| std::env::var(env_key).ok().and_then(|value| value.trim().parse().ok()))
+        .unwrap_or(default)
+        .clamp(1, 64)
 }
 
 fn pool_queue(progress: Option<&ScanProgressStore>, scan_id: &str, kind: PoolKind, path: &str) {
@@ -2972,6 +3028,8 @@ mod tests {
             seeded_file_count: 0,
             seeded_total_bytes: 0,
             hash_policy: HashPolicy::Full,
+            hash_workers: None,
+            metadata_workers: None,
         };
         progress.start(&prepared);
         progress.finish(&ScanSummary {
@@ -3311,6 +3369,8 @@ mod tests {
             seeded_file_count: 0,
             seeded_total_bytes: 0,
             hash_policy: HashPolicy::Full,
+            hash_workers: None,
+            metadata_workers: None,
         });
         (progress, scan_id)
     }

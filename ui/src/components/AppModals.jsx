@@ -111,6 +111,32 @@ export default function AppModals(props) {
                 </label>
               ))}
             </fieldset>
+            <fieldset className="grid grid-cols-2 gap-2 rounded-ui border border-border bg-surface p-3 max-[720px]:grid-cols-1">
+              <legend className="px-1 text-xs font-semibold uppercase tracking-[0.06em] text-muted">Worker pools</legend>
+              <label className={fieldLabelClassName}>Hash workers
+                <input
+                  className="h-9 rounded-ui border border-border bg-surface px-3 text-sm text-text outline-none focus:border-border-strong"
+                  type="number"
+                  min="1"
+                  max="64"
+                  placeholder="auto"
+                  value={props.scanStartForm.hash_workers ?? ''}
+                  onChange={(event) => props.setScanStartForm({ ...props.scanStartForm, hash_workers: event.currentTarget.value })}
+                />
+              </label>
+              <label className={fieldLabelClassName}>Metadata workers
+                <input
+                  className="h-9 rounded-ui border border-border bg-surface px-3 text-sm text-text outline-none focus:border-border-strong"
+                  type="number"
+                  min="1"
+                  max="64"
+                  placeholder="2"
+                  value={props.scanStartForm.metadata_workers ?? ''}
+                  onChange={(event) => props.setScanStartForm({ ...props.scanStartForm, metadata_workers: event.currentTarget.value })}
+                />
+              </label>
+              <ModalHelp className="col-span-full">Hashing is the long pole on fast media — raise hash workers for SSD/NAS sources, keep low for spinning disks. Blank = auto (cores−1, capped at 8; overridable via FILE_CENSUS_HASH_WORKERS).</ModalHelp>
+            </fieldset>
             <Toolbar className={actionToolbarClassName}>
               <Button type="submit" disabled={props.busy} icon={<Icon name="scan" />}>Start scan</Button>
               <Button type="button" variant="secondary" onClick={() => props.setScanStartForm(null)} icon={<Icon name="back" />}>Cancel</Button>

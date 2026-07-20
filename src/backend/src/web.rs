@@ -272,6 +272,8 @@ async fn handle_rpc_result(
                     params.slug,
                     params.offset.unwrap_or_else(|| PathBuf::from("/")),
                     params.hash_policy,
+                    params.hash_workers,
+                    params.metadata_workers,
                 )
                 .await?,
             )?)
@@ -932,6 +934,10 @@ struct StartScanParams {
     offset: Option<PathBuf>,
     #[serde(default)]
     hash_policy: Option<String>,
+    #[serde(default)]
+    hash_workers: Option<usize>,
+    #[serde(default)]
+    metadata_workers: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1004,6 +1010,8 @@ async fn scan_location(
             slug,
             input.offset.unwrap_or_else(|| PathBuf::from("/")),
             input.hash_policy,
+            None,
+            None,
         )
         .await?,
     ))
@@ -1014,9 +1022,12 @@ async fn start_scan_job(
     slug: String,
     offset: PathBuf,
     hash_policy: Option<String>,
+    hash_workers: Option<usize>,
+    metadata_workers: Option<usize>,
 ) -> anyhow::Result<ScanStartedResponse<'static>> {
     let policy = scanner::HashPolicy::from_label(hash_policy.as_deref());
-    let prepared = scanner::prepare_scan_with_policy(&state.db, &slug, &offset, policy)?;
+    let prepared = scanner::prepare_scan_with_policy(&state.db, &slug, &offset, policy)?
+        .with_workers(hash_workers, metadata_workers);
     let scan_id = prepared.scan_id.clone();
     state.progress.start(&prepared);
 

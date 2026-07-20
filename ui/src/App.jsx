@@ -1206,14 +1206,25 @@ export default function App() {
       setMessage(`Cannot scan ${location.name || slug}: its path is disconnected or missing. Reconnect the drive or edit the location.`);
       return;
     }
-    setScanStartForm({ slug, offset: '/', hash_policy: 'full' });
+    setScanStartForm({ slug, offset: '/', hash_policy: 'full', hash_workers: '', metadata_workers: '' });
+  }
+
+  // Worker-count inputs: blank/invalid means "use the default".
+  function parseWorkerCount(value) {
+    const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+    return Number.isFinite(parsed) && parsed >= 1 ? Math.min(parsed, 64) : undefined;
   }
 
   function confirmScanStart() {
     const form = scanStartForm;
     if (!form) return;
     setScanStartForm(null);
-    void startScan(form.slug, { offset: (form.offset || '/').trim() || '/', hash_policy: form.hash_policy || 'full' });
+    void startScan(form.slug, {
+      offset: (form.offset || '/').trim() || '/',
+      hash_policy: form.hash_policy || 'full',
+      hash_workers: parseWorkerCount(form.hash_workers),
+      metadata_workers: parseWorkerCount(form.metadata_workers)
+    });
   }
 
   async function startScan(slug, options = {}) {
@@ -1221,7 +1232,13 @@ export default function App() {
     try {
       setDeleteCheck(null);
       const offset = options.offset || '/';
-      const result = await rpc('scans.start', { slug, offset, hash_policy: options.hash_policy || 'full' });
+      const result = await rpc('scans.start', {
+        slug,
+        offset,
+        hash_policy: options.hash_policy || 'full',
+        ...(options.hash_workers ? { hash_workers: options.hash_workers } : {}),
+        ...(options.metadata_workers ? { metadata_workers: options.metadata_workers } : {})
+      });
       const location = locationBySlug(slug);
       setActiveTab('locations');
       setSelectedLocationSlug(slug);

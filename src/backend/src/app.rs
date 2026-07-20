@@ -198,6 +198,8 @@ impl AppCore {
                         params.slug,
                         params.offset.unwrap_or_else(|| PathBuf::from("/")),
                         params.hash_policy,
+                        params.hash_workers,
+                        params.metadata_workers,
                     )
                     .await?,
                 )?)
@@ -507,9 +509,12 @@ impl AppCore {
         slug: String,
         offset: PathBuf,
         hash_policy: Option<String>,
+        hash_workers: Option<usize>,
+        metadata_workers: Option<usize>,
     ) -> Result<ScanStartedResponse<'static>> {
         let policy = scanner::HashPolicy::from_label(hash_policy.as_deref());
-        let prepared = scanner::prepare_scan_with_policy(&self.db, &slug, &offset, policy)?;
+        let prepared = scanner::prepare_scan_with_policy(&self.db, &slug, &offset, policy)?
+            .with_workers(hash_workers, metadata_workers);
         self.run_prepared_scan(prepared, None).await
     }
 
@@ -865,6 +870,10 @@ struct StartScanParams {
     offset: Option<PathBuf>,
     #[serde(default)]
     hash_policy: Option<String>,
+    #[serde(default)]
+    hash_workers: Option<usize>,
+    #[serde(default)]
+    metadata_workers: Option<usize>,
 }
 #[derive(Deserialize)]
 struct ScanIdParams {
