@@ -754,6 +754,32 @@ Receipts: errors strip shows locked.bin permission error after full reload;
 pool bars absent on Ready scans; header pill "1 SPARSE"; SAFE ×2 / SPARSE /
 UNIQUE pills on the fixture. Tests: 77 backend / 147 UI.
 
+## Sparse UI polish + scan-time excludes 2026-07-20 (~19:00) — (`b1a8220`..`f778491`)
+
+Rapid batch after the sparse-hash landing: (1) File Info opens for sparse
+files (identity resolved server-side: exact→(blake3,size), sparse→
+(blake3_light,size), never the empty exact hash); (2) retired the banned
+"(pill) ×N" chip → "·N copies"; (3) Sparse column numeric like Files; (4)
+File Info shows BOTH hash forms; (5) build speedup: release lto fat→thin +
+build.rs stops watching ui/src → UI-only rebuild 78s→24s; (6) File Info
+Locations made table-like (PATH|MODIFIED|ACTIONS header + zebra rows) with a
+"⚠ SPARSE MATCH" flag when the file was sparse-hashed; (7) Locations tab
+promoted after Preview; (8) sidebar scan rows get an amber SPARSE badge;
+(9) the ">500 open the folder for the rest" placeholder is now an actionable
+"N more — open <folder>…" row that navigates in.
+Then #42 SCAN-TIME EXCLUDES: gitignore patterns that prune the discovery walk
+(filter_entry) so matches (node_modules/, *.log) are never indexed, baked into
+scans.scan_time_excludes; CLI --exclude (repeatable), scans.start RPC param
+(parity), Start-scan modal textarea. Receipts: unit test + CLI e2e (real
+project → only README.md + src/app.js indexed, 3 patterns stored). Tests:
+78 backend / 147 UI.
+KNOWN-IMPORTANT gotcha re-confirmed: release rust-embed bakes ui/dist at
+COMPILE time — must rebuild the release binary after `npm run build` for UI
+changes to appear (debug serves dist from disk at runtime).
+Deferred with rationale: #43 "absent hash = NULL" is a 236-projection-site +
+files-table-rebuild refactor of the hot path for a data-model nicety
+(sparse already works with ''); flagged to the user for scope confirmation.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
