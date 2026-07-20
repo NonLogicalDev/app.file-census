@@ -600,6 +600,18 @@ Receipts: ctx menu [File Info, Open File, Reveal File, +4 existing]; inspector
 Tests: 146 UI. Screenshots: shot-preview-resize / shot-ctx-fileinfo /
 shot-exif-wrap.
 
+## Interaction batch 2026-07-20 (~04:40) — CDP-verified live (`fb4fb7c`)
+
+Five rapid asks: (1) select column fixed at 28px, header checkbox REMOVED
+(select-all read ambiguous). (2) Left/Right tree keys in Browse: Right expands
+the focused folder / steps into first child; Left collapses, or jumps to the
+parent row from files and collapsed folders (receipts: 11→23 rows, child step,
+.DS_Store→@Photos parent jump, collapse back to 11). (3) File Info modal: wide
+surface no longer scrolls — the title/Reveal/Close strip + tabs stay fixed,
+only the tab page scrolls. (4) Folders toggle moved to nav row 1's far left,
+before Browse|Flat. (5) "Browse Folder" → "Reveal Folder" (reveal icon).
+Tests: 147 UI.
+
 ## Panels work log 2026-07-19 (~15:20) — CDP-verified live (`bef165f`)
 
 - [x] Inspector default-closed, manual toolbar toggle, persisted; row click no
