@@ -258,15 +258,6 @@ export default function Shell({
     return () => sidebar.removeEventListener('wheel', onWheel);
   }, []);
 
-  function toggleSidebar() {
-    if (compactSidebar) {
-      setSidebarPeeking(true);
-      return;
-    }
-    setSidebarHidden((value) => !value);
-    setSidebarPeeking(false);
-  }
-
   function startSidebarResize(event) {
     if (sidebarResizeDisabled || event.button !== 0) return;
     event.preventDefault();
@@ -426,14 +417,17 @@ export default function Shell({
             className={`h-1.5 w-1.5 flex-none rounded-full ${wsStatus === 'live' ? 'bg-success' : wsStatus === 'connecting' ? 'bg-warning' : 'bg-danger'}`}
             title={connectionLabel(wsStatus, statusDetail)}
           />
-          <IconButton
-            onClick={toggleSidebar}
-            label="Hide sidebar"
-            title="Hide sidebar"
-            variant="ghost"
-            className="!h-6 !w-6 !min-h-0 !p-0 !text-muted hover:!text-text"
-            icon={<Icon name="sidebarClose" className="h-3.5 w-3.5" />}
-          />
+          {!compactSidebar && (
+            <IconButton
+              onClick={() => setSidebarHidden((hidden) => !hidden)}
+              label={sidebarHidden ? 'Pin sidebar open' : 'Unpin sidebar (show on hover only)'}
+              title={sidebarHidden ? 'Pin the sidebar open' : 'Unpin — the sidebar collapses to the left edge and shows on hover'}
+              variant="ghost"
+              aria-pressed={!sidebarHidden}
+              className={`!h-6 !w-6 !min-h-0 !p-0 hover:!text-text ${sidebarHidden ? '!text-muted' : '!text-accent'}`}
+              icon={<Icon name="pin" className={`h-3.5 w-3.5 ${sidebarHidden ? 'rotate-45' : ''}`} />}
+            />
+          )}
         </div>
 
         {/* Primary nav */}
@@ -543,14 +537,18 @@ export default function Shell({
       <main className={appMainClassName}>
         <header className={workspaceHeaderClassName}>
           <div className={topbarTitleClassName}>
-            <IconButton
-              onClick={toggleSidebar}
-              label={compactSidebar ? 'Open sidebar' : sidebarVisuallyOpen ? 'Hide sidebar' : 'Restore sidebar'}
-              title={compactSidebar ? 'Open sidebar' : sidebarVisuallyOpen ? 'Hide sidebar' : 'Restore sidebar'}
-              variant="secondary"
-              className={topbarSidebarToggleClassName}
-              icon={<Icon name={compactSidebar || !sidebarVisuallyOpen ? 'sidebarOpen' : 'sidebarClose'} />}
-            />
+            {/* Compact (mobile) still needs a way to summon the overlay sidebar;
+                on desktop the sidebar is pinned/unpinned from its own header. */}
+            {compactSidebar && (
+              <IconButton
+                onClick={() => setSidebarPeeking(true)}
+                label="Open sidebar"
+                title="Open sidebar"
+                variant="secondary"
+                className={topbarSidebarToggleClassName}
+                icon={<Icon name="sidebarOpen" />}
+              />
+            )}
             <div className={topbarTitleCopyClassName}>
               <h1 className={topbarTitleHeadingClassName}>{headerTitle(activeTabMeta)}</h1>
               <p className={topbarDescriptionClassName}>{headerContext(activeTab, selectedLocation, selectedScanId)}</p>
