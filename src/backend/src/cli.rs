@@ -269,6 +269,10 @@ pub struct ScanArgs {
     /// Metadata (stat) worker pool size (default: FILE_CENSUS_METADATA_WORKERS env, else 2).
     #[arg(long)]
     metadata_workers: Option<usize>,
+    /// Sparse policy: full-hash files smaller than SIZE (e.g. 512M, 1G).
+    /// Default and minimum = the combined sparse-slice size.
+    #[arg(long)]
+    sparse_full_below: Option<String>,
 }
 
 #[derive(Args)]
@@ -278,9 +282,9 @@ struct ScanStartArgs {
     /// Optional subpath under the location root.
     #[arg(long, default_value = "/")]
     offset: PathBuf,
-    /// Hashing policy: "full" (exact blake3+sha256) or "light" (sampled
-    /// fingerprint only, for cheaply inventorying slow media like SD cards).
-    /// Light scans are excluded from exact duplicate/delete-check scope.
+    /// Hashing policy: "full" (exact blake3+sha256 + sparse fingerprint) or
+    /// "sparse" (sampled fingerprint; files below --sparse-full-below still
+    /// get full hashes). Sparse matches classify as the sparse tier.
     #[arg(long, default_value = "full")]
     hash_policy: String,
     /// Hash worker pool size (default: FILE_CENSUS_HASH_WORKERS env, else cores-1 capped at 8).
@@ -289,6 +293,10 @@ struct ScanStartArgs {
     /// Metadata (stat) worker pool size (default: FILE_CENSUS_METADATA_WORKERS env, else 2).
     #[arg(long)]
     metadata_workers: Option<usize>,
+    /// Sparse policy: full-hash files smaller than SIZE (e.g. 512M, 1G).
+    /// Default and minimum = the combined sparse-slice size.
+    #[arg(long)]
+    sparse_full_below: Option<String>,
 }
 
 #[derive(Args)]
@@ -723,6 +731,19 @@ fn prepare_compatible_scan(db: &Database, args: ScanArgs) -> Result<scanner::Pre
     prepare_compatible_scan_with_started_at(db, args, Utc::now())
 }
 
+/// Parses a human size ("512M", "1G", "1048576") into bytes.
+fn parse_size_arg(value: &str) -> Result<u64> {
+    let trimmed = value.trim();
+    let (digits, multiplier) = match trimmed.chars().last() {
+        Some('k') | Some('K') => (&trimmed[..trimmed.len() - 1], 1024u64),
+        Some('m') | Some('M') => (&trimmed[..trimmed.len() - 1], 1024u64 * 1024),
+        Some('g') | Some('G') => (&trimmed[..trimmed.len() - 1], 1024u64 * 1024 * 1024),
+        _ => (trimmed, 1),
+    };
+    let base: u64 = digits.trim().parse().map_err(|_| anyhow::anyhow!("invalid size: {value}"))?;
+    Ok(base.saturating_mul(multiplier))
+}
+
 fn prepare_compatible_scan_with_started_at(
     db: &Database,
     args: ScanArgs,
@@ -734,7 +755,12 @@ fn prepare_compatible_scan_with_started_at(
         offset,
         hash_workers,
         metadata_workers,
+        sparse_full_below,
     } = args;
+    let sparse_full_below = sparse_full_below
+        .as_deref()
+        .map(parse_size_arg)
+        .transpose()?;
     let prepared = match volume_slug {
         Some(volume_slug) => scanner::prepare_bootstrap_scan_with_started_at(
             db,
@@ -745,7 +771,9 @@ fn prepare_compatible_scan_with_started_at(
         ),
         None => scanner::prepare_scan(db, &location_or_source, &offset),
     }?;
-    Ok(prepared.with_workers(hash_workers, metadata_workers))
+    prepared
+        .with_workers(hash_workers, metadata_workers)
+        .with_sparse_full_below(sparse_full_below)
 }
 
 fn command_path(command: &Command) -> &'static str {
@@ -1123,17 +1151,23 @@ fn run_scans(
             let db = Database::open(db_path)?;
             if !matches!(
                 args.hash_policy.to_ascii_lowercase().as_str(),
-                "full" | "light"
+                "full" | "sparse" | "light"
             ) {
                 anyhow::bail!(
-                    "unknown --hash-policy '{}'; expected \"full\" or \"light\"",
+                    "unknown --hash-policy '{}'; expected \"full\" or \"sparse\" (legacy alias: \"light\")",
                     args.hash_policy
                 );
             }
             let policy = scanner::HashPolicy::from_label(Some(&args.hash_policy));
+            let sparse_full_below = args
+                .sparse_full_below
+                .as_deref()
+                .map(parse_size_arg)
+                .transpose()?;
             let prepared =
                 scanner::prepare_scan_with_policy(&db, &args.slug, &args.offset, policy)?
-                    .with_workers(args.hash_workers, args.metadata_workers);
+                    .with_workers(args.hash_workers, args.metadata_workers)
+                    .with_sparse_full_below(sparse_full_below)?;
             run_prepared_scan_cli(&db, prepared, json)
         }
         ScanSubcommand::Update(args) => {

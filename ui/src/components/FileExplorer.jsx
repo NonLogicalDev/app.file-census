@@ -410,9 +410,9 @@ export default function FileExplorer(props) {
         {dcReady ? ` · ${(deleteCheckSummary.file_count || 0).toLocaleString()} files in set` : ''}
       </span>
       {dcReady ? (
-        <span className="inline-flex items-center gap-3 tabular-nums" title="Classified by what survives deleting the set: safe = exact copy survives (remain-set or another location); partial = only a light-hash survivor; last copy = nothing survives">
+        <span className="inline-flex items-center gap-3 tabular-nums" title="Classified by what survives deleting the set: safe = exact copy survives (remain-set or another location); sparse = only a sparse-hash survivor; last copy = nothing survives">
           <span className="text-success">{(deleteCheckSummary.dc_safe || 0).toLocaleString()} safe to delete</span>
-          <span className="text-warning">{(deleteCheckSummary.dc_warn || 0).toLocaleString()} partial</span>
+          <span className="text-warning">{(deleteCheckSummary.dc_warn || 0).toLocaleString()} sparse</span>
           <span className={deleteCheckSummary.dc_unsafe > 0 ? 'font-semibold text-danger' : 'text-muted'}>
             {(deleteCheckSummary.dc_unsafe || 0).toLocaleString()} would lose last copy
           </span>
@@ -610,7 +610,7 @@ export default function FileExplorer(props) {
           <div className="inline-flex h-[30px] items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5">
             <BackupFilterChip label="All" active={backupFilter === 'all'} onClick={() => setBackupFilter('all')} />
             <BackupFilterChip label="Unsafe" count={hasBackupData ? backupTotals.unsafe : undefined} tone="danger" active={backupFilter === 'unsafe'} onClick={() => setBackupFilter('unsafe')} />
-            <BackupFilterChip label="Warn" count={hasBackupData ? backupTotals.warn : undefined} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
+            <BackupFilterChip label="Sparse" count={hasBackupData ? backupTotals.warn : undefined} tone="warn" active={backupFilter === 'warn'} onClick={() => setBackupFilter('warn')} />
             <BackupFilterChip label="Safe" count={hasBackupData ? backupTotals.safe : undefined} tone="success" active={backupFilter === 'safe'} onClick={() => setBackupFilter('safe')} />
           </div>
         </div>

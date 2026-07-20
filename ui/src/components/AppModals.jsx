@@ -93,8 +93,8 @@ export default function AppModals(props) {
             <fieldset className="grid gap-2 rounded-ui border border-border bg-surface p-3">
               <legend className="px-1 text-xs font-semibold uppercase tracking-[0.06em] text-muted">Hash work</legend>
               {[
-                ['full', 'Full', 'Exact BLAKE3 + SHA-256, plus the light fingerprint. Required for exact duplicate detection and Delete Check.'],
-                ['light', 'Light', 'Sampled fingerprint only — fast on slow or power-limited disks. Inventory-only: light scans are excluded from exact duplicate detection and Delete Check safety.']
+                ['full', 'Full', 'Exact BLAKE3 + SHA-256, plus the sparse fingerprint. Exact matches classify as safe.'],
+                ['light', 'Sparse', 'Sampled fingerprint for large files — fast on slow or power-limited disks. Sparse matches classify as the sparse tier; files below the threshold still get full hashes.']
               ].map(([value, label, detail]) => (
                 <label key={value} className={`flex cursor-pointer items-start gap-2.5 rounded-ui border p-2.5 text-sm ${props.scanStartForm.hash_policy === value ? 'border-border-strong bg-surface-muted' : 'border-border'}`}>
                   <input
@@ -111,6 +111,18 @@ export default function AppModals(props) {
                 </label>
               ))}
             </fieldset>
+            {props.scanStartForm.hash_policy === 'light' && (
+              <label className={fieldLabelClassName}>Full-hash files smaller than (MiB)
+                <input
+                  className="h-9 rounded-ui border border-border bg-surface px-3 text-sm text-text outline-none focus:border-border-strong"
+                  type="number"
+                  min="28"
+                  placeholder="28 (combined slice size)"
+                  value={props.scanStartForm.sparse_full_below_mib ?? ''}
+                  onChange={(event) => props.setScanStartForm({ ...props.scanStartForm, sparse_full_below_mib: event.currentTarget.value })}
+                />
+              </label>
+            )}
             <fieldset className="grid grid-cols-2 gap-2 rounded-ui border border-border bg-surface p-3 max-[720px]:grid-cols-1">
               <legend className="px-1 text-xs font-semibold uppercase tracking-[0.06em] text-muted">Worker pools</legend>
               <label className={fieldLabelClassName}>Hash workers

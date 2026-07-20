@@ -858,6 +858,31 @@ impl Database {
                 [],
             )?;
         }
+        if !column_exists(conn, "scans", "sparse_full_below")? {
+            conn.execute("ALTER TABLE scans ADD COLUMN sparse_full_below INTEGER", [])?;
+        }
+        // Legacy sparse ("light") scans stored the SPARSE hash in the exact
+        // blake3/sha256 columns, which would let two sparse files exact-match
+        // on sparse evidence alone. Re-encode once: above the whole-file
+        // sampling threshold the stored value is a sample hash -> blank both
+        // exact columns; at or below it the sampler read the whole file, so
+        // blake3 IS the true full BLAKE3 (keep it) but sha256 is bogus (blank).
+        // Idempotent: blanked columns no longer equal blake3_light.
+        {
+            let threshold = crate::scanner::sparse_whole_threshold();
+            conn.execute(
+                "UPDATE files SET blake3 = '', sha256 = ''
+                 WHERE size > ?1 AND blake3 != '' AND blake3 = blake3_light
+                   AND scan_id IN (SELECT id FROM scans WHERE hash_policy = 'light')",
+                params![threshold],
+            )?;
+            conn.execute(
+                "UPDATE files SET sha256 = ''
+                 WHERE size <= ?1 AND sha256 != '' AND sha256 = blake3_light
+                   AND scan_id IN (SELECT id FROM scans WHERE hash_policy = 'light')",
+                params![threshold],
+            )?;
+        }
         // Backup-classification columns on the duplicate path-count cache
         // (safe/warn/unsafe rollups + copy counts). Older cache rows are simply
         // stale until the next rebuild, so a default of 0 is safe.
@@ -2379,7 +2404,7 @@ impl Database {
                         "unique_on_disk"
                     }
                 } else if warn > 0 {
-                    "similar_on_disk"
+                    "sparse_dup_on_disk"
                 } else {
                     "dup_on_disk"
                 }
@@ -2390,7 +2415,7 @@ impl Database {
                     "unsafe_last_copy"
                 }
             } else if warn > 0 {
-                "partial_light_match"
+                "sparse_match"
             } else {
                 "safe_exact_elsewhere"
             };
@@ -3031,7 +3056,9 @@ impl Database {
         let mut inside_exact = HashMap::<(String, u64), u64>::new();
         let mut inside_light = HashMap::<(String, u64), u64>::new();
         for file in &staged {
-            *inside_exact.entry((file.blake3.clone(), file.size)).or_default() += 1;
+            if !file.blake3.is_empty() {
+                *inside_exact.entry((file.blake3.clone(), file.size)).or_default() += 1;
+            }
             if !file.light.is_empty() {
                 *inside_light.entry((file.light.clone(), file.size)).or_default() += 1;
             }
@@ -3542,6 +3569,7 @@ impl Database {
                 JOIN duplicate_group_scope scope ON scope.scan_id = f.scan_id
                 WHERE excluded_f.id IS NULL
                   AND f.kind = 'file' AND f.error IS NULL AND f.size > 0
+                  AND f.blake3 != ''
                 GROUP BY f.blake3, f.size
                 HAVING COUNT(DISTINCT scope.location_id) > 1
                 ORDER BY size DESC
@@ -3781,6 +3809,16 @@ impl Database {
         Ok(rows)
     }
 
+    /// Records the sparse full-hash threshold a sparse scan ran with.
+    pub fn set_scan_sparse_full_below(&self, scan_id: &str, threshold: u64) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE scans SET sparse_full_below = ?2 WHERE id = ?1",
+            params![scan_id, threshold],
+        )?;
+        Ok(())
+    }
+
     pub fn app_setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.connect()?;
         conn.query_row(
@@ -3886,7 +3924,7 @@ impl Database {
                            (
                                SELECT s2.id
                                FROM scans s2
-                               WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
+                               WHERE s2.location_id = l.id AND s2.status = 'complete'
                                ORDER BY s2.started_at DESC
                                LIMIT 1
                            )
@@ -3902,6 +3940,7 @@ impl Database {
                 JOIN duplicate_scope ds ON ds.scan_id = f.scan_id
                 WHERE excluded_f.id IS NULL
                   AND f.kind = 'file' AND f.error IS NULL AND f.size > 0
+                  AND f.blake3 != ''
                 GROUP BY f.blake3, f.size
                 HAVING COUNT(DISTINCT ds.location_id) > 1
             )
@@ -4649,6 +4688,7 @@ fn apply_delete_check_classification(
         let mut hashes: Vec<String> = files
             .iter()
             .filter_map(|&i| entries[i].blake3.clone())
+            .filter(|hash| !hash.is_empty())
             .collect();
         hashes.sort();
         hashes.dedup();
@@ -5378,7 +5418,7 @@ fn prepare_duplicate_group_scope(
                        (
                            SELECT s2.id
                            FROM scans s2
-                           WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
+                           WHERE s2.location_id = l.id AND s2.status = 'complete'
                            ORDER BY s2.started_at DESC
                            LIMIT 1
                        )
@@ -5428,12 +5468,12 @@ fn duplicate_scope_scan_ids(
         SELECT COALESCE(
             (
                 SELECT rep.id FROM scans rep
-                WHERE rep.id = l.representative_scan_id AND rep.hash_policy != 'light'
+                WHERE rep.id = l.representative_scan_id
             ),
             (
                 SELECT s2.id
                 FROM scans s2
-                WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
+                WHERE s2.location_id = l.id AND s2.status = 'complete'
                 ORDER BY s2.started_at DESC
                 LIMIT 1
             )
@@ -5578,7 +5618,7 @@ fn current_duplicate_scope(conn: &Connection) -> Result<Option<DuplicateScope>> 
                        (
                            SELECT s2.id
                            FROM scans s2
-                           WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
+                           WHERE s2.location_id = l.id AND s2.status = 'complete'
                            ORDER BY s2.started_at DESC
                            LIMIT 1
                        )
@@ -5794,11 +5834,15 @@ fn duplicate_cache_path_counts(
     // different size is a false positive and is never keyed together here.
     let mut light_counts_by_location = HashMap::<(String, u64), HashMap<String, u64>>::new();
     for file in files {
-        *exact_counts_by_location
-            .entry((file.blake3.clone(), file.size))
-            .or_default()
-            .entry(file.location_id.clone())
-            .or_default() += 1;
+        // Sparse-hashed files carry no exact hash; keying '' would make every
+        // same-size sparse file an "exact copy" of the others.
+        if !file.blake3.is_empty() {
+            *exact_counts_by_location
+                .entry((file.blake3.clone(), file.size))
+                .or_default()
+                .entry(file.location_id.clone())
+                .or_default() += 1;
+        }
         if !file.blake3_light.is_empty() {
             *light_counts_by_location
                 .entry((file.blake3_light.clone(), file.size))
@@ -5928,8 +5972,15 @@ fn duplicate_cache_path_counts(
             dir_row.total_size = dir_row.total_size.saturating_add(file.size);
         }
 
+        let content_key = if !file.blake3.is_empty() {
+            format!("E:{}", file.blake3)
+        } else if !file.blake3_light.is_empty() {
+            format!("L:{}", file.blake3_light)
+        } else {
+            format!("P:{}", file.path)
+        };
         let group = content_groups
-            .entry((file.scan_id.clone(), file.blake3.clone(), file.size))
+            .entry((file.scan_id.clone(), content_key, file.size))
             .or_insert((tier, int_tier, Vec::new()));
         // All instances of one content in a scan share a tier (identical
         // blake3/size/location). Defense-in-depth for a deletion tool: if data
@@ -5943,7 +5994,7 @@ fn duplicate_cache_path_counts(
     // Unique-content folder rollups: each distinct content counts ONCE per folder
     // that contains it (union of its instances' ancestors), toward that folder's
     // External and Internal tier buckets and its distinct-content total.
-    for ((scan_id, _blake3, _size), (ext_tier, int_tier, paths)) in &content_groups {
+    for ((scan_id, _content_key, _size), (ext_tier, int_tier, paths)) in &content_groups {
         let mut folders = HashSet::<String>::new();
         for path in paths {
             for ancestor in duplicate_cache_ancestor_paths(path) {
@@ -6170,7 +6221,7 @@ fn delete_check_for_selection(
                        (
                            SELECT s2.id
                            FROM scans s2
-                           WHERE s2.location_id = l.id AND s2.status = 'complete' AND s2.hash_policy != 'light'
+                           WHERE s2.location_id = l.id AND s2.status = 'complete'
                            ORDER BY s2.started_at DESC
                            LIMIT 1
                        )
@@ -7036,6 +7087,66 @@ mod tests {
     }
 
     #[test]
+    fn sparse_hash_scans_participate_in_matching_per_file() {
+        // The MusicBox regression: a sparse-policy scan must still get backup
+        // markers. Sparse files carry no exact hash (blake3 '') but match via
+        // blake3_light -> sparse tier; and they must never be keyed together
+        // as "exact copies" through the empty string.
+        let f = |scan: &str, loc: &str, path: &str, blake3: &str, light: &str, size: u64| DuplicateCacheFile {
+            scan_id: scan.to_string(),
+            location_id: loc.to_string(),
+            path: path.to_string(),
+            blake3: blake3.to_string(),
+            blake3_light: light.to_string(),
+            size,
+        };
+        let files = vec![
+            // Full scan of locA.
+            f("full", "locA", "music/song.flac", "HASH_SONG", "LIGHT_SONG", 100),
+            f("full", "locA", "music/other.flac", "HASH_OTHER", "LIGHT_OTHER", 100),
+            // Sparse scan of locB: same song content, sparse-only hashes.
+            f("sparse", "locB", "box/song.flac", "", "LIGHT_SONG", 100),
+            // Sparse file with no counterpart anywhere.
+            f("sparse", "locB", "box/lonely.flac", "", "LIGHT_LONELY", 100),
+            // Second same-size sparse file: must NOT count as an exact copy of
+            // the others despite sharing the empty blake3 and the size.
+            f("sparse", "locB", "box/also100.flac", "", "LIGHT_ALSO", 100),
+        ];
+        let counts = duplicate_cache_path_counts(&files);
+        let get = |scan: &str, path: &str| counts.get(&(scan.to_string(), path.to_string())).unwrap();
+
+        // Sparse file with a light match on another location -> sparse (warn) tier.
+        let song_sparse = get("sparse", "box/song.flac");
+        assert_eq!(
+            (song_sparse.safe_file_count, song_sparse.warn_file_count, song_sparse.unsafe_file_count),
+            (0, 1, 0),
+            "sparse-hash match on another location is the sparse tier"
+        );
+        // No fabricated exact copies through the empty hash.
+        assert_eq!((song_sparse.copies_here, song_sparse.copies_away), (0, 0));
+
+        // Sparse files without any match stay unsafe — not merged by size.
+        let lonely = get("sparse", "box/lonely.flac");
+        assert_eq!(
+            (lonely.safe_file_count, lonely.warn_file_count, lonely.unsafe_file_count),
+            (0, 0, 1)
+        );
+
+        // The full-scan side sees the sparse copy as sparse-tier evidence too.
+        let song_full = get("full", "music/song.flac");
+        assert_eq!(
+            (song_full.safe_file_count, song_full.warn_file_count, song_full.unsafe_file_count),
+            (0, 1, 0),
+            "full-hashed file with only a sparse counterpart elsewhere is sparse tier"
+        );
+
+        // Folder rollup: three DISTINCT sparse contents (light-keyed), not one.
+        let box_dir = get("sparse", "box");
+        assert_eq!(box_dir.distinct_count, 3, "sparse contents are keyed by light hash, not lumped by ''");
+        assert_eq!((box_dir.safe_file_count, box_dir.warn_file_count, box_dir.unsafe_file_count), (0, 1, 2));
+    }
+
+    #[test]
     fn duplicate_cache_path_counts_classifies_backup_safety() {
         let f = |scan: &str, loc: &str, path: &str, blake3: &str, light: &str, size: u64| DuplicateCacheFile {
             scan_id: scan.to_string(),
@@ -7647,7 +7758,7 @@ mod tests {
                 r#"SELECT (
                     SELECT s2.id FROM scans s2
                     WHERE s2.location_id = l.id AND s2.status = 'complete'
-                      AND s2.hash_policy != 'light'
+                     
                     ORDER BY s2.started_at DESC LIMIT 1
                 ) FROM locations l WHERE l.id = 'loc-1'"#,
                 [],

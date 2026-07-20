@@ -37,7 +37,7 @@ const fileColumns = [
   ['file_count', 'Files'],
   ['distinct_count', 'Unique'],
   ['blake3', 'Hash Full'],
-  ['blake3_light', 'Hash Light'],
+  ['blake3_light', 'Hash Sparse'],
   ['ctime', 'CTime'],
   ['mtime', 'Modified'],
   ['mode', 'Mode'],
@@ -1206,7 +1206,7 @@ export default function App() {
       setMessage(`Cannot scan ${location.name || slug}: its path is disconnected or missing. Reconnect the drive or edit the location.`);
       return;
     }
-    setScanStartForm({ slug, offset: '/', hash_policy: 'full', hash_workers: '', metadata_workers: '' });
+    setScanStartForm({ slug, offset: '/', hash_policy: 'full', hash_workers: '', metadata_workers: '', sparse_full_below_mib: '' });
   }
 
   // Worker-count inputs: blank/invalid means "use the default".
@@ -1223,7 +1223,11 @@ export default function App() {
       offset: (form.offset || '/').trim() || '/',
       hash_policy: form.hash_policy || 'full',
       hash_workers: parseWorkerCount(form.hash_workers),
-      metadata_workers: parseWorkerCount(form.metadata_workers)
+      metadata_workers: parseWorkerCount(form.metadata_workers),
+      sparse_full_below: (() => {
+        const mib = Number.parseInt(String(form.sparse_full_below_mib ?? '').trim(), 10);
+        return Number.isFinite(mib) && mib >= 1 ? mib * 1024 * 1024 : undefined;
+      })()
     });
   }
 
@@ -1237,7 +1241,8 @@ export default function App() {
         offset,
         hash_policy: options.hash_policy || 'full',
         ...(options.hash_workers ? { hash_workers: options.hash_workers } : {}),
-        ...(options.metadata_workers ? { metadata_workers: options.metadata_workers } : {})
+        ...(options.metadata_workers ? { metadata_workers: options.metadata_workers } : {}),
+        ...(options.sparse_full_below ? { sparse_full_below: options.sparse_full_below } : {})
       });
       const location = locationBySlug(slug);
       setActiveTab('locations');

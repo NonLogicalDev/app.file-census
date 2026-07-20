@@ -49,7 +49,7 @@ function kindRank(entry) {
   return 2;
 }
 
-// Delete Check status: 'unsafe' (no copy anywhere), 'warn' (light-hash match
+// Delete Check status: 'unsafe' (no copy anywhere), 'warn' (sparse-hash match
 // only — probably the same file but unproven), 'safe' (exact full-hash copy
 // elsewhere). Ranked riskiest-first for sorting.
 function deleteCheckRank(status) {
@@ -101,8 +101,8 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
     }
     if (status === 'warn') {
       return (
-        <span className={badgeAmber} title="Only a light-hash (same size) match survives the deletion — probably the same content, not proven.">
-          <Icon name="warning" className="h-3 w-3" /> Similar survives
+        <span className={badgeAmber} title="Only a sparse-hash (same size) match survives the deletion — probably the same content, not proven.">
+          <Icon name="warning" className="h-3 w-3" /> Sparse survives
         </span>
       );
     }
@@ -123,7 +123,7 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
 
   if (scope === 'internal') {
     // Unified pill language: "N dup" (exact same-disk duplicates), "N dup
-    // (light)" (light-hash matches only), "Unique" (no duplicate on this disk).
+    // (sparse)" (sparse-hash matches only), "Unique" (no duplicate on this disk).
     if (status === 'safe') {
       return wrap(
         <span className={badgeGreen} title={`Another exact copy of this content exists on this same disk. ${copiesTitle}`}>
@@ -134,8 +134,8 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
     }
     if (status === 'warn') {
       return wrap(
-        <span className={badgeAmber} title={`A light-hash (same size) match exists on this disk — probably a duplicate, not proven by full hash. ${copiesTitle}`}>
-          <Icon name="warning" className="h-3 w-3" /> {compactCount(Math.max(here, 1))} dup (light)
+        <span className={badgeAmber} title={`A sparse-hash (same size) match exists on this disk — probably a duplicate, not proven by full hash. ${copiesTitle}`}>
+          <Icon name="warning" className="h-3 w-3" /> {compactCount(Math.max(here, 1))} dup (sparse)
         </span>,
         null
       );
@@ -161,7 +161,7 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
   }
   if (status === 'warn') {
     return wrap(
-      <span className={badgeAmber} title="Only a light-hash (same size) match on another location — probably the same file, but not proven by full hash."><Icon name="warning" className="h-3 w-3" /> Partial</span>,
+      <span className={badgeAmber} title="Only a sparse-hash (same size) match on another location — probably the same file, but not proven by full hash."><Icon name="warning" className="h-3 w-3" /> Sparse</span>,
       <CopiesChip count={totalEverywhere} title={copiesTitle} />
     );
   }
@@ -180,7 +180,7 @@ function FolderRollupBadge({ safe = 0, warn = 0, unsafe = 0 }) {
   return (
     <span className="inline-flex flex-wrap items-center gap-1" title="Unique contents in this folder, by backup status">
       {safe > 0 && <span className={`${chip} border-success text-success`}>{safe.toLocaleString()} safe</span>}
-      {warn > 0 && <span className={`${chip} border-warning text-warning`}>{warn.toLocaleString()} partial</span>}
+      {warn > 0 && <span className={`${chip} border-warning text-warning`}>{warn.toLocaleString()} sparse</span>}
       {unsafe > 0 && <span className={`${chip} border-danger text-danger`}>{unsafe.toLocaleString()} unsafe</span>}
     </span>
   );
@@ -844,7 +844,7 @@ function baseColumns(options) {
       cell: ({ row, getValue }) => row.original.kind !== 'dir' ? '' : (getValue() ?? 0).toLocaleString()
     },
     { accessorKey: 'blake3', header: 'Hash Full', size: 126, minSize: 90, meta: { tooltip: 'Full content hash (BLAKE3) — exact identity used for safe backup matching' }, cell: ({ getValue }) => shortHash(getValue()) },
-    { accessorKey: 'blake3_light', header: 'Hash Light', size: 126, minSize: 90, meta: { tooltip: 'Sampled light hash (BLAKE3 over file samples) — used for "partial" likely-duplicate matching' }, cell: ({ getValue }) => shortHash(getValue()) },
+    { accessorKey: 'blake3_light', header: 'Hash Sparse', size: 126, minSize: 90, meta: { tooltip: 'Sampled sparse hash (BLAKE3 over file samples) — used for sparse-tier likely-duplicate matching' }, cell: ({ getValue }) => shortHash(getValue()) },
     { accessorKey: 'ctime', header: 'CTime', size: 168, minSize: 120, cell: ({ getValue }) => formatDate(getValue()) },
     { accessorKey: 'mtime', header: 'Modified', size: 168, minSize: 120, cell: ({ getValue }) => formatDate(getValue()) },
     { accessorKey: 'mode', header: 'Mode', size: 88, minSize: 68 },

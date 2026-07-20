@@ -545,6 +545,9 @@ pub struct PreparedScan {
     /// then the built-in auto sizing.
     pub hash_workers: Option<usize>,
     pub metadata_workers: Option<usize>,
+    /// Sparse policy only: files SMALLER than this get full hashing (exact +
+    /// sparse); None = the combined slice size (`sparse_whole_threshold`).
+    pub sparse_full_below: Option<u64>,
 }
 
 impl PreparedScan {
@@ -561,6 +564,22 @@ impl PreparedScan {
             self.metadata_workers = metadata_workers;
         }
         self
+    }
+
+    /// Sets a custom sparse full-hash threshold. Values below the combined
+    /// slice size are rejected: under that size the sampler reads the whole
+    /// file anyway, so refusing the exact hash would only lose information.
+    pub fn with_sparse_full_below(mut self, threshold: Option<u64>) -> Result<Self> {
+        if let Some(threshold) = threshold {
+            let minimum = sparse_whole_threshold();
+            if threshold < minimum {
+                anyhow::bail!(
+                    "sparse full-hash threshold {threshold} is below the combined slice size {minimum};                      use at least {minimum} bytes"
+                );
+            }
+            self.sparse_full_below = Some(threshold);
+        }
+        Ok(self)
     }
 }
 
@@ -725,6 +744,7 @@ pub fn prepare_bootstrap_scan_with_started_at(
         hash_policy: HashPolicy::Full,
         hash_workers: None,
         metadata_workers: None,
+        sparse_full_below: None,
     })
 }
 
@@ -763,6 +783,7 @@ fn prepare_scan_with_start(
         hash_policy: policy,
         hash_workers: None,
         metadata_workers: None,
+        sparse_full_below: None,
     })
 }
 
@@ -782,6 +803,7 @@ pub fn prepare_update_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         hash_policy: HashPolicy::Full,
         hash_workers: None,
         metadata_workers: None,
+        sparse_full_below: None,
     })
 }
 
@@ -831,6 +853,7 @@ pub fn prepare_repair_scan(db: &Database, source_scan_id: &str) -> Result<Prepar
         hash_policy: HashPolicy::Full,
         hash_workers: None,
         metadata_workers: None,
+        sparse_full_below: None,
     })
 }
 
@@ -970,11 +993,17 @@ pub fn run_prepared_scan(
         "FILE_CENSUS_HASH_WORKERS",
         hash_worker_count(),
     );
+    let sparse_full_below = prepared.sparse_full_below.unwrap_or_else(sparse_whole_threshold);
+    if matches!(prepared.hash_policy, HashPolicy::Light) {
+        // Record the effective rule on the scan row for later inspection.
+        let _ = db.set_scan_sparse_full_below(&prepared.scan_id, sparse_full_below);
+    }
     tracing::info!(
         target: "file_census::scanner",
         scan_id = %prepared.scan_id,
         metadata_workers,
         hash_workers,
+        sparse_full_below,
         "scan worker pools sized"
     );
 
@@ -1166,6 +1195,7 @@ pub fn run_prepared_scan(
 
         thread::scope(|scope| {
             let hash_policy = prepared.hash_policy;
+            let hash_sparse_full_below = sparse_full_below;
             for _ in 0..hash_workers {
                 let hash_rx = Arc::clone(&hash_rx);
                 let result_tx = result_tx.clone();
@@ -1173,7 +1203,15 @@ pub fn run_prepared_scan(
                 let scan_id = prepared.scan_id.clone();
                 let scan_root = &canonical_scan_root;
                 scope.spawn(move || {
-                    hash_worker(hash_rx, result_tx, progress, scan_id, scan_root, hash_policy);
+                    hash_worker(
+                        hash_rx,
+                        result_tx,
+                        progress,
+                        scan_id,
+                        scan_root,
+                        hash_policy,
+                        hash_sparse_full_below,
+                    );
                 });
             }
             drop(result_tx);
@@ -1526,6 +1564,7 @@ fn hash_worker(
     scan_id: String,
     canonical_scan_root: &Path,
     hash_policy: HashPolicy,
+    sparse_full_below: u64,
 ) {
     loop {
         let job = {
@@ -1558,7 +1597,16 @@ fn hash_worker(
             if let Some(hashed) = reusable_hashed_file(job.reusable.as_ref(), &metadata) {
                 return Ok(hashed);
             }
-            hash_open_file(file, metadata, hash_policy)
+            // Size-dependent sparse policy: below the threshold, full hashing
+            // costs no more than sampling, so keep the exact hashes too.
+            let effective_policy = if matches!(hash_policy, HashPolicy::Light)
+                && metadata.size < sparse_full_below
+            {
+                HashPolicy::Full
+            } else {
+                hash_policy
+            };
+            hash_open_file(file, metadata, effective_policy)
         })();
 
         match hashed {
@@ -1998,7 +2046,12 @@ pub enum HashPolicy {
 impl HashPolicy {
     pub fn from_label(label: Option<&str>) -> Self {
         match label {
-            Some(value) if value.eq_ignore_ascii_case("light") => HashPolicy::Light,
+            Some(value)
+                if value.eq_ignore_ascii_case("light")
+                    || value.eq_ignore_ascii_case("sparse") =>
+            {
+                HashPolicy::Light
+            }
             _ => HashPolicy::Full,
         }
     }
@@ -2203,9 +2256,7 @@ fn light_hash_slice_width(index: usize, count: usize) -> u64 {
 /// start offsets.
 fn light_hash_slice_plan(size: u64) -> Vec<(u64, u64)> {
     let count = LIGHT_HASH_SLICE_COUNT;
-    let whole_threshold = LIGHT_HASH_HEAD_SLICE_WIDTH as u64
-        + LIGHT_HASH_TAIL_SLICE_WIDTH as u64
-        + (count as u64 - 2) * LIGHT_HASH_SLICE_WIDTH as u64;
+    let whole_threshold = sparse_whole_threshold();
     if size <= whole_threshold {
         return vec![(0, size)];
     }
@@ -2227,6 +2278,16 @@ fn light_hash_slice_plan(size: u64) -> Vec<(u64, u64)> {
 // Compile-time guard: the default configuration honors the "at least 5 slices"
 // requirement regardless of the env knobs.
 const _: () = assert!(LIGHT_HASH_SLICE_COUNT >= 5);
+
+/// Combined size of every sparse-hash slice (head + tail + interior). Files at
+/// or below this size are read whole by the sampler, so full hashing costs no
+/// more — it is both the whole-file sampling cutoff and the minimum legal
+/// `sparse_full_below` threshold.
+pub fn sparse_whole_threshold() -> u64 {
+    LIGHT_HASH_HEAD_SLICE_WIDTH as u64
+        + LIGHT_HASH_TAIL_SLICE_WIDTH as u64
+        + (LIGHT_HASH_SLICE_COUNT as u64 - 2) * LIGHT_HASH_SLICE_WIDTH as u64
+}
 
 /// Computes `blake3_light` over an in-memory buffer (used for tests and small
 /// inputs). Hashes the sampled ranges in order.
@@ -2253,14 +2314,15 @@ fn hash_open_file(
     let mut reader = BufReader::new(file);
 
     if matches!(policy, HashPolicy::Light) {
-        // Sampled-only: read just the light-hash slices, never the whole file.
-        // `blake3`/`sha256` carry the light value so rows are valid, but the
-        // scan is flagged `light` and excluded from exact duplicate detection.
+        // Sampled-only: read just the sparse-hash slices, never the whole
+        // file. Exact-hash columns stay EMPTY — a sparse match is sparse-tier
+        // evidence only, never exact. (Files below the sparse_full_below
+        // threshold are escalated to Full before reaching this branch.)
         let blake3_light = blake3_light_from_reader(&mut reader, metadata.size)?;
         return Ok(HashedFile {
             size: metadata.size,
-            blake3: blake3_light.clone(),
-            sha256: blake3_light.clone(),
+            blake3: String::new(),
+            sha256: String::new(),
             blake3_light,
             ctime: metadata.ctime,
             mtime: metadata.mtime,
@@ -3033,6 +3095,7 @@ mod tests {
             hash_policy: HashPolicy::Full,
             hash_workers: None,
             metadata_workers: None,
+            sparse_full_below: None,
         };
         progress.start(&prepared);
         progress.finish(&ScanSummary {
@@ -3374,6 +3437,7 @@ mod tests {
             hash_policy: HashPolicy::Full,
             hash_workers: None,
             metadata_workers: None,
+            sparse_full_below: None,
         });
         (progress, scan_id)
     }

@@ -221,6 +221,7 @@ impl AppCore {
                         params.hash_policy,
                         params.hash_workers,
                         params.metadata_workers,
+                        params.sparse_full_below,
                     )
                     .await?,
                 )?)
@@ -532,10 +533,12 @@ impl AppCore {
         hash_policy: Option<String>,
         hash_workers: Option<usize>,
         metadata_workers: Option<usize>,
+        sparse_full_below: Option<u64>,
     ) -> Result<ScanStartedResponse<'static>> {
         let policy = scanner::HashPolicy::from_label(hash_policy.as_deref());
         let prepared = scanner::prepare_scan_with_policy(&self.db, &slug, &offset, policy)?
-            .with_workers(hash_workers, metadata_workers);
+            .with_workers(hash_workers, metadata_workers)
+            .with_sparse_full_below(sparse_full_below)?;
         self.run_prepared_scan(prepared, None).await
     }
 
@@ -895,6 +898,9 @@ struct StartScanParams {
     hash_workers: Option<usize>,
     #[serde(default)]
     metadata_workers: Option<usize>,
+    /// Sparse policy: full-hash files smaller than this many bytes.
+    #[serde(default)]
+    sparse_full_below: Option<u64>,
 }
 #[derive(Deserialize)]
 struct ScanIdParams {
