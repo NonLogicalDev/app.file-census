@@ -72,17 +72,6 @@ function compactCount(n) {
   return `${(n / 1_000_000).toFixed(1)}M`.replace('.0M', 'M');
 }
 
-// Inline "·N copies" count (N = total copies of this content), truncation-safe.
-// Matches the "·N off-disk" style; the "(pill) ×N" chip form is retired.
-function CopiesChip({ count, title }) {
-  if (count <= 1) return null;
-  return (
-    <span className="ml-1 shrink-0 text-[10px] text-muted tabular-nums" title={title}>
-      ·{compactCount(count)} copies
-    </span>
-  );
-}
-
 // File Backup cell. External scope: is this content backed up on ANOTHER disk?
 // Internal scope: is there another copy of it on THIS disk? In Delete Check
 // mode (`dcMode`) the status is the SURVIVAL verdict: would a copy survive
@@ -114,61 +103,62 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
     );
   }
   const totalEverywhere = 1 + here + away;
-  const wrap = (chip, extra) => (
-    <span className="inline-flex min-w-0 max-w-full items-center overflow-hidden">
-      {chip}
-      {extra}
-    </span>
-  );
   const copiesTitle = `${totalEverywhere.toLocaleString()} copies of this content exist (${here.toLocaleString()} more on this disk, ${away.toLocaleString()} on other locations)`;
+  // Every count lives INSIDE the pill (unified language: no separate "×N" /
+  // "·N copies" chip beside the pill). "·N" suffix = total copies of the
+  // content in scope; omitted when it's the only copy.
+  const suffix = (count) => (count > 1 ? ` · ${compactCount(count)}` : '');
 
   if (scope === 'internal') {
-    // Unified pill language: "N dup" (exact same-disk duplicates), "N dup
-    // (sparse)" (sparse-hash matches only), "Unique" (no duplicate on this disk).
+    // "N dup" (exact same-disk duplicates), "N dup (sparse)" (sparse-hash
+    // matches only), "Unique" (no duplicate on this disk).
     if (status === 'safe') {
-      return wrap(
+      return (
         <span className={badgeGreen} title={`Another exact copy of this content exists on this same disk. ${copiesTitle}`}>
           <Icon name="copy" className="h-3 w-3" /> {compactCount(Math.max(here, 1))} dup
-        </span>,
-        null
+        </span>
       );
     }
     if (status === 'warn') {
-      return wrap(
+      return (
         <span className={badgeAmber} title={`A sparse-hash (same size) match exists on this disk — probably a duplicate, not proven by full hash. ${copiesTitle}`}>
           <Icon name="warning" className="h-3 w-3" /> {compactCount(Math.max(here, 1))} dup (sparse)
-        </span>,
-        null
+        </span>
       );
     }
-    return wrap(
-      <span className={badgeRed} title="No duplicate of this content on this disk."><Icon name="warning" className="h-3 w-3" /> Unique</span>,
-      away > 0 ? <span className="ml-1 shrink-0 text-[10px] text-muted tabular-nums" title={`${away} copies on other locations`}>·{compactCount(away)} off-disk</span> : null
+    return (
+      <span className={badgeRed} title={away > 0 ? `No duplicate of this content on this disk. ${away} on other locations.` : 'No duplicate of this content on this disk.'}>
+        <Icon name="warning" className="h-3 w-3" /> Unique{away > 0 ? ` · ${compactCount(away)} off-disk` : ''}
+      </span>
     );
   }
   if (status === 'unsafe') {
     // External: no copy on another location. If there are same-disk copies, say
     // so rather than "unique" (deleting one still leaves others on this disk).
     if (here > 0) {
-      return wrap(
-        <span className={badgeRed} title="No copy on another location — duplicated on this disk only."><Icon name="warning" className="h-3 w-3" /> On-disk only</span>,
-        <CopiesChip count={1 + here} title={copiesTitle} />
+      return (
+        <span className={badgeRed} title={`No copy on another location — duplicated on this disk only. ${copiesTitle}`}>
+          <Icon name="warning" className="h-3 w-3" /> On-disk only{suffix(1 + here)}
+        </span>
       );
     }
-    return wrap(
-      <span className={badgeRed} title="The only copy anywhere in scope. Deleting it loses the content."><Icon name="warning" className="h-3 w-3" /> Unique</span>,
-      null
+    return (
+      <span className={badgeRed} title="The only copy anywhere in scope. Deleting it loses the content.">
+        <Icon name="warning" className="h-3 w-3" /> Unique
+      </span>
     );
   }
   if (status === 'warn') {
-    return wrap(
-      <span className={badgeAmber} title="Only a sparse-hash (same size) match on another location — probably the same file, but not proven by full hash."><Icon name="warning" className="h-3 w-3" /> Sparse</span>,
-      <CopiesChip count={totalEverywhere} title={copiesTitle} />
+    return (
+      <span className={badgeAmber} title={`Only a sparse-hash (same size) match on another location — probably the same file, but not proven by full hash. ${copiesTitle}`}>
+        <Icon name="warning" className="h-3 w-3" /> Sparse{suffix(totalEverywhere)}
+      </span>
     );
   }
-  return wrap(
-    <span className={badgeGreen} title="An exact full-hash copy exists on another location."><Icon name="check" className="h-3 w-3" /> Safe</span>,
-    <CopiesChip count={totalEverywhere} title={copiesTitle} />
+  return (
+    <span className={badgeGreen} title={`An exact full-hash copy exists on another location. ${copiesTitle}`}>
+      <Icon name="check" className="h-3 w-3" /> Safe{suffix(totalEverywhere)}
+    </span>
   );
 }
 
