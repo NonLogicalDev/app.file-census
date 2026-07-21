@@ -2553,6 +2553,10 @@ mod tests {
                 location_or_source: "legacy".to_string(),
                 volume_slug: None,
                 offset: PathBuf::from("/"),
+                hash_workers: None,
+                metadata_workers: None,
+                sparse_full_below: None,
+                exclude: Vec::new(),
             },
             DateTime::parse_from_rfc3339("2026-07-15T12:34:56Z")
                 .unwrap()

@@ -51,10 +51,12 @@ function kindRank(entry) {
 
 // Delete Check status: 'unsafe' (no copy anywhere), 'warn' (sparse-hash match
 // only — probably the same file but unproven), 'safe' (exact full-hash copy
-// elsewhere). Ranked riskiest-first for sorting.
+// elsewhere), 'empty' (0-byte file — no content, so backup/dedup is moot).
+// Ranked riskiest-first for sorting; empties sort last (most benign).
 function deleteCheckRank(status) {
   if (status === 'unsafe') return 0;
   if (status === 'warn') return 1;
+  if (status === 'empty') return 3;
   return 2;
 }
 
@@ -64,6 +66,9 @@ const deleteCheckBadgeBase =
 const badgeRed = `${deleteCheckBadgeBase} border-danger bg-[color:color-mix(in_srgb,var(--danger)_14%,var(--surface))] text-danger`;
 const badgeAmber = `${deleteCheckBadgeBase} border-warning bg-warning-soft text-warning`;
 const badgeGreen = `${deleteCheckBadgeBase} border-success bg-[color:color-mix(in_srgb,var(--success)_12%,var(--surface))] text-success`;
+// Neutral/muted: an empty (0-byte) file carries no content, so it is neither
+// "backed up" nor "at risk" — it stands outside the safe/sparse/unsafe scale.
+const badgeMuted = `${deleteCheckBadgeBase} border-border-subtle text-text-tertiary`;
 
 // Compact large counts so the Backup cell never overflows: 1_500 -> "1.5k".
 function compactCount(n) {
@@ -80,6 +85,16 @@ function compactCount(n) {
 function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external', dcMode = false }) {
   if (!status) {
     return <span className="text-[10px] text-text-tertiary">—</span>;
+  }
+  // Empty (0-byte) files carry no content: every empty file hashes identically,
+  // so treating them as duplicates is meaningless. Show a neutral "Empty" pill
+  // in every scope/mode rather than a safe/unsafe verdict.
+  if (status === 'empty') {
+    return (
+      <span className={badgeMuted} title="Empty (0-byte) file — no content to back up or duplicate. Deleting it loses nothing.">
+        <Icon name="file" className="h-3 w-3" /> Empty
+      </span>
+    );
   }
   if (dcMode) {
     if (status === 'safe') {

@@ -2704,19 +2704,17 @@ impl Database {
             let rows = stmt.query_map(
                 rusqlite::params_from_iter(page_params.iter()),
                 |row| {
-                    let tier_word = |safe: i64, warn: i64, unsafe_: i64| {
-                        if unsafe_ > 0 {
-                            "unsafe"
-                        } else if warn > 0 {
-                            "warn"
-                        } else if safe > 0 {
-                            "safe"
-                        } else {
-                            ""
-                        }
+                    let occ_size = row.get::<_, i64>(2)?.max(0) as u64;
+                    let decode = |safe: i64, warn: i64, unsafe_: i64| {
+                        file_backup_word(
+                            occ_size,
+                            safe.max(0) as u64,
+                            warn.max(0) as u64,
+                            unsafe_.max(0) as u64,
+                        )
                     };
-                    let backup_status = tier_word(row.get(8)?, row.get(9)?, row.get(10)?);
-                    let internal_status = tier_word(row.get(13)?, row.get(14)?, row.get(15)?);
+                    let backup_status = decode(row.get(8)?, row.get(9)?, row.get(10)?);
+                    let internal_status = decode(row.get(13)?, row.get(14)?, row.get(15)?);
                     Ok(TreeEntry {
                         name: row.get(1)?,
                         path: row.get(0)?,
@@ -3164,7 +3162,12 @@ impl Database {
         // Classify each staged file against the survivors and roll up per dir.
         let mut rollups = HashMap::<String, (u64, u64, u64)>::new();
         for file in &staged {
-            let tier = classify_against_remain(
+            // A 0-byte file holds no content, so deleting it can never lose
+            // anything — always safe, regardless of what survives.
+            let tier = if file.size == 0 {
+                2
+            } else {
+                classify_against_remain(
                 file.copies_here,
                 file.copies_away,
                 inside_exact
@@ -3186,7 +3189,8 @@ impl Database {
                     ))
                 },
                 file.ext_light,
-            );
+                )
+            };
             let mut bump = |path: String| {
                 let slot = rollups.entry(path).or_default();
                 match tier {
@@ -4884,6 +4888,12 @@ fn apply_delete_check_classification(
     }
     for &i in &files {
         let entry = &mut entries[i];
+        // Empty (0-byte) files hold no content: deleting one loses nothing, so
+        // there is no survival verdict to compute. Leave the neutral `empty`
+        // status the browse layer already assigned.
+        if entry.size == 0 {
+            continue;
+        }
         let blake3 = entry.blake3.clone().unwrap_or_default();
         let light = entry.blake3_light.clone().unwrap_or_default();
         let ext_light = entry.backup_status == "warn";
@@ -4955,17 +4965,6 @@ fn scan_tree_immediate_children_from_cache(
         ORDER BY dc.path
         "#,
     )?;
-    let tier_word = |safe: u64, warn: u64, unsafe_: u64| {
-        if unsafe_ > 0 {
-            "unsafe"
-        } else if warn > 0 {
-            "warn"
-        } else if safe > 0 {
-            "safe"
-        } else {
-            ""
-        }
-    };
     let rows = stmt.query_map(params![run_id, scan_id, parent_path], |row| {
         let path: String = row.get(0)?;
         let kind: String = row.get(1)?;
@@ -5018,11 +5017,13 @@ fn scan_tree_immediate_children_from_cache(
                 sparse_count: sparse,
             })
         } else {
+            let file_size =
+                row.get::<_, Option<i64>>(17)?.unwrap_or(total_size as i64).max(0) as u64;
             Ok(TreeEntry {
                 path,
                 name,
                 kind: "file".to_string(),
-                size: row.get::<_, Option<i64>>(17)?.unwrap_or(total_size as i64).max(0) as u64,
+                size: file_size,
                 file_count: 1,
                 blake3: row.get(12)?,
                 blake3_light: row.get(22)?,
@@ -5034,11 +5035,11 @@ fn scan_tree_immediate_children_from_cache(
                 original_file_count: orig,
                 same_scan_duplicate_file_count: same_dup,
                 distinct_count: 1,
-                backup_status: tier_word(safe, warn, unsafe_).to_string(),
+                backup_status: file_backup_word(file_size, safe, warn, unsafe_).to_string(),
                 safe_count: 0,
                 unsafe_count: 0,
                 warn_count: 0,
-                internal_status: tier_word(int_safe, int_warn, int_unsafe).to_string(),
+                internal_status: file_backup_word(file_size, int_safe, int_warn, int_unsafe).to_string(),
                 int_safe_count: 0,
                 int_warn_count: 0,
                 int_unsafe_count: 0,
@@ -5178,20 +5179,21 @@ fn scan_tree_immediate_children_aggregate(
             let file_safe = row.get::<_, Option<i64>>(19)?.unwrap_or(0);
             let file_warn = row.get::<_, Option<i64>>(20)?.unwrap_or(0);
             let file_unsafe = row.get::<_, Option<i64>>(21)?.unwrap_or(0);
-            let backup_status = if file_unsafe > 0 {
-                "unsafe"
-            } else if file_warn > 0 {
-                "warn"
-            } else if file_safe > 0 {
-                "safe"
-            } else {
-                ""
-            };
+            let file_size = row.get::<_, Option<i64>>(11)?.unwrap_or(0).max(0) as u64;
+            let backup_status = file_backup_word(
+                file_size,
+                file_safe.max(0) as u64,
+                file_warn.max(0) as u64,
+                file_unsafe.max(0) as u64,
+            );
+            // This path computes no internal tiers, so a non-empty file has no
+            // internal status yet ("") — but an empty file is `empty` regardless.
+            let internal_status = file_backup_word(file_size, 0, 0, 0);
             Ok(TreeEntry {
                 path: file_path.unwrap_or_else(|| format!("{normalized_prefix}{child}")),
                 name: child,
                 kind: "file".to_string(),
-                size: row.get::<_, Option<i64>>(11)?.unwrap_or(0).max(0) as u64,
+                size: file_size,
                 file_count: 1,
                 blake3: row.get(12)?,
                 blake3_light: None,
@@ -5207,7 +5209,7 @@ fn scan_tree_immediate_children_aggregate(
                 safe_count: 0,
                 unsafe_count: 0,
                 warn_count: 0,
-                internal_status: String::new(),
+                internal_status: internal_status.to_string(),
                 int_safe_count: 0,
                 int_warn_count: 0,
                 int_unsafe_count: 0,
@@ -5314,17 +5316,6 @@ fn build_tree_page_entries(
 ) -> Result<Vec<TreeEntry>> {
     let mut directories = BTreeMap::<String, TreeEntry>::new();
     let mut files = BTreeMap::<String, TreeEntry>::new();
-    let tier_word = |safe: u64, warn: u64, unsafe_: u64| {
-        if unsafe_ > 0 {
-            "unsafe"
-        } else if warn > 0 {
-            "warn"
-        } else if safe > 0 {
-            "safe"
-        } else {
-            ""
-        }
-    };
 
     for row in rows {
         let matches = filter
@@ -5457,11 +5448,11 @@ fn build_tree_page_entries(
                     original_file_count,
                     same_scan_duplicate_file_count,
                     distinct_count: 1,
-                    backup_status: tier_word(row.safe, row.warn, row.unsafe_).to_string(),
+                    backup_status: file_backup_word(row.file.size, row.safe, row.warn, row.unsafe_).to_string(),
                     safe_count: 0,
                     unsafe_count: 0,
                     warn_count: 0,
-                    internal_status: tier_word(row.int_safe, row.int_warn, row.int_unsafe).to_string(),
+                    internal_status: file_backup_word(row.file.size, row.int_safe, row.int_warn, row.int_unsafe).to_string(),
                     int_safe_count: 0,
                     int_warn_count: 0,
                     int_unsafe_count: 0,
@@ -6006,6 +5997,12 @@ fn duplicate_cache_path_counts(
     // different size is a false positive and is never keyed together here.
     let mut light_counts_by_location = HashMap::<(String, u64), HashMap<String, u64>>::new();
     for file in files {
+        // Empty (0-byte) files all share the one zero-length hash; counting them
+        // here would make every empty file an "exact copy" of every other. They
+        // carry no content, so they get their own `empty` tier below instead.
+        if file.size == 0 {
+            continue;
+        }
         // Sparse-hashed files carry no exact hash; keying '' would make every
         // same-size sparse file an "exact copy" of the others.
         if !file.blake3.is_empty() {
@@ -6093,6 +6090,30 @@ fn duplicate_cache_path_counts(
     let mut content_groups = HashMap::<(String, String, u64), (u8, u8, Vec<String>)>::new();
 
     for file in files {
+        // Empty (0-byte) files stand outside the safe/sparse/unsafe scale: no
+        // content means "backed up" and "duplicate" are both meaningless. Record
+        // the leaf as an untiered file (no tier one-hots, no copies) and roll
+        // only its file_count/size into ancestors — never into a folder's
+        // tier/distinct buckets. The browse layer renders these as `empty`.
+        if file.size == 0 {
+            let file_row = path_counts
+                .entry((file.scan_id.clone(), file.path.clone()))
+                .or_insert_with(|| DuplicatePathCounts::empty("file"));
+            file_row.kind = "file".to_string();
+            file_row.file_count = 1;
+            file_row.total_size = 0;
+            file_row.distinct_count = 1;
+            for ancestor in duplicate_cache_ancestor_paths(&file.path) {
+                let dir_row = path_counts
+                    .entry((file.scan_id.clone(), ancestor))
+                    .or_insert_with(|| DuplicatePathCounts::empty("dir"));
+                if dir_row.kind != "file" {
+                    dir_row.kind = "dir".to_string();
+                }
+                dir_row.file_count = dir_row.file_count.saturating_add(1);
+            }
+            continue;
+        }
         let hash_key = (file.blake3.clone(), file.size);
         let per_location = exact_counts_by_location.get(&hash_key);
         let here = per_location
@@ -6194,6 +6215,26 @@ fn duplicate_cache_path_counts(
         }
     }
     path_counts
+}
+
+/// Per-file backup word for the browse view. A 0-byte file has no content, so
+/// every empty file hashes identically and "duplicate"/"backed up" is
+/// meaningless — it gets its own neutral `empty` tier rather than safe/warn/
+/// unsafe. Otherwise this mirrors the `tier_word` one-hot decode (2/1/0),
+/// returning "" only for an untiered (cache-not-ready) non-empty file.
+fn file_backup_word(size: u64, safe: u64, warn: u64, unsafe_: u64) -> &'static str {
+    if size == 0 {
+        return "empty";
+    }
+    if unsafe_ > 0 {
+        "unsafe"
+    } else if warn > 0 {
+        "warn"
+    } else if safe > 0 {
+        "safe"
+    } else {
+        ""
+    }
 }
 
 /// One-hot (safe, warn, unsafe) counts from a tier: 2=safe, 1=partial, else unsafe.
@@ -7414,6 +7455,58 @@ mod tests {
         assert_eq!((dir.safe_file_count, dir.warn_file_count, dir.unsafe_file_count), (1, 1, 4));
         assert_eq!(dir.distinct_count, 6, "unique (blake3,size) contents in the folder");
         assert_eq!(dir.file_count, 7, "file instances in the folder");
+    }
+
+    #[test]
+    fn empty_files_get_their_own_tier_out_of_folder_backup_rollups() {
+        // Every 0-byte file shares the one zero-length hash, so left in the
+        // normal path they would all read as "safe" duplicates of each other —
+        // meaningless noise. They must instead be untiered (no safe/warn/unsafe
+        // one-hot, no copies) and excluded from a folder's tier/distinct
+        // buckets, while still counting toward the folder's file_count.
+        let f = |scan: &str, loc: &str, path: &str, blake3: &str, light: &str, size: u64| DuplicateCacheFile {
+            scan_id: scan.to_string(),
+            location_id: loc.to_string(),
+            path: path.to_string(),
+            blake3: blake3.to_string(),
+            blake3_light: light.to_string(),
+            size,
+        };
+        // Two empty files (same zero-length hash) on different locations, plus a
+        // real backed-up file in the same folder.
+        let files = vec![
+            f("s1", "locA", "dir/.gitkeep", "HASH_ZERO", "LIGHT_ZERO", 0),
+            f("s2", "locB", "dir/__init__.py", "HASH_ZERO", "LIGHT_ZERO", 0),
+            f("s1", "locA", "dir/photo.jpg", "HASH_EXACT", "LIGHT_EXACT", 100),
+            f("s2", "locB", "backup/photo.jpg", "HASH_EXACT", "LIGHT_EXACT", 100),
+        ];
+        let counts = duplicate_cache_path_counts(&files);
+        let get = |scan: &str, path: &str| counts.get(&(scan.to_string(), path.to_string())).unwrap();
+
+        // The empty file carries NO tier and NO copies despite the shared hash.
+        let empty = get("s1", "dir/.gitkeep");
+        assert_eq!(
+            (empty.safe_file_count, empty.warn_file_count, empty.unsafe_file_count),
+            (0, 0, 0),
+            "empty files are untiered — never safe/warn/unsafe"
+        );
+        assert_eq!((empty.copies_here, empty.copies_away), (0, 0), "no fabricated copies via the zero hash");
+        assert_eq!(empty.sparse_file_count, 0);
+
+        // The real file is unaffected — still safe (exact copy on locB).
+        let photo = get("s1", "dir/photo.jpg");
+        assert_eq!((photo.safe_file_count, photo.warn_file_count, photo.unsafe_file_count), (1, 0, 0));
+
+        // Folder rollup counts ONLY the real content in its tier buckets and its
+        // distinct total, but still counts the empty as a file instance.
+        let dir = get("s1", "dir");
+        assert_eq!(
+            (dir.safe_file_count, dir.warn_file_count, dir.unsafe_file_count),
+            (1, 0, 0),
+            "empties excluded from folder tier buckets"
+        );
+        assert_eq!(dir.distinct_count, 1, "empties are not distinct content");
+        assert_eq!(dir.file_count, 2, "empty still counts as a file in the folder");
     }
 
     #[test]
