@@ -104,10 +104,8 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
   }
   const totalEverywhere = 1 + here + away;
   const copiesTitle = `${totalEverywhere.toLocaleString()} copies of this content exist (${here.toLocaleString()} more on this disk, ${away.toLocaleString()} on other locations)`;
-  // Every count lives INSIDE the pill (unified language: no separate "×N" /
-  // "·N copies" chip beside the pill). "·N" suffix = total copies of the
-  // content in scope; omitted when it's the only copy.
-  const suffix = (count) => (count > 1 ? ` · ${compactCount(count)}` : '');
+  // Unified pill language: "<NUM> <kind>", number first, count INSIDE the pill
+  // (matches "142K dup" and the folder "20 safe" chips). No separate count chip.
 
   if (scope === 'internal') {
     // "N dup" (exact same-disk duplicates), "N dup (sparse)" (sparse-hash
@@ -138,7 +136,7 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
     if (here > 0) {
       return (
         <span className={badgeRed} title={`No copy on another location — duplicated on this disk only. ${copiesTitle}`}>
-          <Icon name="warning" className="h-3 w-3" /> On-disk only{suffix(1 + here)}
+          <Icon name="warning" className="h-3 w-3" /> {compactCount(1 + here)} on-disk
         </span>
       );
     }
@@ -151,13 +149,13 @@ function DeleteCheckStatusBadge({ status, here = 0, away = 0, scope = 'external'
   if (status === 'warn') {
     return (
       <span className={badgeAmber} title={`Only a sparse-hash (same size) match on another location — probably the same file, but not proven by full hash. ${copiesTitle}`}>
-        <Icon name="warning" className="h-3 w-3" /> Sparse{suffix(totalEverywhere)}
+        <Icon name="warning" className="h-3 w-3" /> {compactCount(totalEverywhere)} sparse
       </span>
     );
   }
   return (
     <span className={badgeGreen} title={`An exact full-hash copy exists on another location. ${copiesTitle}`}>
-      <Icon name="check" className="h-3 w-3" /> Safe{suffix(totalEverywhere)}
+      <Icon name="check" className="h-3 w-3" /> {compactCount(totalEverywhere)} safe
     </span>
   );
 }
